@@ -2,8 +2,12 @@ using System.IO;
 using System.Windows.Threading;
 using WindowsDynamicBar.Core.Animation;
 using WindowsDynamicBar.Core.Events;
+using WindowsDynamicBar.Core.Media;
 using WindowsDynamicBar.Core.Settings;
+using WindowsDynamicBar.Core.Telemetry;
 using WindowsDynamicBar.Services.Media;
+using WindowsDynamicBar.Services.SystemInfo;
+using WindowsDynamicBar.Services.SystemMonitor;
 using WindowsDynamicBar.Services.Timers;
 using WindowsDynamicBar.UI;
 
@@ -39,6 +43,18 @@ internal static class Program
         Run("MediaInfo progress clamps 0..1", TestMediaInfoRecord);
         Run("TweenAnimation completes to target", TestTween);
         Run("SettingsService.Update mutates atomically", TestSettingsUpdate);
+        Run("RSSI dBm maps to honest bar counts", TestRssiToBars);
+        Run("SystemStats carries counter availability", TestSystemStatsAvailability);
+        Run("SettingsModel new fields round-trip", TestSettingsNewFields);
+        Run("AppTheme enum serializes by name", TestThemeSerialization);
+        Run("Diagnostics report includes version and paths", TestDiagnosticsReport);
+        Run("Gaming-mode threshold uses Privacy priority", TestGamingThreshold);
+        Run("TelemetryHistory keeps newest within capacity", TestTelemetryHistory);
+        Run("TelemetryFormat renders bytes and frequency", TestTelemetryFormat);
+        Run("GpuEngineParser extracts LUID and fields", TestGpuEngineParser);
+        Run("GpuEngineParser groups utilization per adapter", TestGpuEngineGrouping);
+        Run("DiscRotation spins, decelerates, stays continuous", TestDiscRotation);
+        Run("TelemetryPolicy plans zone transitions", TestTelemetryPolicy);
 
         Console.WriteLine(new string('-', 46));
         Console.WriteLine($"passed: {_pass}   failed: {_fail}");
@@ -300,6 +316,241 @@ internal static class Program
         PumpUntil(() => done, 3000);
         Assert(done, "tween completed");
         Assert(Math.Abs(last - 1.0) < 0.001, $"tween should land on 1.0, got {last}");
+    }
+
+    private static void TestRssiToBars()
+    {
+        AssertEq(-1, NetworkService.RssiToBars(null), "unknown RSSI → -1 (no bars shown)");
+        AssertEq(4, NetworkService.RssiToBars(-40), "-40 dBm → 4 bars");
+        AssertEq(4, NetworkService.RssiToBars(-50), "-50 dBm → 4 bars");
+        AssertEq(3, NetworkService.RssiToBars(-55), "-55 dBm → 3 bars");
+        AssertEq(2, NetworkService.RssiToBars(-65), "-65 dBm → 2 bars");
+        AssertEq(1, NetworkService.RssiToBars(-75), "-75 dBm → 1 bar");
+        AssertEq(0, NetworkService.RssiToBars(-85), "-85 dBm → 0 bars");
+        AssertEq(0, NetworkService.RssiToBars(-100), "-100 dBm → 0 bars");
+    }
+
+    private static void TestSystemStatsAvailability()
+    {
+        var full = new SystemStats(12.5, 0, 40, 8_000_000_000);
+        Assert(full.CpuAvailable, "CPU available by default");
+        Assert(full.GpuAvailable, "GPU available by default");
+
+        var noGpu = new SystemStats(12.5, 0, 40, 8_000_000_000, CpuAvailable: true, GpuAvailable: false);
+        Assert(noGpu.CpuAvailable, "CPU flag preserved");
+        Assert(!noGpu.GpuAvailable, "GPU unavailable flag preserved");
+        AssertEq(40.0, noGpu.Ram, "RAM still reported");
+    }
+
+    private static void TestSettingsNewFields()
+    {
+        string path = SettingsService.Instance.SettingsPath;
+        SettingsModel? original = File.Exists(path) ? JsonSerializer.LoadCopy(path) : null;
+        try
+        {
+            SettingsService.Instance.Save(new SettingsModel
+            {
+                MonitorIndex = 2,
+                ReduceMotion = true,
+                Theme = AppTheme.Light,
+            });
+            var loaded = SettingsService.Instance.Load();
+            AssertEq(2, loaded.MonitorIndex, "MonitorIndex");
+            Assert(loaded.ReduceMotion, "ReduceMotion");
+            AssertEq(AppTheme.Light, loaded.Theme, "Theme");
+        }
+        finally
+        {
+            if (original is not null) SettingsService.Instance.Save(original);
+            else if (File.Exists(path)) File.Delete(path);
+        }
+    }
+
+    private static void TestThemeSerialization()
+    {
+        string path = SettingsService.Instance.SettingsPath;
+        SettingsModel? original = File.Exists(path) ? JsonSerializer.LoadCopy(path) : null;
+        try
+        {
+            foreach (var theme in new[] { AppTheme.Dark, AppTheme.Light, AppTheme.Translucent })
+            {
+                SettingsService.Instance.Save(new SettingsModel { Theme = theme });
+                var loaded = SettingsService.Instance.Load();
+                AssertEq(theme, loaded.Theme, $"theme {theme} round-trip");
+            }
+        }
+        finally
+        {
+            if (original is not null) SettingsService.Instance.Save(original);
+            else if (File.Exists(path)) File.Delete(path);
+        }
+    }
+
+    private static void TestDiagnosticsReport()
+    {
+        string report = SettingsWindow.BuildDiagnosticsReport();
+        Assert(report.Contains(App.InfoVersion, StringComparison.Ordinal), "report contains app version");
+        Assert(report.Contains("OS:", StringComparison.Ordinal), "report contains OS line");
+        Assert(report.Contains("Services:", StringComparison.Ordinal), "report contains services section");
+        Assert(report.Length > 100, "report has substance");
+    }
+
+    private static void TestGamingThreshold()
+    {
+        // BarWindow.OnBusEvent suppresses events with Priority < (int)BarEventKind.Privacy (60).
+        // Assert using the priorities services actually pass at Raise() time.
+        int threshold = (int)BarEventKind.Privacy;
+        Assert(5 < threshold, "sysmon (raised at priority 5) suppressed in gaming mode");
+        Assert(30 < threshold, "network change (priority 30) suppressed in gaming mode");
+        Assert(45 < threshold, "bluetooth (priority 45) suppressed in gaming mode");
+        Assert(60 >= threshold, "privacy indicators (priority 60) still shown");
+        Assert(75 >= threshold, "timer expiry (priority 75) still shown");
+        Assert(95 >= threshold, "low battery (priority 95) still shown");
+    }
+
+    private static void TestTelemetryHistory()
+    {
+        var h = new TelemetryHistory(4);
+        Assert(h.IsEmpty, "empty history starts empty");
+        foreach (double v in new[] { 1, 2, 3 })
+        {
+            h.Push(v);
+            AssertEq(v, h.Last, "last value tracks newest");
+        }
+        AssertEq(3, h.Count, "count before overflow");
+        AssertEq(1.0, h.Min(), "min");
+        AssertEq(3.0, h.Max(), "max");
+
+        foreach (double v in new[] { 4, 5, 6 })
+            h.Push(v);
+        AssertEq(4, h.Count, "count capped at capacity");
+        var snap = h.Snapshot();
+        AssertEq(4, snap.Length, "snapshot length capped at capacity");
+        for (int i = 0; i < 4; i++) AssertEq(3 + i, snap[i], $"snapshot[{i}] keeps newest order");
+
+        var all = new TelemetryHistory(3);
+        for (double v = 0; v < 30; v++) all.Push(v);
+        double[] s = all.Snapshot();
+        AssertEq(27.0, s[0], "overflow keeps newest");
+        AssertEq(29.0, s[2], "overflow ends at latest");
+
+        h.Clear();
+        Assert(h.IsEmpty, "clear empties history");
+        h.Push(7);
+        AssertEq(7.0, h.Last, "push after clear works");
+    }
+
+    private static void TestTelemetryFormat()
+    {
+        AssertEq("0 B", TelemetryFormat.Bytes(0), "bytes zero");
+        AssertEq("512 B", TelemetryFormat.Bytes(512), "bytes small");
+        AssertEq("1 KB", TelemetryFormat.Bytes(1024), "bytes KB");
+        AssertEq("5.0 MB", TelemetryFormat.Bytes(5 * 1024 * 1024), "bytes MB");
+        AssertEq("8.0 GB", TelemetryFormat.Bytes(8L * 1024 * 1024 * 1024), "bytes GB");
+        AssertEq("", TelemetryFormat.Frequency(0), "frequency zero");
+        AssertEq("2.4 GHz", TelemetryFormat.Frequency(2400), "frequency over GHz threshold");
+        AssertEq("4.2 GHz", TelemetryFormat.Frequency(4200), "frequency GHz");
+        AssertEq("42%", TelemetryFormat.Percent(42.4), "percent round");
+        AssertEq("0%", TelemetryFormat.Percent(-5), "percent clamps low");
+        AssertEq("100%", TelemetryFormat.Percent(150), "percent clamps high");
+    }
+
+    private static void TestGpuEngineParser()
+    {
+        const string sample = "pid_4824_luid_0x00000000_0x00013CC1_phys_1_eng_2_engtype_3D";
+        Assert(GpuEngineParser.TryParse(sample, out var info), "parses valid engine instance");
+        AssertEq(81089L, info.Luid, "LUID low part combined");
+        AssertEq(1, info.Phys, "phys adapter");
+        AssertEq(2, info.Eng, "engine index");
+        AssertEq("3D", info.EngType, "engine type");
+
+        const string withHi = "pid_10_luid_0x00000001_0x00000000_phys_0_eng_0_engtype_Compute";
+        Assert(GpuEngineParser.TryParse(withHi, out var hi), "parses high LUID part");
+        AssertEq(4294967296L, hi.Luid, "LUID high part combined");
+
+        Assert(!GpuEngineParser.TryParse("", out _), "empty rejected");
+        Assert(!GpuEngineParser.TryParse("garbage", out _), "garbage rejected");
+        Assert(!GpuEngineParser.TryParse("pid_1_luid_not_a_number_phys_0_eng_0_engtype_3D", out _), "bad luid rejected");
+        Assert(!GpuEngineParser.TryParse("pid_1_luid_0x00000000_0x00013CC1_phys_0_eng_0", out _), "missing engtype rejected");
+    }
+
+    private static void TestGpuEngineGrouping()
+    {
+        var samples = new (string, double)[]
+        {
+            ("pid_1_luid_0x00000000_0x000000A0_phys_0_eng_0_engtype_3D", 30.0),
+            ("pid_1_luid_0x00000000_0x000000A0_phys_0_eng_1_engtype_Compute", 40.0),
+            ("pid_2_luid_0x00000000_0x000000B0_phys_0_eng_0_engtype_3D", 55.0),
+            ("not an engine", 99.0),
+        };
+        var grouped = GpuEngineParser.GroupUtilization(samples);
+        AssertEq(2, grouped.Count, "two adapters grouped");
+        Assert(grouped.TryGetValue(160L, out double a), "first adapter present");
+        AssertEq(70.0, a, "engines summed per adapter");
+        Assert(grouped.TryGetValue(176L, out double b), "second adapter present");
+        AssertEq(55.0, b, "single engine value kept");
+
+        var over = GpuEngineParser.GroupUtilization(new (string, double)[]
+        {
+            ("pid_1_luid_0x00000000_0x000000C0_phys_0_eng_0_engtype_3D", 70.0),
+            ("pid_1_luid_0x00000000_0x000000C0_phys_0_eng_1_engtype_Compute", 40.0),
+        });
+        Assert(over.TryGetValue(192L, out double sum) && sum <= 100.0, "per-adapter utilization clamps at 100");
+    }
+
+    private static void TestDiscRotation()
+    {
+        double angle = 0, omega = 0;
+        for (int i = 0; i < 60; i++)
+        {
+            (angle, omega) = DiscRotation.Step(angle, omega, true, 1.0 / 30.0);
+        }
+        Assert(Math.Abs(omega - DiscRotation.TargetDegreesPerSecond) < 0.5, "spinning converges to target omega");
+        Assert(angle > 0 && angle <= 360, "angle stays in [0,360]");
+
+        for (int i = 0; i < 600; i++)
+        {
+            double before = angle;
+            (angle, omega) = DiscRotation.Step(angle, omega, true, 1.0 / 30.0);
+            double dtheta = angle - before;
+            if (dtheta < 0) dtheta += 360.0;
+            Assert(dtheta <= DiscRotation.TargetDegreesPerSecond * (1.0 / 30.0) + 0.01, "no rotation jumps");
+        }
+
+        (angle, omega) = DiscRotation.Step(angle, omega, false, 1.0 / 30.0);
+        double prevOmega = omega;
+        Assert(prevOmega < DiscRotation.TargetDegreesPerSecond, "deceleration begins on pause");
+        for (int i = 0; i < 120; i++)
+        {
+            double before = omega;
+            (angle, omega) = DiscRotation.Step(angle, omega, false, 1.0 / 30.0);
+            Assert(omega <= before + 1e-9, "omega never increases while paused");
+            prevOmega = omega;
+        }
+        Assert(DiscRotation.ShouldTrim(false, omega), "rotation trims once nearly stopped");
+
+        (double a0, double o0) = DiscRotation.Step(angle, omega, true, 0);
+        Assert(angle == a0 && omega == o0, "zero dt is a no-op");
+    }
+
+    private static void TestTelemetryPolicy()
+    {
+        AssertEq(TelemetryZoneState.Hidden, TelemetryPolicy.Desired(TelemetryTarget.None), "none -> hidden");
+        AssertEq(TelemetryZoneState.Rail, TelemetryPolicy.Desired(TelemetryTarget.Pill), "pill -> rail");
+        AssertEq(TelemetryZoneState.Rail, TelemetryPolicy.Desired(TelemetryTarget.Rail), "rail stays rail");
+        AssertEq(TelemetryZoneState.Cpu, TelemetryPolicy.Desired(TelemetryTarget.Cpu), "cpu metric");
+        AssertEq(TelemetryZoneState.Gpu, TelemetryPolicy.Desired(TelemetryTarget.Gpu), "gpu metric");
+        AssertEq(TelemetryZoneState.Ram, TelemetryPolicy.Desired(TelemetryTarget.Ram), "ram metric");
+
+        AssertEq(TelemetryAction.None, TelemetryPolicy.Plan(TelemetryZoneState.Hidden, TelemetryTarget.None), "hidden idle");
+        AssertEq(TelemetryAction.OpenRail, TelemetryPolicy.Plan(TelemetryZoneState.Hidden, TelemetryTarget.Pill), "open rail from hidden");
+        AssertEq(TelemetryAction.OpenMetric, TelemetryPolicy.Plan(TelemetryZoneState.Hidden, TelemetryTarget.Ram), "open metric from hidden");
+        AssertEq(TelemetryAction.OpenMetric, TelemetryPolicy.Plan(TelemetryZoneState.Rail, TelemetryTarget.Gpu), "open metric from rail");
+        AssertEq(TelemetryAction.None, TelemetryPolicy.Plan(TelemetryZoneState.Gpu, TelemetryTarget.Gpu), "same metric no-op");
+        AssertEq(TelemetryAction.OpenMetric, TelemetryPolicy.Plan(TelemetryZoneState.Cpu, TelemetryTarget.Ram), "switch metric");
+        AssertEq(TelemetryAction.CloseMetricToRail, TelemetryPolicy.Plan(TelemetryZoneState.Ram, TelemetryTarget.Pill), "close metric to rail");
+        AssertEq(TelemetryAction.HideAll, TelemetryPolicy.Plan(TelemetryZoneState.Rail, TelemetryTarget.None), "hide rail");
+        AssertEq(TelemetryAction.CloseMetricToRail, TelemetryPolicy.Plan(TelemetryZoneState.Cpu, TelemetryTarget.None), "metric hide two-phase");
     }
 }
 

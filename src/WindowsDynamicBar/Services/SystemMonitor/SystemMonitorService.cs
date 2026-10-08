@@ -1,11 +1,11 @@
 using System.Diagnostics;
-using WindowsDynamicBar.Core.Events;
 using WindowsDynamicBar.Core.Logging;
 using WindowsDynamicBar.Core.Settings;
 
 namespace WindowsDynamicBar.Services.SystemMonitor;
 
-public sealed record SystemStats(double Cpu, double Gpu, double Ram, long AvailableBytes);
+public sealed record SystemStats(double Cpu, double Gpu, double Ram, long AvailableBytes,
+    bool CpuAvailable = true, bool GpuAvailable = true);
 
 /// <summary>
 /// Throttled system monitor:
@@ -16,10 +16,11 @@ public sealed record SystemStats(double Cpu, double Gpu, double Ram, long Availa
 ///    Windows Performance Counter infrastructure; gracefully hidden otherwise).
 /// Intervals adapt to PerformanceMode: 2s (Performance), 3s (Balanced), 6s (LowPower).
 /// Monitoring pauses entirely when no one is watching (bar idle + not pinned).
+/// Samples are ambient state, NOT bar events: they update the collapsed pill and the
+/// open card via StatsChanged; they never pop the bar open.
 /// </summary>
 public sealed class SystemMonitorService : IDisposable
 {
-    private readonly EventBus _bus;
     private readonly SettingsService _settings;
     private readonly object _sync = new();
 
@@ -36,11 +37,11 @@ public sealed class SystemMonitorService : IDisposable
     private bool _active;
 
     public event Action<SystemStats>? StatsChanged;
-    public SystemStats Current => new(_cpu, _gpu, _ram, _availPhys);
+    public SystemStats Current => new(_cpu, _gpu, _ram, _availPhys, _cpuAvailable, _gpuAvailable);
+    public bool GpuAvailable => _gpuAvailable;
 
-    public SystemMonitorService(EventBus bus, SettingsService settings)
+    public SystemMonitorService(SettingsService settings)
     {
-        _bus = bus;
         _settings = settings;
         var mi = new MEMORYSTATUSEX { dwLength = (uint)System.Runtime.InteropServices.Marshal.SizeOf<MEMORYSTATUSEX>() };
         if (GlobalMemoryStatusEx(ref mi)) { _totalPhys = (long)mi.ullTotalPhys; }
@@ -135,45 +136,42 @@ public sealed class SystemMonitorService : IDisposable
             _cpu = cpu; _gpu = gpu; _ram = ram; _availPhys = avail;
             if (!changed) return;
 
-            var stats = new SystemStats(cpu, gpu, ram, avail);
+            var stats = new SystemStats(cpu, gpu, ram, avail, _cpuAvailable, _gpuAvailable);
             StatsChanged?.Invoke(stats);
-
-            if (_settings.Current.FeatureSystemMonitor && _settings.Current.SystemMonitorInBar)
-            {
-                _bus.Raise(BarEvent.Create(BarEventKind.SystemMonitor, "System",
-                    $"CPU {cpu:F0}% · GPU {gpu:F0}% · RAM {ram:F0}%",
-                    value: cpu / 100.0, valueText: $"{cpu:F0}%", payload: stats,
-                    priority: 5, displayDuration: TimeSpan.FromSeconds(2)));
-            }
         }
         catch (Exception ex) { Log.Debug("Sysmon sample failed", ("error", ex.Message)); }
     }
 
     private double SumGpuUtilization()
     {
-        // PdhGetFormattedCounterArray returns PDH_FMT_COUNTERVALUE[] (24 bytes each on x64:
-        // CStatus(4) + pad(4) + union(8) where doubleValue sits at offset 8 ... actually
-        // union is RAW (8) then DOUBLE (8) in the 24-byte layout: status(4)+pad(4)+raw(8)+double(8)).
         try
         {
             uint bufferSize = 0, itemCount = 0;
             int status = PdhGetFormattedCounterArrayW(_gpuCounter, 0x00000200 /*PDH_FMT_DOUBLE*/,
                 ref bufferSize, ref itemCount, IntPtr.Zero);
-            if (status != 0x0000124 /*PDH_MORE_DATA*/ || itemCount == 0) return _gpu;
+            if (status != unchecked((int)0x800007D2) /*PDH_MORE_DATA*/ || itemCount == 0) return _gpu;
             IntPtr pBuf = System.Runtime.InteropServices.Marshal.AllocHGlobal((int)bufferSize);
             try
             {
                 status = PdhGetFormattedCounterArrayW(_gpuCounter, 0x00000200,
                     ref bufferSize, ref itemCount, pBuf);
                 if (status != 0) return _gpu;
-                double sum = 0;
+                var samples = new List<(string Instance, double Value)>((int)itemCount);
                 int elemSize = 24;
                 for (int i = 0; i < itemCount; i++)
                 {
+                    IntPtr szName = System.Runtime.InteropServices.Marshal.ReadIntPtr(pBuf, i * elemSize);
+                    string? inst = szName != IntPtr.Zero ? System.Runtime.InteropServices.Marshal.PtrToStringUni(szName) : null;
                     long bits = System.Runtime.InteropServices.Marshal.ReadInt64(pBuf, i * elemSize + 16);
-                    sum += BitConverter.Int64BitsToDouble(bits);
+                    double val = BitConverter.Int64BitsToDouble(bits);
+                    if (!string.IsNullOrEmpty(inst) && val > 0)
+                    {
+                        samples.Add((inst, Math.Clamp(val, 0, 100)));
+                    }
                 }
-                return Math.Min(100, Math.Round(sum, 1));
+                var grouped = GpuEngineParser.GroupUtilization(samples);
+                double max = grouped.Count > 0 ? grouped.Values.Max() : 0;
+                return Math.Min(100, Math.Round(max, 1));
             }
             finally { System.Runtime.InteropServices.Marshal.FreeHGlobal(pBuf); }
         }

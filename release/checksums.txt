@@ -1,0 +1,2 @@
+1A4C796AA06C7C3D1C9A5977C6D273F8B9D28BC587BF3184A1D60957649B1627  C:\Users\swaya\Desktop\TIMEPASS\dynamic island\dynamic-island\release\WindowsDynamicBar.exe
+98FCB37988E9165E0471D4EE12BDB06F564334C0D553AC317CB5E2754F133B3F  C:\Users\swaya\Desktop\TIMEPASS\dynamic island\dynamic-island\release\WindowsDynamicBar-Setup.exe

@@ -33,7 +33,6 @@ public sealed class BatteryService : IDisposable
 
         _last = Query();
         BatteryChanged?.Invoke(_last);
-        RaiseBatteryEvent(_last, silent: true);
 
         int pollMs = _settings.Current.PerformanceMode switch
         {
@@ -43,26 +42,33 @@ public sealed class BatteryService : IDisposable
         };
         _pollTimer = new System.Threading.Timer(_ =>
         {
+            var prev = _last;
             var cur = Query();
-            if (Math.Abs(cur.Percent - _last.Percent) >= 1 || cur.Charging != _last.Charging ||
-                cur.EnergySaver != _last.EnergySaver)
+            if (Math.Abs(cur.Percent - prev.Percent) >= 1 || cur.Charging != prev.Charging ||
+                cur.EnergySaver != prev.EnergySaver)
             {
                 _last = cur;
                 BatteryChanged?.Invoke(cur);
-                RaiseBatteryEvent(cur, silent: false);
+                RaiseBatteryEvent(prev, cur);
             }
         }, null, pollMs, pollMs);
     }
 
     private void OnPowerModeChanged(object sender, Microsoft.Win32.PowerModeChangedEventArgs e)
     {
-        if (e.Mode != Microsoft.Win32.PowerModes.Resume) return;
-        // After sleep/wake: re-read everything.
+        // Re-query on any power event (plug/unplug surfaces as StatusChange, wake as Resume)
+        // so charging flips pop the bar immediately instead of at the next poll.
+        if (e.Mode is not (Microsoft.Win32.PowerModes.Resume or Microsoft.Win32.PowerModes.StatusChange))
+            return;
+        var prev = _last;
         var cur = Query();
         _last = cur;
-        BatteryChanged?.Invoke(cur);
-        RaiseBatteryEvent(cur, silent: true);
-        Log.Info("Post-wake battery refresh", ("percent", cur.Percent));
+        if (cur.Charging != prev.Charging || cur.EnergySaver != prev.EnergySaver)
+        {
+            BatteryChanged?.Invoke(cur);
+            RaiseBatteryEvent(prev, cur);
+            Log.Info("Power state change", ("percent", cur.Percent), ("charging", cur.Charging));
+        }
     }
 
     private void OnSessionSwitch(object sender, Microsoft.Win32.SessionSwitchEventArgs e)
@@ -73,14 +79,24 @@ public sealed class BatteryService : IDisposable
         BatteryChanged?.Invoke(cur);
     }
 
-    private void RaiseBatteryEvent(BatteryInfo info, bool silent)
+    private void RaiseBatteryEvent(BatteryInfo prev, BatteryInfo cur)
     {
-        if (!_settings.Current.FeatureBattery || silent) return;
-        bool low = info.Percent <= 20 && !info.Charging;
-        string title = info.Charging ? "Charging" : info.EnergySaver ? "Battery saver" : "Battery";
-        string text = $"{Math.Round(info.Percent)}%" + (info.TimeRemaining is null ? "" : $" · {info.TimeRemaining}");
+        if (!_settings.Current.FeatureBattery) return;
+
+        bool chargingFlipped = cur.Charging != prev.Charging;
+        bool saverFlipped = cur.EnergySaver != prev.EnergySaver;
+        bool lowNow = cur.Percent <= 20 && !cur.Charging;
+        bool lowBefore = prev.Percent <= 20 && !prev.Charging;
+
+        // Routine percent drift is not worth interrupting the user for — only
+        // charging/saver flips and the one-shot low-battery crossing pop the bar.
+        if (!chargingFlipped && !saverFlipped && !(lowNow && !lowBefore)) return;
+
+        bool low = lowNow && !lowBefore;
+        string title = cur.Charging ? "Charging" : cur.EnergySaver ? "Battery saver" : "Battery";
+        string text = $"{Math.Round(cur.Percent)}%" + (cur.TimeRemaining is null ? "" : $" · {cur.TimeRemaining}");
         _bus.Raise(BarEvent.Create(BarEventKind.Battery, title, text,
-            value: info.Percent / 100.0, valueText: text, payload: info,
+            value: cur.Percent / 100.0, valueText: text, payload: cur,
             priority: low ? 95 : 40, displayDuration: TimeSpan.FromSeconds(low ? 6 : 3)));
     }
 
@@ -131,6 +147,7 @@ public sealed class BatteryService : IDisposable
     }
 }
 
+/// <summary>SignalBars: 0–4 from real RSSI, or -1 = signal unknown (no bars shown).</summary>
 public sealed record NetworkInfo(string Kind, string? Name, int SignalBars, bool Connected, bool Internet);
 
 public sealed class NetworkService : IDisposable
@@ -166,9 +183,19 @@ public sealed class NetworkService : IDisposable
     private void OnNetworkStatusChanged(object sender)
     {
         var cur = Query();
-        if (cur.Kind == _last.Kind && cur.Name == _last.Name &&
-            cur.Connected == _last.Connected && cur.Internet == _last.Internet &&
-            Math.Abs(cur.SignalBars - _last.SignalBars) == 0) return;
+        bool meaningful = cur.Kind != _last.Kind || cur.Name != _last.Name ||
+            cur.Connected != _last.Connected || cur.Internet != _last.Internet;
+
+        if (!meaningful)
+        {
+            // Signal-strength jitter only: refresh state quietly, never pop the bar.
+            if (cur.SignalBars != _last.SignalBars)
+            {
+                _last = cur;
+                NetworkChanged?.Invoke(cur);
+            }
+            return;
+        }
 
         _last = cur;
         NetworkChanged?.Invoke(cur);
@@ -200,11 +227,12 @@ public sealed class NetworkService : IDisposable
             bool internet = level == Windows.Networking.Connectivity.NetworkConnectivityLevel.InternetAccess;
             string name = profile.ProfileName ?? "";
             bool isWlan = profile.IsWlanConnectionProfile;
-            string kind = isWlan ? "Wi-Fi" : profile.IsWlanConnectionProfile ? "Wi-Fi"
+            string kind = isWlan ? "Wi-Fi"
+                : profile.IsWwanConnectionProfile ? "Cellular"
                 : name.Contains("Ethernet", StringComparison.OrdinalIgnoreCase) ? "Ethernet"
-                : profile.IsWwanConnectionProfile ? "Cellular" : "Network";
+                : "Network";
 
-            int bars = isWlan ? QueryWifiBars(profile) : 4;
+            int bars = isWlan ? RssiToBars(QueryWifiRssi()) : -1;
             return new NetworkInfo(kind, name, bars, level != Windows.Networking.Connectivity.NetworkConnectivityLevel.None, internet);
         }
         catch (Exception ex)
@@ -214,18 +242,68 @@ public sealed class NetworkService : IDisposable
         }
     }
 
-    private static int QueryWifiBars(Windows.Networking.Connectivity.ConnectionProfile profile)
+    private static int? QueryWifiRssi()
     {
+        // Real RSSI via wlanapi.dll (wlan_intf_opcode_rssi, dBm). null = unknown —
+        // never fabricate a signal level.
         try
         {
-            var wlan = profile.WlanConnectionProfileDetails;
-            if (wlan is null) return 3;
-            // Signal strength is not exposed via WinRT; approximate via interface statistics quality.
-            // Fall back to 3 bars (honest: Windows does not expose RSSI here without wlanapi).
-            return 3;
+            if (WlanOpenHandle(2, IntPtr.Zero, out _, out IntPtr handle) != 0) return null;
+            try
+            {
+                if (WlanEnumInterfaces(handle, IntPtr.Zero, out IntPtr list) != 0 || list == IntPtr.Zero)
+                    return null;
+                try
+                {
+                    uint count = (uint)System.Runtime.InteropServices.Marshal.ReadInt32(list);
+                    // WLAN_INTERFACE_INFO_LIST: two DWORDs, then WLAN_INTERFACE_INFO[]
+                    // (GUID 16 + WCHAR[256] 512 + state 4 = 532 bytes each).
+                    for (int i = 0; i < count; i++)
+                    {
+                        IntPtr entry = IntPtr.Add(list, 8 + i * 532);
+                        int state = System.Runtime.InteropServices.Marshal.ReadInt32(entry, 16 + 512);
+                        if (state != 1 /* wlan_interface_state_connected */) continue;
+                        Guid guid = System.Runtime.InteropServices.Marshal.PtrToStructure<Guid>(entry);
+                        if (WlanQueryInterface(handle, ref guid, 9 /* wlan_intf_opcode_rssi */,
+                                IntPtr.Zero, out uint size, out IntPtr data, IntPtr.Zero) == 0
+                            && data != IntPtr.Zero)
+                        {
+                            try { return System.Runtime.InteropServices.Marshal.ReadInt32(data); }
+                            finally { WlanFreeMemory(data); }
+                        }
+                    }
+                    return null;
+                }
+                finally { WlanFreeMemory(list); }
+            }
+            finally { WlanCloseHandle(handle, IntPtr.Zero); }
         }
-        catch { return 3; }
+        catch { return null; }
     }
+
+    /// <summary>dBm → 0–4 bars; -1 = unknown.</summary>
+    internal static int RssiToBars(int? rssiDbm) => rssiDbm switch
+    {
+        null => -1,
+        >= -50 => 4,
+        >= -60 => 3,
+        >= -70 => 2,
+        >= -80 => 1,
+        _ => 0,
+    };
+
+    [System.Runtime.InteropServices.DllImport("wlanapi.dll")]
+    private static extern uint WlanOpenHandle(uint clientVersion, IntPtr reserved,
+        out uint negotiatedVersion, out IntPtr handle);
+    [System.Runtime.InteropServices.DllImport("wlanapi.dll")]
+    private static extern uint WlanEnumInterfaces(IntPtr handle, IntPtr reserved, out IntPtr list);
+    [System.Runtime.InteropServices.DllImport("wlanapi.dll")]
+    private static extern uint WlanQueryInterface(IntPtr handle, ref Guid guid, int opcode,
+        IntPtr reserved, out uint dataSize, out IntPtr data, IntPtr dataType);
+    [System.Runtime.InteropServices.DllImport("wlanapi.dll")]
+    private static extern void WlanFreeMemory(IntPtr memory);
+    [System.Runtime.InteropServices.DllImport("wlanapi.dll")]
+    private static extern uint WlanCloseHandle(IntPtr handle, IntPtr reserved);
 
     public void Dispose()
     {
@@ -244,6 +322,7 @@ public sealed class BluetoothService : IDisposable
     private readonly SettingsService _settings;
     private Windows.Devices.Enumeration.DeviceWatcher? _watcher;
     private readonly Dictionary<string, BluetoothDeviceInfo> _devices = new();
+    private bool _enumerated;
 
     public event Action<BluetoothDeviceInfo, bool>? DeviceChanged; // device, connected
     public IReadOnlyCollection<BluetoothDeviceInfo> KnownDevices => _devices.Values;
@@ -264,6 +343,8 @@ public sealed class BluetoothService : IDisposable
             _watcher.Added += OnDeviceAdded;
             _watcher.Removed += OnDeviceRemoved;
             _watcher.Updated += OnDeviceUpdated;
+            // The first Added sweep is just "these devices exist" — populate silently.
+            _watcher.EnumerationCompleted += (_, _) => _enumerated = true;
             _watcher.Start();
             Log.Info("Bluetooth watcher started");
         }
@@ -280,7 +361,7 @@ public sealed class BluetoothService : IDisposable
         if (dev is null) return;
         _devices[info.Id] = dev;
         DeviceChanged?.Invoke(dev, true);
-        if (_settings.Current.FeatureBluetooth)
+        if (_settings.Current.FeatureBluetooth && _enumerated)
             _bus.Raise(BarEvent.Create(BarEventKind.Bluetooth, dev.Name, "Connected",
                 payload: dev, priority: 45, displayDuration: TimeSpan.FromSeconds(3)));
     }

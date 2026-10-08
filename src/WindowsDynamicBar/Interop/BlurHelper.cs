@@ -43,8 +43,8 @@ public static class BlurHelper
             int w = Math.Max(4, widthPx), h = Math.Max(4, heightPx);
             int r = Math.Clamp(radiusPx, 2, Math.Min(w, h) / 2);
             // Inset 1px so GDI region aliasing hides under the pill border stroke.
-            _currentRegion = NativeMethods.CreateRoundRectRgn(
-                leftPx + 1, topPx + 1, leftPx + w - 1, topPx + h - 1, r * 2, r * 2);
+            _currentRegion = NativeMethods.CreateRoundRectRgn(leftPx + 1, topPx + 1, leftPx + w - 1, topPx + h - 1, r * 2, r * 2);
+            bb.dwFlags = NativeMethods.DWM_BB_ENABLE | NativeMethods.DWM_BB_BLURREGION;
             bb.fEnable = true;
             bb.hRgnBlur = _currentRegion;
             bb.fTransitionOnMaximized = false;

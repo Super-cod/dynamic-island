@@ -19,13 +19,16 @@
         <SolidColorBrush x:Key="WdbTextBrush" Color="{StaticResource WdbTextColor}" />
         <SolidColorBrush x:Key="WdbTextMutedBrush" Color="{StaticResource WdbTextMuted}" />
         <SolidColorBrush x:Key="WdbHairlineBrush" Color="{StaticResource WdbHairline}" />
+        <!-- Themed dim/track fills (recolored by ThemeService for Light/Translucent) -->
+        <SolidColorBrush x:Key="WdbDimBrush" Color="#1AFFFFFF" />
+        <SolidColorBrush x:Key="WdbTrackBrush" Color="#28FFFFFF" />
 
         <!-- ============ Typography ============ -->
         <Style x:Key="WdbTitleText" TargetType="TextBlock">
             <Setter Property="FontFamily" Value="Segoe UI Variable Display, Segoe UI" />
             <Setter Property="FontSize" Value="13" />
             <Setter Property="FontWeight" Value="SemiBold" />
-            <Setter Property="Foreground" Value="{StaticResource WdbTextBrush}" />
+            <Setter Property="Foreground" Value="{DynamicResource WdbTextBrush}" />
             <Setter Property="TextTrimming" Value="CharacterEllipsis" />
             <Setter Property="VerticalAlignment" Value="Center" />
         </Style>
@@ -33,7 +36,7 @@
         <Style x:Key="WdbSubText" TargetType="TextBlock">
             <Setter Property="FontFamily" Value="Segoe UI Variable Text, Segoe UI" />
             <Setter Property="FontSize" Value="11.5" />
-            <Setter Property="Foreground" Value="{StaticResource WdbTextMutedBrush}" />
+            <Setter Property="Foreground" Value="{DynamicResource WdbTextMutedBrush}" />
             <Setter Property="TextTrimming" Value="CharacterEllipsis" />
             <Setter Property="VerticalAlignment" Value="Center" />
         </Style>
@@ -42,14 +45,14 @@
             <Setter Property="FontFamily" Value="Segoe UI Variable Display, Segoe UI" />
             <Setter Property="FontSize" Value="26" />
             <Setter Property="FontWeight" Value="SemiBold" />
-            <Setter Property="Foreground" Value="{StaticResource WdbTextBrush}" />
+            <Setter Property="Foreground" Value="{DynamicResource WdbTextBrush}" />
             <Setter Property="VerticalAlignment" Value="Center" />
         </Style>
 
         <Style x:Key="WdbGlyph" TargetType="TextBlock">
             <Setter Property="FontFamily" Value="Segoe Fluent Icons, Segoe MDL2 Assets" />
             <Setter Property="FontSize" Value="14" />
-            <Setter Property="Foreground" Value="{StaticResource WdbTextBrush}" />
+            <Setter Property="Foreground" Value="{DynamicResource WdbTextBrush}" />
             <Setter Property="VerticalAlignment" Value="Center" />
             <Setter Property="HorizontalAlignment" Value="Center" />
         </Style>
@@ -85,7 +88,7 @@
         </Style>
 
         <Style x:Key="WdbPrimaryButton" TargetType="Button">
-            <Setter Property="Background" Value="{StaticResource WdbAccentBrush}" />
+            <Setter Property="Background" Value="{DynamicResource WdbAccentBrush}" />
             <Setter Property="Foreground" Value="White" />
             <Setter Property="BorderThickness" Value="0" />
             <Setter Property="FontFamily" Value="Segoe UI Variable Text, Segoe UI" />

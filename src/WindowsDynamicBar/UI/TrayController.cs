@@ -32,7 +32,6 @@ public sealed class TrayController : IDisposable
             Visible = true,
             ContextMenuStrip = _menu,
         };
-        _icon.DoubleClick += (_, _) => App.Bar?.Toggle();
         _icon.MouseClick += (_, e) =>
         {
             if (e.Button == MouseButtons.Left) App.Bar?.Toggle();
@@ -47,9 +46,18 @@ public sealed class TrayController : IDisposable
     {
         _menu.Items.Clear();
 
-        var toggle = new ToolStripMenuItem("Toggle bar\t(Ctrl+Alt+Space)");
+        var toggle = new ToolStripMenuItem($"Toggle bar\t({App.Settings?.Current.HotkeyToggle ?? "Ctrl+Alt+Space"})");
         toggle.Click += (_, _) => App.Bar?.Toggle();
         _menu.Items.Add(toggle);
+
+        var gaming = new ToolStripMenuItem("Gaming mode")
+        {
+            CheckOnClick = true,
+            Checked = App.GamingMode,
+            ToolTipText = "While on, only critical alerts (battery, privacy, USB) open the bar",
+        };
+        gaming.CheckedChanged += (_, _) => App.GamingMode = gaming.Checked;
+        _menu.Items.Add(gaming);
 
         var sysmon = new ToolStripMenuItem("System monitor")
         {

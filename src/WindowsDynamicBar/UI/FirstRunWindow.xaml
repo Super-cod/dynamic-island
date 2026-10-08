@@ -2,14 +2,15 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Windows Dynamic Bar — Welcome"
-        Width="440" SizeToContent="Height"
+        Width="460" SizeToContent="Height"
         WindowStartupLocation="CenterScreen"
         ResizeMode="NoResize"
         Background="#FF141417"
         Closing="OnClosing">
 
-    <StackPanel Margin="26,22,26,22">
+    <StackPanel Margin="26,22,26,20">
 
+        <!-- header (always visible) -->
         <StackPanel Orientation="Horizontal">
             <Border Width="42" Height="42" CornerRadius="21" Background="#1AFFFFFF"
                     VerticalAlignment="Top" Margin="0,0,14,0">
@@ -20,43 +21,93 @@
                 <TextBlock Text="Windows Dynamic Bar"
                            FontFamily="Segoe UI Variable Display, Segoe UI"
                            FontSize="19" FontWeight="SemiBold" Foreground="White" />
-                <TextBlock Text="A Dynamic-Island-style overlay for your desktop"
+                <TextBlock x:Name="StepCaption" Text="A Dynamic-Island-style overlay for your desktop"
                            FontFamily="Segoe UI Variable Text, Segoe UI"
                            FontSize="12" Foreground="#B3FFFFFF" Margin="0,2,0,0" />
             </StackPanel>
         </StackPanel>
 
-        <TextBlock Margin="0,18,0,0" FontSize="12.5" Foreground="#CCFFFFFF"
-                   FontFamily="Segoe UI Variable Text, Segoe UI" TextWrapping="Wrap"
-                   Text="A compact pill sits at the top of your screen and expands only when something matters — then gets out of your way." />
-
-        <StackPanel Margin="0,14,0,0">
-            <TextBlock Text="&#x25CF;  Media controls with album art, progress and transport"
-                       FontSize="12" Foreground="#B3FFFFFF" Margin="0,0,0,6" />
-            <TextBlock Text="&#x25CF;  Live volume, brightness, battery, network and Bluetooth"
-                       FontSize="12" Foreground="#B3FFFFFF" Margin="0,0,0,6" />
-            <TextBlock Text="&#x25CF;  Camera &amp; microphone privacy indicators, USB and download alerts"
-                       FontSize="12" Foreground="#B3FFFFFF" Margin="0,0,0,6" />
-            <TextBlock Text="&#x25CF;  Timers, stopwatch and focus sessions"
-                       FontSize="12" Foreground="#B3FFFFFF" />
+        <!-- step dots -->
+        <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
+            <Ellipse x:Name="Dot1" Width="7" Height="7" Fill="#FF0A84FF" Margin="0,0,5,0" />
+            <Ellipse x:Name="Dot2" Width="7" Height="7" Fill="#28FFFFFF" Margin="0,0,5,0" />
+            <Ellipse x:Name="Dot3" Width="7" Height="7" Fill="#28FFFFFF" />
         </StackPanel>
 
-        <Border Background="#0FFFFFFF" CornerRadius="10" Padding="12,10" Margin="0,16,0,0"
-                BorderBrush="#18FFFFFF" BorderThickness="1">
-            <TextBlock FontSize="11.5" Foreground="#99FFFFFF" TextWrapping="Wrap"
+        <!-- ============ step 1: welcome ============ -->
+        <StackPanel x:Name="Step1" Margin="0,16,0,0">
+            <TextBlock FontSize="12.5" Foreground="#CCFFFFFF" TextWrapping="Wrap"
                        FontFamily="Segoe UI Variable Text, Segoe UI"
-                       Text="Private by design: no telemetry, no cloud. Clipboard and notification reading stay off until you enable them, and clipboard contents are never stored." />
-        </Border>
+                       Text="A compact pill sits at the top of your screen and expands only when something matters — then gets out of your way." />
+            <StackPanel Margin="0,14,0,0">
+                <TextBlock Text="&#x25CF;  Media controls with album art, progress and transport"
+                           FontSize="12" Foreground="#B3FFFFFF" Margin="0,0,0,6" />
+                <TextBlock Text="&#x25CF;  Live volume, brightness, battery, network and Bluetooth"
+                           FontSize="12" Foreground="#B3FFFFFF" Margin="0,0,0,6" />
+                <TextBlock Text="&#x25CF;  Camera &amp; microphone privacy indicators, USB and download alerts"
+                           FontSize="12" Foreground="#B3FFFFFF" Margin="0,0,0,6" />
+                <TextBlock Text="&#x25CF;  Timers, stopwatch and focus sessions"
+                           FontSize="12" Foreground="#B3FFFFFF" />
+            </StackPanel>
+            <Border Background="#0FFFFFFF" CornerRadius="10" Padding="12,10" Margin="0,16,0,0"
+                    BorderBrush="#18FFFFFF" BorderThickness="1">
+                <TextBlock FontSize="11.5" Foreground="#99FFFFFF" TextWrapping="Wrap"
+                           FontFamily="Segoe UI Variable Text, Segoe UI"
+                           Text="Private by design: no telemetry, no cloud. Clipboard and notification reading stay off until you enable them, and clipboard contents are never stored." />
+            </Border>
+        </StackPanel>
 
+        <!-- ============ step 2: theme ============ -->
+        <StackPanel x:Name="Step2" Margin="0,16,0,0" Visibility="Collapsed">
+            <TextBlock Text="Pick a look — you can change it any time in Settings."
+                       FontSize="12.5" Foreground="#CCFFFFFF" TextWrapping="Wrap"
+                       FontFamily="Segoe UI Variable Text, Segoe UI" Margin="0,0,0,12" />
+            <RadioButton x:Name="ThemeDark" Content="Dark" IsChecked="True" Foreground="White"
+                         FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="12.5"
+                         Margin="0,0,0,8" GroupName="theme" />
+            <RadioButton x:Name="ThemeLight" Content="Light" Foreground="White"
+                         FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="12.5"
+                         Margin="0,0,0,8" GroupName="theme" />
+            <RadioButton x:Name="ThemeTranslucent" Content="Translucent (extra glassy)" Foreground="White"
+                         FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="12.5"
+                         GroupName="theme" />
+            <CheckBox x:Name="StartWithWindows" Content="Start with Windows" IsChecked="True"
+                      Foreground="#CCFFFFFF" FontSize="12" Margin="0,14,0,0"
+                      FontFamily="Segoe UI Variable Text, Segoe UI" />
+        </StackPanel>
+
+        <!-- ============ step 3: done ============ -->
+        <StackPanel x:Name="Step3" Margin="0,16,0,0" Visibility="Collapsed">
+            <TextBlock FontSize="12.5" Foreground="#CCFFFFFF" TextWrapping="Wrap"
+                       FontFamily="Segoe UI Variable Text, Segoe UI"
+                       Text="You're all set. Here's how to use the bar:" />
+            <StackPanel Margin="0,12,0,0">
+                <TextBlock Text="&#x25CF;  Ctrl+Alt+Space — show the bar (or double-click the tray icon)"
+                           FontSize="12" Foreground="#B3FFFFFF" Margin="0,0,0,6" />
+                <TextBlock Text="&#x25CF;  Ctrl+Alt+M — media player · Ctrl+Alt+T — 5-minute timer"
+                           FontSize="12" Foreground="#B3FFFFFF" Margin="0,0,0,6" />
+                <TextBlock Text="&#x25CF;  Hover the pill to preview · click to open · drag to reposition"
+                           FontSize="12" Foreground="#B3FFFFFF" Margin="0,0,0,6" />
+                <TextBlock Text="&#x25CF;  Right-click the tray icon for Gaming mode and quick toggles"
+                           FontSize="12" Foreground="#B3FFFFFF" />
+            </StackPanel>
+        </StackPanel>
+
+        <!-- footer buttons -->
         <Grid Margin="0,18,0,0">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
-            <TextBlock Text="Hotkeys: Ctrl+Alt+Space toggle · Ctrl+Alt+M media · Ctrl+Alt+T timer"
-                       FontSize="10.5" Foreground="#80FFFFFF" VerticalAlignment="Center"
-                       TextWrapping="Wrap" Margin="0,0,14,0" />
-            <Button Grid.Column="1" Content="Get started" Click="OnGetStarted"
+            <TextBlock x:Name="FooterHint" Text="Takes about 15 seconds" FontSize="10.5"
+                       Foreground="#80FFFFFF" VerticalAlignment="Center" />
+            <Button x:Name="BackButton" Grid.Column="1" Content="Back" Click="OnBack"
+                    Visibility="Collapsed"
+                    FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="12"
+                    Foreground="#CCFFFFFF" Background="#18FFFFFF"
+                    BorderThickness="0" Padding="14,8" Margin="0,0,8,0" Cursor="Hand" />
+            <Button x:Name="NextButton" Grid.Column="2" Content="Next" Click="OnNext"
                     FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="12.5"
                     FontWeight="SemiBold" Foreground="White" Background="#FF0A84FF"
                     BorderThickness="0" Padding="18,8" Cursor="Hand" />

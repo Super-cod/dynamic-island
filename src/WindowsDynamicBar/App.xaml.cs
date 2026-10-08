@@ -18,6 +18,8 @@ namespace WindowsDynamicBar;
 public partial class App : System.Windows.Application
 {
     private Mutex? _singleInstanceMutex;
+    private bool _ownsSingleInstanceMutex;
+    private bool _logReady;
     public const string MutexName = "Local\\WindowsDynamicBar_SingleInstance_v1";
 
     // Composition root
@@ -38,11 +40,15 @@ public partial class App : System.Windows.Application
     public static StopwatchService Stopwatch { get; private set; } = null!;
     public static FocusService Focus { get; private set; } = null!;
     public static SystemMonitorService SysMon { get; private set; } = null!;
+    public static SystemTelemetryService Telemetry { get; private set; } = null!;
     public static NotificationListenerService Notifications { get; private set; } = null!;
 
     public static BarWindow? Bar { get; set; }
     public static SettingsWindow? SettingsWnd { get; set; }
     public static TrayController? Tray { get; private set; }
+
+    /// <summary>Session-only: while true, low-priority events do not expand the bar.</summary>
+    public static bool GamingMode { get; set; }
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -50,6 +56,7 @@ public partial class App : System.Windows.Application
 
         // Single instance: activate existing instead of spawning a second bar.
         _singleInstanceMutex = new Mutex(true, MutexName, out bool createdNew);
+        _ownsSingleInstanceMutex = createdNew;
         if (!createdNew)
         {
             SignalExistingInstance();
@@ -61,6 +68,7 @@ public partial class App : System.Windows.Application
         var cfg = Settings.Load();
 
         Log.Init((LogLevel)cfg.LogLevel);
+        _logReady = true;
         Log.Info("Windows Dynamic Bar starting", ("version", InfoVersion), ("pid", Environment.ProcessId));
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -83,7 +91,8 @@ public partial class App : System.Windows.Application
         try { Timer = new TimerService(Bus, Settings); } catch (Exception ex) { Log.Error("Timer ctor", ex); }
         try { Stopwatch = new StopwatchService(Bus); } catch (Exception ex) { Log.Error("Stopwatch ctor", ex); }
         try { Focus = new FocusService(Bus); } catch (Exception ex) { Log.Error("Focus ctor", ex); }
-        try { SysMon = new SystemMonitorService(Bus, Settings); } catch (Exception ex) { Log.Error("SysMon ctor", ex); }
+        try { SysMon = new SystemMonitorService(Settings); } catch (Exception ex) { Log.Error("SysMon ctor", ex); }
+        try { Telemetry = new SystemTelemetryService(Settings); } catch (Exception ex) { Log.Error("Telemetry ctor", ex); }
         try { Notifications = new NotificationListenerService(Bus, Settings); } catch (Exception ex) { Log.Error("Notifications ctor", ex); }
 
         // Bar window
@@ -119,7 +128,7 @@ public partial class App : System.Windows.Application
         Log.Info("Startup complete", ("ms", sw.ElapsedMilliseconds));
     }
 
-    public const string InfoVersion = "1.0.0";
+    public const string InfoVersion = "1.1.0";
     public const string AppName = "Windows Dynamic Bar";
 
     private static void StartServiceSafely(Action action, string name)
@@ -159,19 +168,28 @@ public partial class App : System.Windows.Application
 
     protected override void OnExit(ExitEventArgs e)
     {
-        Log.Info("Shutting down");
-        try { Tray?.Dispose(); } catch { }
-        try { Bar?.Dispose(); } catch { }
-        foreach (IDisposable? svc in new IDisposable?[]
-                 {
-                     Media, Volume, Brightness, Battery, Network, Bluetooth, Privacy,
-                     Clipboard, Downloads, Screenshots, Timer, Stopwatch, Focus, SysMon, Notifications
-                 })
+        if (_logReady)
         {
-            try { svc?.Dispose(); } catch { }
+            Log.Info("Shutting down");
+            try { Tray?.Dispose(); } catch { }
+            try { Bar?.Dispose(); } catch { }
+            foreach (IDisposable? svc in new IDisposable?[]
+                     {
+                         Media, Volume, Brightness, Battery, Network, Bluetooth, Privacy,
+                         Clipboard, Downloads, Screenshots, Timer, Stopwatch, Focus, SysMon, Telemetry, Notifications
+                     })
+            {
+                try { svc?.Dispose(); } catch { }
+            }
+            Log.Shutdown();
         }
-        Log.Shutdown();
-        _singleInstanceMutex?.ReleaseMutex();
+        // Only the owning thread may release the mutex; a second instance
+        // (which signaled us or exited early) never took ownership.
+        if (_ownsSingleInstanceMutex)
+        {
+            try { _singleInstanceMutex?.ReleaseMutex(); } catch { }
+        }
+        try { _singleInstanceMutex?.Dispose(); } catch { }
         base.OnExit(e);
     }
 }

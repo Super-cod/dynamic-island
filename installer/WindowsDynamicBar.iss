@@ -2,7 +2,7 @@
 ; Builds: release\WindowsDynamicBar-Setup.exe  (per-user, no admin required)
 
 #define MyAppName "Windows Dynamic Bar"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.0"
 #define MyAppPublisher "Windows Dynamic Bar Project"
 #define MyAppExeName "WindowsDynamicBar.exe"
 #define MyPublishDir "..\src\WindowsDynamicBar\bin\x64\Release\net8.0-windows10.0.19041.0\win-x64\publish"

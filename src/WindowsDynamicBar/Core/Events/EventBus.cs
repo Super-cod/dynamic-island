@@ -35,12 +35,14 @@ public sealed record BarEvent(
     object? Payload = null,        // kind-specific data (e.g. MediaInfo, BitmapSource)
     int Priority = 0,              // higher wins when queued
     TimeSpan? DisplayDuration = null, // null = sticky until dismissed/timeout rules
-    DateTimeOffset Timestamp = default)
+    DateTimeOffset Timestamp = default,
+    bool IsTick = false)           // ambient progress refresh: never pops the bar open
 {
     public static BarEvent Create(BarEventKind kind, string title, string? subtitle = null,
         double? value = null, string? valueText = null, object? payload = null,
-        int priority = 0, TimeSpan? displayDuration = null)
-        => new(kind, title, subtitle, value, valueText, payload, priority, displayDuration, DateTimeOffset.Now);
+        int priority = 0, TimeSpan? displayDuration = null, bool isTick = false)
+        => new(kind, title, subtitle, value, valueText, payload, priority, displayDuration,
+            DateTimeOffset.Now, isTick);
 }
 
 public sealed class EventBus
@@ -63,26 +65,28 @@ public sealed class EventBus
 
     public void Raise(BarEvent evt)
     {
-        if (Active?.Kind == evt.Kind)
+        // Everything (including the Active read) happens on the UI thread — services
+        // raise from background threads, so a single marshal keeps state consistent.
+        _dispatcher.Invoke(() =>
         {
-            // Coalesce: same kind refreshes in place (e.g. volume drag).
-            _dispatcher.Invoke(() =>
+            if (Active?.Kind == evt.Kind)
             {
+                // Coalesce: same kind refreshes in place (e.g. volume drag).
                 Active = evt;
                 _activeShownAt = DateTime.UtcNow;
                 EventRaised?.Invoke(evt);
                 ArmExpiry(evt);
-            });
-            return;
-        }
+                return;
+            }
 
-        lock (_sync)
-        {
-            var existing = _queue.FirstOrDefault(e => e.Kind == evt.Kind);
-            if (existing is not null) _queue.Remove(existing);
-            _queue.Add(evt);
-        }
-        Pump();
+            lock (_sync)
+            {
+                var existing = _queue.FirstOrDefault(e => e.Kind == evt.Kind);
+                if (existing is not null) _queue.Remove(existing);
+                _queue.Add(evt);
+            }
+            PumpOnDispatcher();
+        });
     }
 
     /// <summary>Dismiss current event immediately (click outside / Escape).</summary>
@@ -92,44 +96,43 @@ public sealed class EventBus
         {
             Active = null;
             _expiryTimer?.Stop();
-            Pump();
+            PumpOnDispatcher();
             if (_queue.Count == 0) Idle?.Invoke();
         });
     }
 
-    private void Pump()
+    private void Pump() => _dispatcher.Invoke(PumpOnDispatcher);
+
+    private void PumpOnDispatcher()
     {
-        _dispatcher.Invoke(() =>
+        if (Active is not null && (Active.DisplayDuration is null ||
+            DateTime.UtcNow - _activeShownAt < Active.DisplayDuration.Value))
+            return;
+
+        BarEvent? next = null;
+        lock (_sync)
         {
-            if (Active is not null && (Active.DisplayDuration is null ||
-                DateTime.UtcNow - _activeShownAt < Active.DisplayDuration.Value))
-                return;
+            if (_queue.Count > 0)
+            {
+                next = _queue.OrderByDescending(e => e.Priority)
+                             .ThenByDescending(e => e.Timestamp)
+                             .First();
+                _queue.Remove(next);
+            }
+        }
 
-            BarEvent? next = null;
-            lock (_sync)
-            {
-                if (_queue.Count > 0)
-                {
-                    next = _queue.OrderByDescending(e => e.Priority)
-                                 .ThenByDescending(e => e.Timestamp)
-                                 .First();
-                    _queue.Remove(next);
-                }
-            }
-
-            if (next is not null)
-            {
-                Active = next;
-                _activeShownAt = DateTime.UtcNow;
-                EventRaised?.Invoke(next);
-                ArmExpiry(next);
-            }
-            else
-            {
-                Active = null;
-                Idle?.Invoke();
-            }
-        });
+        if (next is not null)
+        {
+            Active = next;
+            _activeShownAt = DateTime.UtcNow;
+            EventRaised?.Invoke(next);
+            ArmExpiry(next);
+        }
+        else
+        {
+            Active = null;
+            Idle?.Invoke();
+        }
     }
 
     private void ArmExpiry(BarEvent evt)

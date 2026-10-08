@@ -35,14 +35,70 @@ public partial class SettingsWindow : Window
 
     private readonly List<Action<SettingsModel>> _pending = new();
     private readonly DispatcherTimerSink _debounce = new();
+    private readonly List<Button> _navButtons = new();
     private bool _loading;
+    private string _page = "general";
+
+    private static readonly (string Key, string Title, string Sub)[] Pages =
+    {
+        ("general", "General", "Startup, monitor, hotkeys"),
+        ("appearance", "Appearance", "Theme, colors, shape, motion"),
+        ("widgets", "Widgets", "Choose what the bar shows"),
+        ("privacy", "Privacy", "Clipboard, notifications, data"),
+        ("diagnostics", "Diagnostics", "Version, services, logs"),
+    };
 
     public SettingsWindow()
     {
         InitializeComponent();
         _debounce.Fired += Flush;
-        Populate();
+        BuildNav();
+        SelectPage("general");
     }
+
+    // ---------------------------------------------------------------- navigation
+
+    private void BuildNav()
+    {
+        foreach (var (key, title, _) in Pages)
+        {
+            var b = new Button
+            {
+                Content = title,
+                Tag = key,
+                Height = 34,
+                Margin = new Thickness(0, 1, 0, 1),
+                Padding = new Thickness(12, 0, 12, 0),
+                HorizontalContentAlignment = HorizontalAlignment.Left,
+                FontFamily = new FontFamily("Segoe UI Variable Text, Segoe UI"),
+                FontSize = 12.5,
+                Foreground = Muted,
+                Background = Brushes.Transparent,
+                BorderThickness = new Thickness(0),
+                Cursor = Cursors.Hand,
+            };
+            b.Click += (_, _) => SelectPage((string)b.Tag!);
+            _navButtons.Add(b);
+            NavPanel.Children.Add(b);
+        }
+    }
+
+    private void SelectPage(string key)
+    {
+        _page = key;
+        foreach (var b in _navButtons)
+        {
+            bool on = (string?)b.Tag == key;
+            b.Background = on ? new SolidColorBrush(Color.FromArgb(0x18, 0xFF, 0xFF, 0xFF)) : Brushes.Transparent;
+            b.Foreground = on ? White : Muted;
+        }
+        var page = Array.Find(Pages, p => p.Key == key);
+        PageTitle.Text = page.Title;
+        PageSub.Text = page.Sub;
+        Populate(key);
+    }
+
+    // ---------------------------------------------------------------- save plumbing
 
     private void OnSourceInitialized(object? sender, EventArgs e)
     {
@@ -57,8 +113,6 @@ public partial class SettingsWindow : Window
     }
 
     private void OnClosing(object? sender, System.ComponentModel.CancelEventArgs e) => Flush();
-
-    // ---------------------------------------------------------------- save plumbing
 
     private void Set(Action<SettingsModel> mutate)
     {
@@ -220,17 +274,30 @@ public partial class SettingsWindow : Window
         return Row(null!, null, panel);
     }
 
-    // ---------------------------------------------------------------- content
+    // ---------------------------------------------------------------- pages
 
-    private void Populate()
+    private void Populate(string page)
     {
         _loading = true;
         var root = Root;
         root.Children.Clear();
         var s = App.Settings?.Current ?? new SettingsModel();
 
-        // ---- General ----
-        root.Children.Add(SectionHeader("General"));
+        switch (page)
+        {
+            case "general": PopulateGeneral(root, s); break;
+            case "appearance": PopulateAppearance(root, s); break;
+            case "widgets": PopulateWidgets(root, s); break;
+            case "privacy": PopulatePrivacy(root, s); break;
+            case "diagnostics": PopulateDiagnostics(root, s); break;
+        }
+
+        _loading = false;
+    }
+
+    private void PopulateGeneral(StackPanel root, SettingsModel s)
+    {
+        root.Children.Add(SectionHeader("Startup & visibility"));
         root.Children.Add(ToggleRow("Start with Windows",
             "Runs at sign-in (HKCU Run key)",
             s.EnableAtStartup, v => { Set(x => x.EnableAtStartup = v); StartupRegistration.Apply(v); }));
@@ -251,7 +318,6 @@ public partial class SettingsWindow : Window
         root.Children.Add(ToggleRow("Draggable position", "Drag the pill horizontally to reposition it",
             true, _ => { }));
 
-        // ---- Hotkeys ----
         root.Children.Add(SectionHeader("Global hotkeys"));
         root.Children.Add(TextRow("Toggle bar", "Examples: Ctrl+Alt+Space, Ctrl+Shift+B, F9",
             s.HotkeyToggle, v => Set(x => x.HotkeyToggle = v)));
@@ -259,9 +325,14 @@ public partial class SettingsWindow : Window
             s.HotkeyMedia, v => Set(x => x.HotkeyMedia = v)));
         root.Children.Add(TextRow("Timer", "Start or show a 5-minute timer",
             s.HotkeyTimer, v => Set(x => x.HotkeyTimer = v)));
+    }
 
-        // ---- Appearance ----
-        root.Children.Add(SectionHeader("Appearance"));
+    private void PopulateAppearance(StackPanel root, SettingsModel s)
+    {
+        root.Children.Add(SectionHeader("Theme"));
+        root.Children.Add(ComboRow("Theme", "Dark, Light, or extra-transparent glass",
+            new[] { "Dark", "Light", "Translucent" }, (int)s.Theme,
+            i => Set(x => x.Theme = (AppTheme)i)));
         root.Children.Add(ComboRow("Accent color", null,
             new[] { "Blue", "Purple", "Pink", "Green", "Orange", "Yellow", "Red", "Sky", "Gray" },
             AccentIndex(s.AccentColor),
@@ -269,6 +340,8 @@ public partial class SettingsWindow : Window
         root.Children.Add(SliderRow("Background opacity", null,
             0.4, 1.0, s.Opacity, v => Set(x => x.Opacity = v),
             v => $"{Math.Round(v * 100)}%"));
+
+        root.Children.Add(SectionHeader("Shape"));
         root.Children.Add(SliderRow("Corner radius", null,
             8, 40, s.CornerRadius, v => Set(x => x.CornerRadius = v),
             v => $"{Math.Round(v)}"));
@@ -283,7 +356,6 @@ public partial class SettingsWindow : Window
         root.Children.Add(ToggleRow("Drop shadow", null, s.ShadowEnabled,
             v => Set(x => x.ShadowEnabled = v)));
 
-        // ---- Animations ----
         root.Children.Add(SectionHeader("Animations"));
         root.Children.Add(SliderRow("Animation speed", "1.0 = default spring feel",
             0.3, 2.0, s.AnimationSpeed, v => Set(x => x.AnimationSpeed = v),
@@ -296,13 +368,19 @@ public partial class SettingsWindow : Window
             v => $"{Math.Round(v)}"));
         root.Children.Add(ToggleRow("Reduce motion", "Shortens all transitions",
             s.ReduceMotion, v => Set(x => x.ReduceMotion = v)));
+    }
 
-        // ---- Features ----
-        root.Children.Add(SectionHeader("Features"));
+    private void PopulateWidgets(StackPanel root, SettingsModel s)
+    {
+        root.Children.Add(SectionHeader("Media & sound"));
         root.Children.Add(ToggleRow("Media player", "Album art, transport, progress",
             s.FeatureMedia, v => Set(x => x.FeatureMedia = v)));
         root.Children.Add(ToggleRow("Volume", null, s.FeatureVolume,
             v => Set(x => x.FeatureVolume = v)));
+        root.Children.Add(ToggleRow("Show album art on collapsed pill",
+            null, s.CollapsedMediaArt, v => Set(x => x.CollapsedMediaArt = v)));
+
+        root.Children.Add(SectionHeader("System"));
         root.Children.Add(ToggleRow("Brightness",
             "Internal panels only (WMI); external monitors without DDC are skipped",
             s.FeatureBrightness, v => Set(x => x.FeatureBrightness = v)));
@@ -312,6 +390,17 @@ public partial class SettingsWindow : Window
             v => Set(x => x.FeatureNetwork = v)));
         root.Children.Add(ToggleRow("Bluetooth", null, s.FeatureBluetooth,
             v => Set(x => x.FeatureBluetooth = v)));
+        root.Children.Add(ToggleRow("System monitor",
+            "CPU / GPU / RAM card; also adds a tray toggle",
+            s.FeatureSystemMonitor, v =>
+            {
+                Set(x => x.FeatureSystemMonitor = v);
+                try { if (v) App.SysMon?.Activate(); else App.SysMon?.Deactivate(); } catch { }
+            }));
+        root.Children.Add(ToggleRow("CPU / RAM on collapsed pill",
+            null, s.SystemMonitorInBar, v => Set(x => x.SystemMonitorInBar = v)));
+
+        root.Children.Add(SectionHeader("Activity"));
         root.Children.Add(ToggleRow("Timers, stopwatch, focus", null, s.FeatureTimers,
             v => Set(x => x.FeatureTimers = v)));
         root.Children.Add(ToggleRow("Downloads",
@@ -324,45 +413,69 @@ public partial class SettingsWindow : Window
             s.FeatureScreenshots, v => Set(x => x.FeatureScreenshots = v)));
         root.Children.Add(ToggleRow("Privacy indicators", "Camera / microphone in use",
             s.FeaturePrivacyIndicators, v => Set(x => x.FeaturePrivacyIndicators = v)));
-        root.Children.Add(ToggleRow("System monitor",
-            "CPU / GPU / RAM card; also adds a tray toggle",
-            s.FeatureSystemMonitor, v =>
-            {
-                Set(x => x.FeatureSystemMonitor = v);
-                try { if (v) App.SysMon?.Activate(); else App.SysMon?.Deactivate(); } catch { }
-            }));
         root.Children.Add(ToggleRow("Notifications",
             "Needs packaged (MSIX) notification access — gracefully disabled in .exe builds",
             s.FeatureNotifications, v => Set(x => x.FeatureNotifications = v)));
-        root.Children.Add(ToggleRow("Show album art on collapsed pill",
-            null, s.CollapsedMediaArt, v => Set(x => x.CollapsedMediaArt = v)));
-        root.Children.Add(ToggleRow("CPU / RAM on collapsed pill",
-            null, s.SystemMonitorInBar, v => Set(x => x.SystemMonitorInBar = v)));
+    }
 
-        // ---- Privacy ----
-        root.Children.Add(SectionHeader("Privacy"));
+    private void PopulatePrivacy(StackPanel root, SettingsModel s)
+    {
+        root.Children.Add(SectionHeader("Permissions"));
         root.Children.Add(ToggleRow("Clipboard format monitor",
             "Detects that a copy happened and its format only — contents are never read or stored (off by default)",
             s.ClipboardMonitoring, v => Set(x => x.ClipboardMonitoring = v)));
         root.Children.Add(ToggleRow("Notification access",
             "Windows requires a packaged app for notification listening; available when installed via the installer",
             s.NotificationAccess, v => Set(x => x.NotificationAccess = v)));
+
+        root.Children.Add(SectionHeader("Your data"));
         root.Children.Add(ToggleRow("Local-only mode",
             "All processing stays on this PC (permanently on)",
             s.LocalOnlyMode, _ => { }));
         root.Children.Add(ToggleRow("Anonymous telemetry",
             "Never sent — the app contains no network reporting code (permanently off)",
             false, _ => { }));
+        root.Children.Add(new TextBlock
+        {
+            Text = "Windows Dynamic Bar has no accounts, no analytics, and no servers. " +
+                   "Every feature runs locally; nothing ever leaves this PC.",
+            FontSize = 11, Foreground = Faint, TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 8, 0, 0),
+            FontFamily = new FontFamily("Segoe UI Variable Text, Segoe UI"),
+        });
+    }
 
-        // ---- About ----
+    private void PopulateDiagnostics(StackPanel root, SettingsModel s)
+    {
         root.Children.Add(SectionHeader("About"));
         root.Children.Add(Row(App.AppName + " " + App.InfoVersion,
-            $"Settings: {App.Settings?.SettingsPath}",
+            $"Settings file: {App.Settings?.SettingsPath}",
             new TextBlock
             {
-                Text = "Open-source style build · no ads · no accounts",
+                Text = "Local-only · no ads · no accounts",
                 FontSize = 11, Foreground = Faint, VerticalAlignment = VerticalAlignment.Center,
             }));
+
+        root.Children.Add(SectionHeader("This PC"));
+        foreach (var (label, value) in CollectDiagnostics())
+            root.Children.Add(Row(label, null, new TextBlock
+            {
+                Text = value, FontSize = 11.5, Foreground = Muted,
+                VerticalAlignment = VerticalAlignment.Center,
+                HorizontalAlignment = System.Windows.HorizontalAlignment.Right,
+            }));
+
+        root.Children.Add(SectionHeader("Services"));
+        foreach (var (label, value) in CollectServiceStatuses())
+            root.Children.Add(Row(label, null, new TextBlock
+            {
+                Text = value, FontSize = 11.5,
+                Foreground = value == "ready" ? Muted : new SolidColorBrush(Color.FromRgb(0xFF, 0x9F, 0x0A)),
+                VerticalAlignment = VerticalAlignment.Center,
+                HorizontalAlignment = System.Windows.HorizontalAlignment.Right,
+            }));
+
+        root.Children.Add(SectionHeader("Logs & files"));
         root.Children.Add(ButtonRow(
             ("Open logs", () =>
             {
@@ -387,8 +500,67 @@ public partial class SettingsWindow : Window
                 }
                 catch (Exception ex) { Log.Error("Open settings file", ex); }
             })));
+        root.Children.Add(ButtonRow(
+            ("Copy diagnostics", () =>
+            {
+                try
+                {
+                    System.Windows.Clipboard.SetText(BuildDiagnosticsReport());
+                    StatusText.Text = "Diagnostics copied to clipboard";
+                }
+                catch (Exception ex) { Log.Error("Copy diagnostics", ex); StatusText.Text = "Copy failed"; }
+            })));
+    }
 
-        _loading = false;
+    internal static List<(string Label, string Value)> CollectDiagnostics()
+    {
+        var list = new List<(string, string)>
+        {
+            ("App version", App.InfoVersion),
+            ("OS", Environment.OSVersion.VersionString),
+            (".NET runtime", Environment.Version.ToString()),
+            ("Process arch", System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture.ToString()),
+            ("Monitors", "…"),
+        };
+        try
+        {
+            var mons = NativeMethods.GetMonitors();
+            list[4] = ("Monitors", mons.Count == 0 ? "none detected" : $"{mons.Count} detected");
+        }
+        catch { list[4] = ("Monitors", "query failed"); }
+        return list;
+    }
+
+    internal static List<(string Label, string Value)> CollectServiceStatuses()
+    {
+        bool Ok(object? o) => o is not null;
+        return new List<(string, string)>
+        {
+            ("Volume", Ok(App.Volume) ? "ready" : "failed"),
+            ("Brightness", Ok(App.Brightness) ? "ready" : "failed"),
+            ("Media", Ok(App.Media) ? "ready" : "failed"),
+            ("Battery", Ok(App.Battery) ? "ready" : "failed"),
+            ("Network", Ok(App.Network) ? "ready" : "failed"),
+            ("Bluetooth", Ok(App.Bluetooth) ? "ready" : "failed"),
+            ("Timers", Ok(App.Timer) ? "ready" : "failed"),
+            ("System monitor", Ok(App.SysMon) ? "ready" : "failed"),
+        };
+    }
+
+    internal static string BuildDiagnosticsReport()
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine($"{App.AppName} {App.InfoVersion}");
+        sb.AppendLine($"Generated: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+        sb.AppendLine();
+        foreach (var (l, v) in CollectDiagnostics()) sb.AppendLine($"{l}: {v}");
+        sb.AppendLine();
+        sb.AppendLine("Services:");
+        foreach (var (l, v) in CollectServiceStatuses()) sb.AppendLine($"  {l}: {v}");
+        sb.AppendLine();
+        sb.AppendLine($"Settings: {App.Settings?.SettingsPath}");
+        sb.AppendLine($"Logs: {Log.LogDirectory}");
+        return sb.ToString();
     }
 
     private static string[] BuildMonitorItems()
@@ -430,7 +602,7 @@ public partial class SettingsWindow : Window
         {
             App.Settings?.Save(new SettingsModel());
             StartupRegistration.Apply(true);
-            Populate();
+            Populate(_page);
             StatusText.Text = "Defaults restored";
         }
         catch (Exception ex) { Log.Error("Reset failed", ex); }

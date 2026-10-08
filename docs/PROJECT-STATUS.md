@@ -1,7 +1,7 @@
 # Windows Dynamic Bar — Project Status & Working Doc
 
 > Location: `C:\Users\swaya\Desktop\TIMEPASS\dynamic island\dynamic-island`
-> Last verified: build 0 errors / 0 warnings, tests **14/14 pass**, smoke-tested running.
+> Last verified: build 0 errors / 0 warnings, tests **26/26 pass**, v1.1.0.
 > Single git commit (`d021233 "yes"`). Not yet pushed to GitHub (auth pending).
 
 ---
@@ -11,12 +11,14 @@
 ### Big picture
 
 ```
-┌─ SERVICES (16) ─────────────────────────┐
+┌─ SERVICES (17) ─────────────────────────┐
 │ Media, Volume, Brightness, Battery,     │
 │ Network, Bluetooth, Privacy, Clipboard, │
 │ Downloads, Usb, Screenshots, Timer,     │
 │ Stopwatch, Focus, SysMon, Notifications │
-│   each: native API → BarEvent.Raise()   │
+│ + SystemTelemetryService                │
+│   each: native API → Bus.Raise() (or    │
+│   TelemetryUpdated for the hover zone)  │
 └──────────────────┬──────────────────────┘
                    ▼
             EventBus (Core/Events)
@@ -29,14 +31,25 @@
    • OnBusEvent → RenderEvent(evt)
    • Expand() → springs grow Pill to content
    • idle / Deactivated / fullscreen → Collapse()
+   • hover-probe (80ms) drives the telemetry zone
                    ▼
       Pill (Border, max 440×210 DIP)
       One shared "card" UI, reconfigured per event kind
+      Left of the pill: Telemetry Zone (rail + metric panel)
 ```
 
 Everything is **event-driven**. Services never touch UI; they `Bus.Raise(BarEvent.Create(kind, ...))`.
 `BarWindow` is the only consumer. This is the key seam: to add a widget you touch **2 files**
-(a service emit + a `Render*` method), not the whole app.
+(a service emit + a `Render*` method), not the whole app. The telemetry zone is the one exception:
+`SystemTelemetryService` raises `TelemetryUpdated` (sampler thread) and `BarWindow` marshals to the
+UI thread, so the sampler can live at its own pace and shut down when the zone is hidden.
+
+### Telemetry zone interaction
+- Collapsed pill hovered + `FeatureSystemMonitor` on + no priority widget → **rail** (CPU/GPU/RAM
+  circles) debounced 130 ms; hover a circle → **metric panel** with live sparkline (120 ms);
+  leaving → metric closes to rail (200 ms) then zone hides (180 ms).
+- Window grows LEFT while the pill keeps its screen position (right edge fixed); blur + hit-test
+  regions follow. Sampler activates on zone open, deactivates on close.
 
 ### Composition root
 `App.xaml.cs` builds every service in a `try/catch` (one broken subsystem must never kill the bar),
@@ -88,15 +101,15 @@ One shared layout; each `Render*` method shows/hides named rows:
 | Area | Status | Notes |
 |---|---|---|
 | Build | ✅ 0 err / 0 warn | `dotnet build ... -c Debug -p:Platform=x64` |
-| Tests | ✅ 14/14 | EventBus, springs, hotkeys, settings, formats, tween |
-| Launch | ✅ smoke-tested | startup **969 ms**, logs at `%AppData%\WindowsDynamicBar\logs\` |
+| Tests | ✅ 26/26 | EventBus, springs, hotkeys, settings, formats, tween, RSSI, availability flags, diagnostics, gaming threshold, telemetry policy/history/parser/disc |
+| Launch | ✅ smoke-tested | startup **969 ms** (54:50 instance) / 1744 ms (debug), logs at `%AppData%\WindowsDynamicBar\logs\` |
 | Idle perf | ✅ **1.48%** CPU of one core | springs/tweens stop when settled |
 | Memory | ⚠️ 257 MB WS | normal for self-contained .NET 8 WPF (runtime baseline) |
 | Media widget | ✅ | SMTC session, art via `DataReader`, prev/play/next, seek slider |
 | Volume | ✅ | Core Audio events, 60 ms coalesce, slider sets volume |
 | Brightness | ✅/⚠️ | WMI internal panels — works only where drivers expose it |
 | Battery | ✅ | PowerModeChanged + low-freq poll; charging glyph |
-| Network | ✅ | event + poll; SSID/IPv4/adapter; 4-bar signal UI |
+| Network | ✅ | event + poll; SSID/IPv4/adapter; **real RSSI bars** (wlanapi.dll), hidden when unknown |
 | Bluetooth | ✅ | DeviceWatcher; connect/disconnect events; name classification |
 | Privacy (cam/mic) | ✅ | device in-use watchers |
 | Downloads | ⚠️ heuristic | 1 s poll of Downloads folder temp files |
@@ -105,12 +118,16 @@ One shared layout; each `Render*` method shows/hides named rows:
 | Timer/Stopwatch | ✅ | 250 ms/100 ms ticks; toast on finish; priority 99 |
 | Focus | ✅ | quiets the bar; toggle from card |
 | SysMon | ✅ | PDH CPU/GPU + GlobalMemoryStatusEx RAM; perf-mode-scaled interval |
+| Telemetry island | ✅ | hover rail + metric graph panel; sampler on-demand; DXGI GPU names/VRAM; Policy-driven debounce |
+| Media disc | ✅ | spinning CD/vinyl art in collapsed pill; decel/crossfade; Reduce-motion aware |
 | Notifications | ⚠️ see bugs | listener needs OS permission; likely denied for plain .exe |
 | Clipboard | ⚠️ | format-presence only, **off by default** |
 | Tray | ✅ | toggle / sysmon / show / settings / logs / about / exit |
-| Hotkeys | ✅ | parser + RegisterHotkey; Ctrl+Alt+B/M/T defaults |
-| Settings window | ✅ | programmatic rows; debounced auto-save; reset defaults |
-| First-run wizard | ✅ | shown once, sets `FirstRunCompleted` |
+| Hotkeys | ✅ | parser + RegisterHotkey; Ctrl+Alt+Space/M/T defaults; tray label reads live setting |
+| Settings window | ✅ | sidebar pages (General/Appearance/Widgets/Privacy/Diagnostics); debounced auto-save; reset defaults |
+| First-run wizard | ✅ | 3-step wizard (theme + startup + hotkeys); sets `FirstRunCompleted` |
+| Themes | ✅ | Dark / Light / Translucent + 9 accents via ThemeService |
+| Gaming mode | ✅ | tray toggle; suppresses events below Privacy priority (60) |
 | Installer | ✅ | Inno Setup 6, per-user, no admin |
 | Glyphs | ✅ audited | all 25 code points verified vs Microsoft's official table |
 | Single-file publish | ✅ fixed | **requires** `-p:IncludeNativeLibrariesForSelfExtract=true` |
@@ -119,9 +136,8 @@ One shared layout; each `Render*` method shows/hides named rows:
 
 ## 3. What is wrong (known bugs / deviations)
 
-1. **Hotkey text mismatch** — `FirstRunWindow.xaml` + `TrayController` say *"Ctrl+Alt+Space toggle"*,
-   but the actual default in settings is **Ctrl+Alt+B**. One of them must change (cheap fix:
-   make defaults Ctrl+Alt+Space everywhere, or edit the two strings).
+1. ~~**Hotkey text mismatch**~~ — **RESOLVED (1.1.0)**: default is `Ctrl+Alt+Space` in
+   `SettingsModel.cs`; tray label reads the live setting; FirstRun wizard matches.
 2. **Notifications from a plain .exe are unreliable** — `UserNotificationListener` wants
    package identity (MSIX) or explicit user grant. Code degrades gracefully (logs + disables),
    but expect "notification API unavailable" until the app is MSIX-packaged or the user grants
@@ -131,7 +147,8 @@ One shared layout; each `Render*` method shows/hides named rows:
    smaller than threshold, other folders.
 4. **Brightness** only works on machines whose panels expose WMI internal interfaces
    (`WmiMonitorBrightness`); external monitors will show nothing useful.
-5. **Network signal bars are decorative** — no real RSSI is read; bars reflect link state, not dBm.
+5. ~~**Network signal bars are decorative**~~ — **RESOLVED (1.1.0)**: real RSSI via
+   `wlanapi.dll`; bars hidden (-1) when no signal data is available.
 6. **Two copies of the project exist** — `C:\Users\swaya\WindowsDynamicBar` (old) and this one.
    They are byte-identical right now, but will diverge. **Delete or archive the old one.**
 7. **Release artifacts are not in git** (163 MB exe > GitHub's 100 MB limit; 48 MB setup also
@@ -139,25 +156,31 @@ One shared layout; each `Render*` method shows/hides named rows:
    `release/README.txt`.
 8. **Drag persists X only** — vertical position is always top (`Margin 40,6`). Fine for an
    island, but there is no "monitor choice" UI for multi-monitor users.
-9. **Settings window is functional but plain** — no icons, no live preview, no per-widget
-   ordering; built programmatically in `SettingsWindow.xaml.cs` (`Populate()`).
+   **Update (1.1.0):** `MonitorIndex` setting + display-change re-anchoring added; offset
+   clamped on monitor change. A drag-Y setting is still open.
+9. ~~**Settings window is functional but plain**~~ — **RESOLVED (1.1.0)**: sidebar with
+   page navigation, header/subtitle, Diagnostics page with live service status.
 10. **GPU counter** `GPU Engine(*)\Utilization Percentage` can fail on some drivers → GPU row
-    stays 0% (logged "GPU counters unavailable"; CPU/RAM still work).
-11. **`release/README.txt` hotkey line** may also drift from actual defaults — treat
-    `SettingsModel.cs` as the single source of truth.
+    stays **N/A** (1.1.0: honest availability flag instead of fake 0%; CPU/RAM still work). The new
+    telemetry zone shows "Data unavailable" for missing GPU counters and reads adapter names from DXGI.
+11. ~~**`release/README.txt` hotkey line**~~ — **RESOLVED (1.1.0)**: regenerated with
+    Ctrl+Alt+Space; `SettingsModel.cs` remains source of truth.
+12. **Telemetry zone GPU** currently shows the first available adapter only (its utilization + VRAM).
+    A future wired-up "which GPU" selector is planned; multi-adapter sums are validated in tests but
+    not yet surfaced in the panel.
 
 ---
 
 ## 4. What is pending
 
 - [ ] **Push to GitHub** — repo committed locally; blocked on `gh auth login` / PAT.
-- [ ] Write this doc into the repo's `docs/` ✅ (this file) and a top-level `README.md` for GitHub.
-- [ ] Fix hotkey label mismatch (#1 above).
+- [x] Write `docs/` + top-level `README.md` (1.1.0: README, LICENSE, CHANGELOG, PRIVACY, BUILD, ARCHITECTURE).
+- [x] Fix hotkey label mismatch (1.1.0).
 - [ ] Decide notification strategy: MSIX package vs AUMID-only (affects installer story).
-- [ ] Delete/archived old copy at `C:\Users\swaya\WindowsDynamicBar` (#6).
-- [ ] Light-theme polish (dark works; light exists in settings but visual audit not done).
+- [ ] Delete/archive old copy at `C:\Users\swaya\WindowsDynamicBar` (#6).
+- [x] Light-theme polish (1.1.0: ThemeService with Dark/Light/Translucent).
 - [ ] End-to-end manual test pass on a second machine / clean VM (installer + wizard + hotkeys).
-- [ ] Per-monitor support (bar currently centers on primary work area).
+- [x] Per-monitor support (1.1.0: `MonitorIndex` + display-change re-anchor + offset clamp).
 
 ---
 
@@ -169,7 +192,7 @@ One shared layout; each `Render*` method shows/hides named rows:
 - CI: GitHub Actions windows-latest → `dotnet build` + run tests (5 lines of YAML).
 
 **P1 – UX quality**
-- Collapsed orb: show live mini-info (♪ spinning art when media plays, battery %, timer countdown).
+- Collapsed orb mini-info: spinning media art is done (MediaDisc); battery % / timer countdown still open.
 - Light theme pass + system-theme follow (`RequestedTheme` sync with Windows).
 - Settings: icons per section, widget enable previews, "test a widget" button.
 - Seek slider: live time tooltip on hover; scrubbing feedback.
@@ -204,6 +227,8 @@ One shared layout; each `Render*` method shows/hides named rows:
 | Stopwatch tick | 100 ms | `TimerServices` | |
 | Focus break reminder tick | 500 ms | `TimerServices` | |
 | SysMon sample | 200 ms + scaled | `SystemMonitorService` | scaled by `PerformanceMode` |
+| Telemetry sampler | 500/800/1000 ms | `SystemTelemetryService` | perf-mode scaled; runs only while the zone is hovered |
+| Zone hover probe | 80 ms | `BarWindow` | stops when zone feature is off / expanded |
 | Media timeline | 1000 ms | `MediaService` | only with active session |
 | Battery poll | low-freq | `SystemServices` | + `PowerModeChanged` events |
 | Downloads scan | 1000 ms | `PrivacyDownloadServices` | heuristic |
@@ -232,11 +257,11 @@ One shared layout; each `Render*` method shows/hides named rows:
 
 | Combo | Action |
 |---|---|
-| Ctrl+Alt+B | Toggle bar |
+| Ctrl+Alt+Space | Toggle bar |
 | Ctrl+Alt+M | Media widget |
 | Ctrl+Alt+T | Timer widget |
 
-*(Tray + FirstRun wizard currently display Ctrl+Alt+Space for toggle — bug #1.)*
+*(All rebindable in Settings → General; tray label reads the live value.)*
 
 ### Config & data locations
 
@@ -258,11 +283,17 @@ src/WindowsDynamicBar/
 │   ├── Animation/SpringAnimator.cs   springs + tween (add easing here)
 │   ├── Events/EventBus.cs            queue, coalesce, priority, Idle
 │   ├── Logging/Log.cs                file logger
+│   ├── Media/DiscRotation.cs         pure disc spin physics (tested)
 │   ├── Settings/SettingsModel.cs     ← ALL DEFAULTS / FEATURE FLAGS
-│   └── Settings/StartupRegistration.cs
+│   ├── Settings/StartupRegistration.cs
+│   └── Telemetry/                    pure cores (tested)
+│       ├── TelemetryHistory.cs       fixed circular buffer
+│       ├── TelemetryFormat.cs        Bytes/Frequency/Percent
+│       └── TelemetryPolicy.cs        zone state machine + debounce timings
 ├── Interop/
 │   ├── BlurHelper.cs                 DWM blur region per frame
 │   ├── CoreAudio.cs                  volume COM interop
+│   ├── Dxgi.cs                       DXGI factory/adapter enum (names, LUID, VRAM)
 │   └── NativeMethods.cs              user32/dwm/winmm P/Invokes, WM_NCHITTEST
 ├── Services/                        ← one file per subsystem; emit BarEvents
 │   ├── Audio/VolumeBrightnessServices.cs
@@ -270,12 +301,17 @@ src/WindowsDynamicBar/
 │   ├── Notifications/NotificationServices.cs  (+ ToastSender)
 │   ├── Privacy/PrivacyDownloadServices.cs     (privacy, downloads, usb, screenshots)
 │   ├── SystemInfo/SystemServices.cs           (battery, network, bluetooth)
-│   ├── SystemMonitor/SystemMonitorService.cs  (PDH counters)
+│   ├── SystemMonitor/SystemMonitorService.cs  (PDH counters - event card)
+│   ├── SystemMonitor/SystemTelemetryService.cs (sampler for the hover zone)
+│   ├── SystemMonitor/GpuEngineParser.cs        (per-LUID PDH GPU engine grouping)
+│   ├── SystemMonitor/TelemetryTypes.cs         (snapshot records)
 │   └── Timers/TimerServices.cs                (timer, stopwatch, focus)
 └── UI/
     ├── BarWindow.xaml                card layout + styles (glyphs are verified codes!)
-    ├── BarWindow.xaml.cs             expand/collapse, RenderEvent + 13 Render* methods
+    ├── BarWindow.xaml.cs             expand/collapse, RenderEvent + 13 Render* methods,
+    │                                 telemetry-zone probe/state machine + graph drawing
     ├── FirstRunWindow.xaml(.cs)      welcome wizard
+    ├── Media/MediaDisc.xaml(.cs)     rotating CD/vinyl artwork control
     ├── SettingsWindow.xaml(.cs)      programmatic settings builder (Populate)
     └── TrayController.cs           tray menu + pipe server (toggle)
 ```

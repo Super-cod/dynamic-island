@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Build
+        run: dotnet build WindowsDynamicBar.sln -c Debug -p:Platform=x64 --nologo -v minimal
+
+      - name: Test
+        run: .\tests\WindowsDynamicBar.Tests\bin\x64\Debug\net8.0-windows10.0.19041.0\WindowsDynamicBar.Tests.exe
+
+      - name: Publish (single file)
+        run: >
+          dotnet publish src\WindowsDynamicBar\WindowsDynamicBar.csproj -c Release -r win-x64
+          --self-contained true -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true -p:Platform=x64
+
+      - name: Upload portable exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: WindowsDynamicBar-portable
+          path: src\WindowsDynamicBar\bin\x64\Release\net8.0-windows10.0.19041.0\win-x64\publish\WindowsDynamicBar.exe
+          if-no-files-found: error
+
+  installer:
+    # Manual only: requires Inno Setup on the runner.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    needs: build-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Publish
+        run: >
+          dotnet publish src\WindowsDynamicBar\WindowsDynamicBar.csproj -c Release -r win-x64
+          --self-contained true -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true -p:Platform=x64
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build installer
+        run: |
+          Copy-Item "src\WindowsDynamicBar\bin\x64\Release\net8.0-windows10.0.19041.0\win-x64\publish\WindowsDynamicBar.exe" "release\WindowsDynamicBar.exe"
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\WindowsDynamicBar.iss
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: WindowsDynamicBar-Setup
+          path: release\WindowsDynamicBar-Setup.exe
+          if-no-files-found: error

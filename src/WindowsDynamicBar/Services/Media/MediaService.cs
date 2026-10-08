@@ -97,7 +97,7 @@ public sealed class MediaService : IDisposable
         });
     }
 
-    public async Task RefreshAsync(bool showEvent)
+    public async Task RefreshAsync(bool showEvent, bool force = false)
     {
         try
         {
@@ -106,12 +106,13 @@ public sealed class MediaService : IDisposable
             MediaChanged?.Invoke(info);
 
             string key = $"{info.Title}|{info.AppId}";
-            if (showEvent && key != _lastKey)
+            bool trackChanged = key != _lastKey;
+            if (showEvent && (trackChanged || force))
             {
                 _lastKey = key;
                 _bus.Raise(BarEvent.Create(BarEventKind.Media, info.Title,
                     info.Artist, payload: info,
-                    displayDuration: null, priority: 60));
+                    displayDuration: TimeSpan.FromSeconds(4.5), priority: 60));
             }
         }
         catch (Exception ex) { Log.Debug("Media refresh failed", ("error", ex.Message)); }
@@ -180,20 +181,20 @@ public sealed class MediaService : IDisposable
 
     public async Task PlayPauseAsync()
     {
-        try { _current?.TryTogglePlayPauseAsync(); } catch (Exception ex) { Log.Debug("PlayPause", ("error", ex.Message)); }
-        await Task.CompletedTask;
+        try { if (_current is not null) await _current.TryTogglePlayPauseAsync(); }
+        catch (Exception ex) { Log.Debug("PlayPause", ("error", ex.Message)); }
     }
 
     public async Task NextAsync()
     {
-        try { _current?.TrySkipNextAsync(); } catch (Exception ex) { Log.Debug("Next", ("error", ex.Message)); }
-        await Task.CompletedTask;
+        try { if (_current is not null) await _current.TrySkipNextAsync(); }
+        catch (Exception ex) { Log.Debug("Next", ("error", ex.Message)); }
     }
 
     public async Task PreviousAsync()
     {
-        try { _current?.TrySkipPreviousAsync(); } catch (Exception ex) { Log.Debug("Prev", ("error", ex.Message)); }
-        await Task.CompletedTask;
+        try { if (_current is not null) await _current.TrySkipPreviousAsync(); }
+        catch (Exception ex) { Log.Debug("Prev", ("error", ex.Message)); }
     }
 
     public async Task SeekAsync(double fraction)

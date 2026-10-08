@@ -1,0 +1,50 @@
+<UserControl x:Class="WindowsDynamicBar.UI.Media.MediaDisc"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Width="36" Height="36"
+             Focusable="False">
+    <Grid>
+        <Grid.LayoutTransform>
+            <ScaleTransform x:Name="DiscScale" ScaleX="1" ScaleY="1" />
+        </Grid.LayoutTransform>
+
+        <!-- rotating group (vinyl + artwork) -->
+        <Grid x:Name="SpinGroup" RenderTransformOrigin="0.5,0.5">
+            <Grid.RenderTransform>
+                <RotateTransform x:Name="Spin" Angle="0" />
+            </Grid.RenderTransform>
+
+            <Ellipse Fill="#FF1C1C1F" />
+            <Ellipse Stroke="#0DFFFFFF" StrokeThickness="0.6" Width="30" Height="30" />
+            <Ellipse Stroke="#14FFFFFF" StrokeThickness="0.5" Width="25" Height="25" />
+
+            <!-- circular-masked artwork, crossfading -->
+            <Border x:Name="ArtMask" CornerRadius="15" ClipToBounds="True"
+                    Margin="3" IsHitTestVisible="False">
+                <Grid>
+                    <Image x:Name="ArtBack" Stretch="UniformToFill" Visibility="Collapsed" />
+                    <Image x:Name="ArtFront" Stretch="UniformToFill" Visibility="Collapsed" />
+                </Grid>
+            </Border>
+
+            <TextBlock x:Name="Fallback" Text="&#x266B;" FontFamily="Segoe UI Symbol"
+                       FontSize="13" Foreground="#55FFFFFF" HorizontalAlignment="Center"
+                       VerticalAlignment="Center" IsHitTestVisible="False"
+                       Visibility="Collapsed" />
+
+            <Path x:Name="Sheen" Stroke="#30FFFFFF" StrokeThickness="1.1"
+                  StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                  IsHitTestVisible="False" Opacity="0.85">
+                <Path.Data>
+                    <PathGeometry Figures="M 11.2 12.0 A 11.6 11.6 0 0 1 22.6 10.4" />
+                </Path.Data>
+            </Path>
+        </Grid>
+
+        <!-- static CD details -->
+        <Ellipse Stroke="#2CFFFFFF" StrokeThickness="1" IsHitTestVisible="False" />
+        <Ellipse Stroke="#10FFFFFF" StrokeThickness="0.7" Width="29" Height="29" IsHitTestVisible="False" />
+        <Ellipse x:Name="Hole" Width="5.4" Height="5.4" Fill="#FF0F0F12"
+                 Stroke="#2EFFFFFF" StrokeThickness="0.5" IsHitTestVisible="False" />
+    </Grid>
+</UserControl>

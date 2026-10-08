@@ -1,0 +1,56 @@
+<UserControl x:Class="WindowsDynamicBar.UI.TelemetryIconRow"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Background="Transparent"
+             UseLayoutRounding="True">
+
+    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
+
+        <!-- CPU Icon Gauge -->
+        <StackPanel Width="36" Margin="0,0,8,0" Tag="cpu">
+            <Border x:Name="CpuBorder" Width="36" Height="36" CornerRadius="18"
+                    Background="{DynamicResource WdbDimBrush}"
+                    BorderBrush="{DynamicResource WdbHairlineBrush}" BorderThickness="1"
+                    MouseLeftButtonUp="OnIconClick" Cursor="Hand">
+                <TextBlock x:Name="CpuText" HorizontalAlignment="Center" VerticalAlignment="Center"
+                           FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="10"
+                           Foreground="{DynamicResource WdbAccentBrush}" Text="…" />
+            </Border>
+            <TextBlock Text="CPU" FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="7.5"
+                       Foreground="{DynamicResource WdbTextMutedBrush}"
+                       HorizontalAlignment="Center" Margin="0,3,0,0" />
+        </StackPanel>
+
+        <!-- GPU Icon Gauge -->
+        <StackPanel Width="36" Margin="0,0,8,0" Tag="gpu">
+            <Border x:Name="GpuBorder" Width="36" Height="36" CornerRadius="18"
+                    Background="{DynamicResource WdbDimBrush}"
+                    BorderBrush="{DynamicResource WdbHairlineBrush}" BorderThickness="1"
+                    MouseLeftButtonUp="OnIconClick" Cursor="Hand">
+                <TextBlock x:Name="GpuText" HorizontalAlignment="Center" VerticalAlignment="Center"
+                           FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="10"
+                           Foreground="{DynamicResource WdbAccentBrush}" Text="…" />
+            </Border>
+            <TextBlock Text="GPU" FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="7.5"
+                       Foreground="{DynamicResource WdbTextMutedBrush}"
+                       HorizontalAlignment="Center" Margin="0,3,0,0" />
+        </StackPanel>
+
+        <!-- RAM Icon Gauge -->
+        <StackPanel Width="36" Tag="ram">
+            <Border x:Name="RamBorder" Width="36" Height="36" CornerRadius="18"
+                    Background="{DynamicResource WdbDimBrush}"
+                    BorderBrush="{DynamicResource WdbHairlineBrush}" BorderThickness="1"
+                    MouseLeftButtonUp="OnIconClick" Cursor="Hand">
+                <TextBlock x:Name="RamText" HorizontalAlignment="Center" VerticalAlignment="Center"
+                           FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="10"
+                           Foreground="{DynamicResource WdbAccentBrush}" Text="…" />
+            </Border>
+            <TextBlock Text="RAM" FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="7.5"
+                       Foreground="{DynamicResource WdbTextMutedBrush}"
+                       HorizontalAlignment="Center" Margin="0,3,0,0" />
+        </StackPanel>
+
+    </StackPanel>
+
+</UserControl>

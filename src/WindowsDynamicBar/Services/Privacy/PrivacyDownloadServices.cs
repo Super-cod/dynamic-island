@@ -326,10 +326,10 @@ public sealed class DownloadService : IDisposable
                 {
                     var fi = new FileInfo(path);
                     if (!fi.Exists) { _active.Remove(path); continue; }
+                    long delta = fi.Length - st.LastBytes;
                     double secs = (now - st.LastTick).TotalSeconds;
                     if (secs >= 0.9)
                     {
-                        long delta = fi.Length - st.LastBytes;
                         st.Speed = delta / secs;
                         st.LastBytes = fi.Length;
                         st.LastTick = now;
@@ -337,7 +337,10 @@ public sealed class DownloadService : IDisposable
                     // Heuristic total: never shrink below current; grow with observed rate for ETA.
                     st.TotalEstimate = Math.Max(st.TotalEstimate, fi.Length + (long)(st.Speed * 8));
                     double frac = st.TotalEstimate > 0 ? Math.Min(0.999, fi.Length / (double)st.TotalEstimate) : 0;
-                    updates.Add((path, st.DisplayName, frac, st.Speed));
+                    // Only surface files that are actually moving — a stalled temp file
+                    // must not keep popping the bar open once its card has collapsed.
+                    if (delta > 0)
+                        updates.Add((path, st.DisplayName, frac, st.Speed));
                 }
                 catch { _active.Remove(path); }
             }
@@ -350,7 +353,7 @@ public sealed class DownloadService : IDisposable
             _bus.Raise(BarEvent.Create(BarEventKind.Download, name,
                 $"{Math.Round(frac * 100)}% · {speedText}", value: frac,
                 valueText: $"{Math.Round(frac * 100)}%", priority: 35,
-                displayDuration: TimeSpan.FromSeconds(2)));
+                displayDuration: TimeSpan.FromSeconds(2), isTick: true));
         }
     }
 

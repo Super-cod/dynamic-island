@@ -66,6 +66,10 @@ public sealed class TimerService : IDisposable
         }
         _tick.Change(TimeSpan.Zero, TimeSpan.FromMilliseconds(250));
         Emit();
+        // One card on start; after it expires the collapsed pill carries the countdown.
+        _bus.Raise(BarEvent.Create(BarEventKind.Timer, label,
+            Format(duration), value: 0, valueText: Format(duration),
+            payload: Current, priority: 58, displayDuration: TimeSpan.FromSeconds(4)));
     }
 
     public void Pause()
@@ -127,14 +131,9 @@ public sealed class TimerService : IDisposable
         }
         TimerChanged?.Invoke(info);
 
-        // Show in bar every second while running (coalesced by EventBus kind).
-        if (info.State == TimerState.Running)
-        {
-            _bus.Raise(BarEvent.Create(BarEventKind.Timer, _label,
-                Format(info.Remaining), value: info.Progress, valueText: Format(info.Remaining),
-                payload: info, priority: 58, displayDuration: TimeSpan.FromSeconds(2)));
-        }
-        else if (finished)
+        // Running ticks are ambient: the collapsed pill and the open card refresh via
+        // TimerChanged; only the completion is worth popping the bar for.
+        if (finished)
         {
             _bus.Raise(BarEvent.Create(BarEventKind.Toast, "Timer finished", _label,
                 payload: _label, priority: 99, displayDuration: TimeSpan.FromSeconds(8)));
@@ -194,6 +193,10 @@ public sealed class StopwatchService : IDisposable
         }
         _tick.Change(TimeSpan.Zero, TimeSpan.FromMilliseconds(100));
         Emit();
+        // One card on start; the 100 ms ticks then drive the collapsed pill / open card.
+        _bus.Raise(BarEvent.Create(BarEventKind.Stopwatch, "Stopwatch", FormatMs(Current.Elapsed),
+            valueText: FormatMs(Current.Elapsed), payload: Current, priority: 56,
+            displayDuration: TimeSpan.FromSeconds(3)));
     }
 
     public void Pause()
@@ -229,10 +232,6 @@ public sealed class StopwatchService : IDisposable
     {
         var info = Current;
         StopwatchChanged?.Invoke(info);
-        if (info.Running)
-            _bus.Raise(BarEvent.Create(BarEventKind.Stopwatch, "Stopwatch", FormatMs(info.Elapsed),
-                valueText: FormatMs(info.Elapsed), payload: info, priority: 56,
-                displayDuration: TimeSpan.FromSeconds(2)));
     }
 
     public static string FormatMs(TimeSpan ts)
@@ -294,6 +293,10 @@ public sealed class FocusService : IDisposable
         }
         _tick.Change(TimeSpan.Zero, TimeSpan.FromMilliseconds(500));
         Emit();
+        // One card on start; ticks then refresh the collapsed pill / open card quietly.
+        _bus.Raise(BarEvent.Create(BarEventKind.Focus, "Focus", TimerService.Format(duration),
+            value: 0, valueText: TimerService.Format(duration), payload: Current,
+            priority: 57, displayDuration: TimeSpan.FromSeconds(4)));
     }
 
     public void Pause()
@@ -329,7 +332,6 @@ public sealed class FocusService : IDisposable
 
     private void OnTick()
     {
-        FocusInfo info;
         bool done = false;
         lock (_sync)
         {
@@ -343,7 +345,6 @@ public sealed class FocusService : IDisposable
                 done = !_notified;
                 _notified = true;
             }
-            info = Current;
         }
         Emit();
         if (done)
@@ -351,13 +352,6 @@ public sealed class FocusService : IDisposable
             _bus.Raise(BarEvent.Create(BarEventKind.Toast, "Focus session complete",
                 "Take a break", priority: 99, displayDuration: TimeSpan.FromSeconds(8)));
             try { System.Media.SystemSounds.Exclamation.Play(); } catch { }
-        }
-        else if (info.Running)
-        {
-            _bus.Raise(BarEvent.Create(BarEventKind.Focus, "Focus", TimerService.Format(info.Remaining),
-                value: _duration.TotalSeconds > 0 ? 1 - info.Remaining.TotalSeconds / _duration.TotalSeconds : 0,
-                valueText: TimerService.Format(info.Remaining), payload: info, priority: 57,
-                displayDuration: TimeSpan.FromSeconds(2)));
         }
     }
 
