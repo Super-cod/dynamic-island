@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>WindowsDynamicBar</RootNamespace>
+    <AssemblyName>WindowsDynamicBar</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <AssemblyTitle>Windows Dynamic Bar</AssemblyTitle>
+    <Product>Windows Dynamic Bar</Product>
+    <Company>Windows Dynamic Bar Project</Company>
+    <FileVersion>1.0.0.0</FileVersion>
+    <InformationalVersion>1.0.0</InformationalVersion>
+    <Version>1.0.0</Version>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <Prefer32Bit>false</Prefer32Bit>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <ApplicationIcon>Assets\app.ico</ApplicationIcon>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <DebugType>portable</DebugType>
+    <NoWarn>$(NoWarn);CA1416;SYSLIB0014;WFAC010</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Management" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="Assets\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,177 @@
+using System.Diagnostics;
+using System.Windows;
+using System.Windows.Threading;
+using WindowsDynamicBar.Core.Events;
+using WindowsDynamicBar.Core.Logging;
+using WindowsDynamicBar.Core.Settings;
+using WindowsDynamicBar.Services.Audio;
+using WindowsDynamicBar.Services.Media;
+using WindowsDynamicBar.Services.Notifications;
+using WindowsDynamicBar.Services.Privacy;
+using WindowsDynamicBar.Services.SystemInfo;
+using WindowsDynamicBar.Services.SystemMonitor;
+using WindowsDynamicBar.Services.Timers;
+using WindowsDynamicBar.UI;
+
+namespace WindowsDynamicBar;
+
+public partial class App : System.Windows.Application
+{
+    private Mutex? _singleInstanceMutex;
+    public const string MutexName = "Local\\WindowsDynamicBar_SingleInstance_v1";
+
+    // Composition root
+    public static SettingsService Settings { get; private set; } = null!;
+    public static EventBus Bus { get; private set; } = null!;
+    public static VolumeService Volume { get; private set; } = null!;
+    public static BrightnessService Brightness { get; private set; } = null!;
+    public static MediaService Media { get; private set; } = null!;
+    public static BatteryService Battery { get; private set; } = null!;
+    public static NetworkService Network { get; private set; } = null!;
+    public static BluetoothService Bluetooth { get; private set; } = null!;
+    public static PrivacyService Privacy { get; private set; } = null!;
+    public static ClipboardService Clipboard { get; private set; } = null!;
+    public static DownloadService Downloads { get; private set; } = null!;
+    public static UsbService Usb { get; private set; } = null!;
+    public static ScreenshotService Screenshots { get; private set; } = null!;
+    public static TimerService Timer { get; private set; } = null!;
+    public static StopwatchService Stopwatch { get; private set; } = null!;
+    public static FocusService Focus { get; private set; } = null!;
+    public static SystemMonitorService SysMon { get; private set; } = null!;
+    public static NotificationListenerService Notifications { get; private set; } = null!;
+
+    public static BarWindow? Bar { get; set; }
+    public static SettingsWindow? SettingsWnd { get; set; }
+    public static TrayController? Tray { get; private set; }
+
+    protected override void OnStartup(StartupEventArgs e)
+    {
+        base.OnStartup(e);
+
+        // Single instance: activate existing instead of spawning a second bar.
+        _singleInstanceMutex = new Mutex(true, MutexName, out bool createdNew);
+        if (!createdNew)
+        {
+            SignalExistingInstance();
+            Shutdown();
+            return;
+        }
+
+        Settings = SettingsService.Instance;
+        var cfg = Settings.Load();
+
+        Log.Init((LogLevel)cfg.LogLevel);
+        Log.Info("Windows Dynamic Bar starting", ("version", InfoVersion), ("pid", Environment.ProcessId));
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+
+        Bus = new EventBus(Dispatcher);
+
+        // Services — each constructed and started defensively: a failure in one
+        // subsystem must never prevent the bar from running.
+        try { Volume = new VolumeService(Bus, Settings); } catch (Exception ex) { Log.Error("Volume ctor", ex); }
+        try { Brightness = new BrightnessService(Bus, Settings); } catch (Exception ex) { Log.Error("Brightness ctor", ex); }
+        try { Media = new MediaService(Bus); } catch (Exception ex) { Log.Error("Media ctor", ex); }
+        try { Battery = new BatteryService(Bus, Settings); } catch (Exception ex) { Log.Error("Battery ctor", ex); }
+        try { Network = new NetworkService(Bus, Settings); } catch (Exception ex) { Log.Error("Network ctor", ex); }
+        try { Bluetooth = new BluetoothService(Bus, Settings); } catch (Exception ex) { Log.Error("Bluetooth ctor", ex); }
+        try { Privacy = new PrivacyService(Bus, Settings); } catch (Exception ex) { Log.Error("Privacy ctor", ex); }
+        try { Clipboard = new ClipboardService(Bus, Settings); } catch (Exception ex) { Log.Error("Clipboard ctor", ex); }
+        try { Downloads = new DownloadService(Bus, Settings); } catch (Exception ex) { Log.Error("Downloads ctor", ex); }
+        try { Usb = new UsbService(Bus, Settings); } catch (Exception ex) { Log.Error("Usb ctor", ex); }
+        try { Screenshots = new ScreenshotService(Bus, Settings); } catch (Exception ex) { Log.Error("Screenshots ctor", ex); }
+        try { Timer = new TimerService(Bus, Settings); } catch (Exception ex) { Log.Error("Timer ctor", ex); }
+        try { Stopwatch = new StopwatchService(Bus); } catch (Exception ex) { Log.Error("Stopwatch ctor", ex); }
+        try { Focus = new FocusService(Bus); } catch (Exception ex) { Log.Error("Focus ctor", ex); }
+        try { SysMon = new SystemMonitorService(Bus, Settings); } catch (Exception ex) { Log.Error("SysMon ctor", ex); }
+        try { Notifications = new NotificationListenerService(Bus, Settings); } catch (Exception ex) { Log.Error("Notifications ctor", ex); }
+
+        // Bar window
+        Bar = new BarWindow();
+        if (cfg.BarEnabled) Bar.Show();
+
+        Tray = new TrayController();
+
+        // Deferred starts (each isolated)
+        StartServiceSafely(() => Volume?.Start(), "volume");
+        StartServiceSafely(() => Brightness?.Start(), "brightness");
+        StartServiceSafelyAsync(async () => await Media.StartAsync(), "media");
+        StartServiceSafely(() => Battery?.Start(), "battery");
+        StartServiceSafely(() => Network?.Start(), "network");
+        StartServiceSafely(() => Bluetooth?.Start(), "bluetooth");
+        StartServiceSafely(() => Privacy?.Start(), "privacy");
+        StartServiceSafely(() => Screenshots?.Start(), "screenshots");
+        StartServiceSafely(() => Downloads?.Start(), "downloads");
+        StartServiceSafelyAsync(async () => await Notifications.StartAsync(), "notifications");
+
+        if (cfg.FeatureSystemMonitor)
+            StartServiceSafely(() => SysMon?.Activate(), "sysmon");
+
+        // First-run experience
+        if (!cfg.FirstRunCompleted)
+        {
+            var wizard = new FirstRunWindow();
+            wizard.Closed += (_, _) => Settings.Update(s => s.FirstRunCompleted = true);
+            wizard.Show();
+        }
+
+        sw.Stop();
+        Log.Info("Startup complete", ("ms", sw.ElapsedMilliseconds));
+    }
+
+    public const string InfoVersion = "1.0.0";
+    public const string AppName = "Windows Dynamic Bar";
+
+    private static void StartServiceSafely(Action action, string name)
+    {
+        try { action(); }
+        catch (Exception ex) { Log.Error($"Service '{name}' failed to start", ex); }
+    }
+
+    private static void StartServiceSafelyAsync(Func<Task> action, string name)
+    {
+        Task.Run(async () =>
+        {
+            try { await action(); }
+            catch (Exception ex) { Log.Error($"Service '{name}' failed to start", ex); }
+        });
+    }
+
+    private void SignalExistingInstance()
+    {
+        try
+        {
+            // Best-effort: find and activate the running instance's window.
+            using var pipe = new System.IO.Pipes.NamedPipeClientStream(
+                ".", "WindowsDynamicBar_Signal", System.IO.Pipes.PipeDirection.Out);
+            pipe.Connect(300);
+            var bytes = System.Text.Encoding.UTF8.GetBytes("activate");
+            pipe.Write(bytes, 0, bytes.Length);
+        }
+        catch { /* old instance may not be listening; exiting is correct anyway */ }
+    }
+
+    private void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)
+    {
+        Log.Error("Unhandled UI exception", e.Exception);
+        e.Handled = true; // never let one bug kill the whole bar
+    }
+
+    protected override void OnExit(ExitEventArgs e)
+    {
+        Log.Info("Shutting down");
+        try { Tray?.Dispose(); } catch { }
+        try { Bar?.Dispose(); } catch { }
+        foreach (IDisposable? svc in new IDisposable?[]
+                 {
+                     Media, Volume, Brightness, Battery, Network, Bluetooth, Privacy,
+                     Clipboard, Downloads, Screenshots, Timer, Stopwatch, Focus, SysMon, Notifications
+                 })
+        {
+            try { svc?.Dispose(); } catch { }
+        }
+        Log.Shutdown();
+        _singleInstanceMutex?.ReleaseMutex();
+        base.OnExit(e);
+    }
+}

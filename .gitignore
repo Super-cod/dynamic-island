@@ -1,0 +1,19 @@
+## build output
+bin/
+obj/
+out/
+
+## IDE
+.vs/
+*.user
+*.suo
+
+## test results
+TestResults/
+
+## release artifacts (build them; exes are too large for GitHub)
+release/*.exe
+release/*.pdb
+
+## logs
+*.log

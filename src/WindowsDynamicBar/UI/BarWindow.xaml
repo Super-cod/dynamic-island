@@ -1,0 +1,357 @@
+<Window x:Class="WindowsDynamicBar.UI.BarWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Windows Dynamic Bar"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        ShowInTaskbar="False"
+        Topmost="True"
+        ResizeMode="NoResize"
+        SizeToContent="Manual"
+        ShowActivated="False"
+        Focusable="True"
+        MinWidth="40" MinHeight="40"
+        Loaded="OnLoaded"
+        Closed="OnClosed"
+        Deactivated="OnDeactivated"
+        PreviewKeyDown="OnPreviewKeyDown">
+
+    <Window.Resources>
+
+        <DropShadowEffect x:Key="WdbThumbShadow" BlurRadius="6" ShadowDepth="1" Opacity="0.4" Color="Black" />
+
+        <!-- Minimal working Slider template (Track = PART_Track so value/drag/click-to-point all work).
+             Visual fill is drawn by an external named Border updated from code-behind. -->
+        <ControlTemplate x:Key="WdbSliderTemplate" TargetType="Slider">
+            <Grid Background="Transparent">
+                <Track x:Name="PART_Track">
+                    <Track.DecreaseRepeatButton>
+                        <RepeatButton Command="{x:Static Slider.DecreaseLarge}" Focusable="False"
+                                      IsTabStop="False" Opacity="0" Background="Transparent" BorderThickness="0" />
+                    </Track.DecreaseRepeatButton>
+                    <Track.IncreaseRepeatButton>
+                        <RepeatButton Command="{x:Static Slider.IncreaseLarge}" Focusable="False"
+                                      IsTabStop="False" Opacity="0" Background="Transparent" BorderThickness="0" />
+                    </Track.IncreaseRepeatButton>
+                    <Track.Thumb>
+                        <Thumb Focusable="False">
+                            <Thumb.Template>
+                                <ControlTemplate TargetType="Thumb">
+                                    <Ellipse Width="13" Height="13" Fill="White"
+                                             Effect="{StaticResource WdbThumbShadow}" />
+                                </ControlTemplate>
+                            </Thumb.Template>
+                        </Thumb>
+                    </Track.Thumb>
+                </Track>
+            </Grid>
+        </ControlTemplate>
+
+        <!-- Round icon button (media transport etc.) -->
+        <Style x:Key="WdbIconButton" TargetType="Button">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Width" Value="34" />
+            <Setter Property="Height" Value="34" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Grid Background="Transparent">
+                            <Ellipse x:Name="Halo" Fill="#14FFFFFF" Opacity="0" />
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Halo" Property="Opacity" Value="1" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Halo" Property="Fill" Value="#28FFFFFF" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.4" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="WdbPrimaryButton" TargetType="Button">
+            <Setter Property="Background" Value="#FF0A84FF" />
+            <Setter Property="Foreground" Value="White" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="FontFamily" Value="Segoe UI Variable Text, Segoe UI" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Padding" Value="14,6" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bg" Background="{TemplateBinding Background}"
+                                CornerRadius="16" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bg" Property="Opacity" Value="0.85" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Bg" Property="Opacity" Value="0.7" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- ============ Typography ============ -->
+        <Style x:Key="WdbTitleText" TargetType="TextBlock">
+            <Setter Property="FontFamily" Value="Segoe UI Variable Display, Segoe UI" />
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Foreground" Value="{DynamicResource WdbTextBrush}" />
+            <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+        </Style>
+
+        <Style x:Key="WdbSubText" TargetType="TextBlock">
+            <Setter Property="FontFamily" Value="Segoe UI Variable Text, Segoe UI" />
+            <Setter Property="FontSize" Value="11.5" />
+            <Setter Property="Foreground" Value="{DynamicResource WdbTextMutedBrush}" />
+            <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+        </Style>
+
+        <Style x:Key="WdbBigText" TargetType="TextBlock">
+            <Setter Property="FontFamily" Value="Segoe UI Variable Display, Segoe UI" />
+            <Setter Property="FontSize" Value="26" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Foreground" Value="{DynamicResource WdbTextBrush}" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+        </Style>
+
+        <Style x:Key="WdbGlyph" TargetType="TextBlock">
+            <Setter Property="FontFamily" Value="Segoe Fluent Icons, Segoe MDL2 Assets" />
+            <Setter Property="FontSize" Value="14" />
+            <Setter Property="Foreground" Value="{DynamicResource WdbTextBrush}" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="HorizontalAlignment" Value="Center" />
+        </Style>
+
+    </Window.Resources>
+
+    <!-- Window root: transparent canvas; pill centered horizontally, anchored top -->
+    <Grid x:Name="RootGrid" Background="Transparent" UseLayoutRounding="True">
+
+        <!-- ================= PILL ================= -->
+        <Border x:Name="Pill"
+                Margin="40,6,40,0"
+                VerticalAlignment="Top"
+                HorizontalAlignment="Center"
+                CornerRadius="26"
+                BorderThickness="1"
+                BorderBrush="#18FFFFFF"
+                Background="#F0141417"
+                SnapsToDevicePixels="True"
+                UseLayoutRounding="True"
+                MouseLeftButtonDown="OnPillMouseDown"
+                MouseLeftButtonUp="OnPillMouseUp"
+                MouseMove="OnPillMouseMove"
+                Cursor="Hand">
+
+            <Border.Effect>
+                <DropShadowEffect Color="#000000" BlurRadius="24" ShadowDepth="4" Opacity="0.55" Direction="270" />
+            </Border.Effect>
+
+            <Grid x:Name="PillGrid">
+
+                <!-- ============ COLLAPSED CONTENT ============ -->
+                <Grid x:Name="CollapsedPanel" VerticalAlignment="Center" Margin="10,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+
+                    <Border x:Name="OrbHost" Width="26" Height="26" CornerRadius="13"
+                            Background="#14FFFFFF" Margin="0,0,9,0" VerticalAlignment="Center">
+                        <Grid>
+                            <Image x:Name="OrbArt" Stretch="UniformToFill" Visibility="Collapsed" />
+                            <TextBlock x:Name="OrbGlyph" Style="{StaticResource WdbGlyph}"
+                                       FontSize="12" Text="&#x25CF;" Foreground="#FF0A84FF" />
+                            <Ellipse x:Name="OrbPulse" Width="26" Height="26"
+                                     Stroke="#FF0A84FF" StrokeThickness="1.5" Opacity="0" />
+                        </Grid>
+                    </Border>
+
+                    <TextBlock x:Name="CollapsedTitle" Grid.Column="1" Style="{StaticResource WdbTitleText}"
+                               Text="Dynamic" MaxWidth="190" />
+                    <TextBlock x:Name="CollapsedValue" Grid.Column="2" Style="{StaticResource WdbSubText}"
+                               Margin="8,0,0,0" Foreground="#FF0A84FF" Visibility="Collapsed" />
+                </Grid>
+
+                <!-- ============ EXPANDED CONTENT ============ -->
+                <StackPanel x:Name="ExpandedHost" Orientation="Vertical"
+                            Margin="16,13,16,14" Visibility="Collapsed" Opacity="0">
+
+                    <!-- header row -->
+                    <Grid x:Name="HeaderRow">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <Border x:Name="HeaderIconBg" Width="34" Height="34" CornerRadius="17"
+                                Background="#1AFFFFFF" Margin="0,0,11,0" VerticalAlignment="Top">
+                            <Grid>
+                                <Image x:Name="HeaderArt" Stretch="UniformToFill" Visibility="Collapsed" />
+                                <TextBlock x:Name="HeaderGlyph" Style="{StaticResource WdbGlyph}"
+                                           Text="&#x25CF;" FontSize="15" />
+                            </Grid>
+                        </Border>
+                        <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                            <TextBlock x:Name="HeaderText" Style="{StaticResource WdbTitleText}"
+                                       FontSize="14.5" Text="" />
+                            <TextBlock x:Name="HeaderSub" Style="{StaticResource WdbSubText}"
+                                       Text="" Margin="0,1,0,0" />
+                        </StackPanel>
+                        <TextBlock x:Name="HeaderValue" Grid.Column="2" Style="{StaticResource WdbBigText}"
+                                   FontSize="21" VerticalAlignment="Center" Margin="10,0,0,0"
+                                   Visibility="Collapsed" />
+                    </Grid>
+
+                    <!-- progress line (media / download / timer) -->
+                    <StackPanel x:Name="ProgressRow" Margin="0,11,0,0" Visibility="Collapsed">
+                        <Grid x:Name="ProgressTrack" Height="14" VerticalAlignment="Center">
+                            <Border Height="5" VerticalAlignment="Center" CornerRadius="2.5" Background="#28FFFFFF" />
+                            <Border x:Name="ProgressFill" Height="5" VerticalAlignment="Center"
+                                    HorizontalAlignment="Left" Width="0" CornerRadius="2.5" Background="#FF0A84FF" />
+                            <Slider x:Name="ProgressSlider" Minimum="0" Maximum="1" Value="0"
+                                    IsMoveToPointEnabled="True" Cursor="Hand"
+                                    ValueChanged="OnProgressSliderChanged"
+                                    PreviewMouseLeftButtonUp="OnProgressSliderReleased"
+                                    Template="{StaticResource WdbSliderTemplate}" />
+                        </Grid>
+                        <Grid Margin="0,3,0,0">
+                            <TextBlock x:Name="PositionText" Style="{StaticResource WdbSubText}"
+                                       FontSize="10.5" HorizontalAlignment="Left" Text="0:00" />
+                            <TextBlock x:Name="DurationText" Style="{StaticResource WdbSubText}"
+                                       FontSize="10.5" HorizontalAlignment="Right" Text="0:00" />
+                        </Grid>
+                    </StackPanel>
+
+                    <!-- transport controls (media) -->
+                    <StackPanel x:Name="TransportRow" Orientation="Horizontal"
+                                HorizontalAlignment="Center" Margin="0,9,0,0" Visibility="Collapsed">
+                        <Button Style="{StaticResource WdbIconButton}" Click="OnPrevClick" ToolTip="Previous">
+                            <TextBlock Style="{StaticResource WdbGlyph}" Text="&#xE892;" />
+                        </Button>
+                        <Button x:Name="PlayPauseButton" Style="{StaticResource WdbIconButton}"
+                                Width="40" Height="40" Margin="7,0" Click="OnPlayPauseClick" ToolTip="Play / Pause">
+                            <TextBlock x:Name="PlayGlyph" Style="{StaticResource WdbGlyph}"
+                                       FontSize="17" Text="&#xE768;" />
+                        </Button>
+                        <Button Style="{StaticResource WdbIconButton}" Click="OnNextClick" ToolTip="Next">
+                            <TextBlock Style="{StaticResource WdbGlyph}" Text="&#xE893;" />
+                        </Button>
+                    </StackPanel>
+
+                    <!-- volume/brightness slider block -->
+                    <Grid x:Name="LevelRow" Margin="0,10,0,0" Visibility="Collapsed">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock x:Name="LevelGlyph" Style="{StaticResource WdbGlyph}"
+                                   FontSize="15" Margin="0,0,10,0" />
+                        <Grid Grid.Column="1" Height="14" VerticalAlignment="Center">
+                            <Border Height="5" VerticalAlignment="Center" CornerRadius="2.5" Background="#28FFFFFF" />
+                            <Border x:Name="LevelFill" Height="5" VerticalAlignment="Center"
+                                    HorizontalAlignment="Left" Width="0" CornerRadius="2.5" Background="#FF0A84FF" />
+                            <Slider x:Name="LevelSlider" Minimum="0" Maximum="1" Value="0.5"
+                                    Cursor="Hand" IsMoveToPointEnabled="True"
+                                    Template="{StaticResource WdbSliderTemplate}"
+                                    ValueChanged="OnLevelSliderChanged" />
+                        </Grid>
+                    </Grid>
+                    <TextBlock x:Name="LevelCaption" Style="{StaticResource WdbSubText}"
+                               Margin="0,6,0,0" Visibility="Collapsed" />
+
+                    <!-- signal bars (network) -->
+                    <StackPanel x:Name="BarsRow" Orientation="Horizontal" HorizontalAlignment="Left"
+                                Margin="0,10,0,0" Visibility="Collapsed">
+                        <Border x:Name="Bar1" Width="26" Height="6" CornerRadius="3" Background="#1AFFFFFF" Margin="0,0,5,0" />
+                        <Border x:Name="Bar2" Width="26" Height="6" CornerRadius="3" Background="#1AFFFFFF" Margin="0,0,5,0" />
+                        <Border x:Name="Bar3" Width="26" Height="6" CornerRadius="3" Background="#1AFFFFFF" Margin="0,0,5,0" />
+                        <Border x:Name="Bar4" Width="26" Height="6" CornerRadius="3" Background="#1AFFFFFF" />
+                    </StackPanel>
+
+                    <!-- system monitor rows -->
+                    <StackPanel x:Name="SysMonRow" Margin="0,10,0,0" Visibility="Collapsed">
+                        <Grid Margin="0,0,0,7">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="40" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="42" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Style="{StaticResource WdbSubText}" Text="CPU" />
+                            <Grid Grid.Column="1" Height="5" VerticalAlignment="Center">
+                                <Border Height="5" CornerRadius="2.5" Background="#1AFFFFFF" />
+                                <Border x:Name="CpuFill" Height="5" CornerRadius="2.5" HorizontalAlignment="Left"
+                                        Width="0" Background="#FF0A84FF" />
+                            </Grid>
+                            <TextBlock x:Name="CpuValue" Grid.Column="2" Style="{StaticResource WdbSubText}"
+                                       HorizontalAlignment="Right" Text="0%" />
+                        </Grid>
+                        <Grid Margin="0,0,0,7">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="40" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="42" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Style="{StaticResource WdbSubText}" Text="GPU" />
+                            <Grid Grid.Column="1" Height="5" VerticalAlignment="Center">
+                                <Border Height="5" CornerRadius="2.5" Background="#1AFFFFFF" />
+                                <Border x:Name="GpuFill" Height="5" CornerRadius="2.5" HorizontalAlignment="Left"
+                                        Width="0" Background="#FFBF5AF2" />
+                            </Grid>
+                            <TextBlock x:Name="GpuValue" Grid.Column="2" Style="{StaticResource WdbSubText}"
+                                       HorizontalAlignment="Right" Text="0%" />
+                        </Grid>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="40" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="42" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Style="{StaticResource WdbSubText}" Text="RAM" />
+                            <Grid Grid.Column="1" Height="5" VerticalAlignment="Center">
+                                <Border Height="5" CornerRadius="2.5" Background="#1AFFFFFF" />
+                                <Border x:Name="RamFill" Height="5" CornerRadius="2.5" HorizontalAlignment="Left"
+                                        Width="0" Background="#FF64D2FF" />
+                            </Grid>
+                            <TextBlock x:Name="RamValue" Grid.Column="2" Style="{StaticResource WdbSubText}"
+                                       HorizontalAlignment="Right" Text="0%" />
+                        </Grid>
+                    </StackPanel>
+
+                    <!-- action buttons row (timer / focus / stopwatch control) -->
+                    <StackPanel x:Name="ActionsRow" Orientation="Horizontal" HorizontalAlignment="Center"
+                                Margin="0,10,0,0" Visibility="Collapsed">
+                        <Button x:Name="ActionPrimary" Style="{StaticResource WdbPrimaryButton}"
+                                Content="Pause" Click="OnActionPrimary" Margin="0,0,8,0" />
+                        <Button x:Name="ActionSecondary" Style="{StaticResource WdbPrimaryButton}"
+                                Content="Cancel" Click="OnActionSecondary" Background="#28FFFFFF" />
+                    </StackPanel>
+
+                    <!-- generic footer (device names, file names…) -->
+                    <TextBlock x:Name="FooterText" Style="{StaticResource WdbSubText}"
+                               Margin="0,8,0,0" Visibility="Collapsed" />
+                </StackPanel>
+            </Grid>
+        </Border>
+    </Grid>
+</Window>
