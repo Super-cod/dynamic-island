@@ -36,8 +36,8 @@
         <!-- Sparkline graph -->
         <Grid Grid.Row="2" Margin="0,8,0,0">
             <local:TelemetryGraphPanel x:Name="Graph"
-                                       StrokeColor="{Binding Source={DynamicResource WdbAccentBrush}, Converter={StaticResource BrushToColorConverter}}"
-                                       FillColor="{Binding Source={DynamicResource WdbAccentBrush}, Converter={StaticResource BrushToColorConverter}}" />
+                                       StrokeColor="#FF0A84FF"
+                                       FillColor="#FF0A84FF" />
         </Grid>
     </Grid>
 
