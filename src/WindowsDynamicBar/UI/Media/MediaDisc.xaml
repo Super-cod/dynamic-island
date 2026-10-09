@@ -18,14 +18,16 @@
             <Ellipse Stroke="#0DFFFFFF" StrokeThickness="0.6" Width="30" Height="30" />
             <Ellipse Stroke="#14FFFFFF" StrokeThickness="0.5" Width="25" Height="25" />
 
-            <!-- circular-masked artwork, crossfading -->
-            <Border x:Name="ArtMask" CornerRadius="15" ClipToBounds="True"
-                    Margin="3" IsHitTestVisible="False">
-                <Grid>
-                    <Image x:Name="ArtBack" Stretch="UniformToFill" Visibility="Collapsed" />
-                    <Image x:Name="ArtFront" Stretch="UniformToFill" Visibility="Collapsed" />
-                </Grid>
-            </Border>
+            <!-- circular-masked artwork, crossfading — fills the whole disc edge to edge.
+                 The ellipse Clip cuts the exact disc boundary (a Border's CornerRadius does
+                 not clip child content, so an explicit geometry clip is required). -->
+            <Grid x:Name="ArtMask" IsHitTestVisible="False">
+                <Grid.Clip>
+                    <EllipseGeometry Center="18,18" RadiusX="18" RadiusY="18" />
+                </Grid.Clip>
+                <Image x:Name="ArtBack" Stretch="UniformToFill" Visibility="Collapsed" />
+                <Image x:Name="ArtFront" Stretch="UniformToFill" Visibility="Collapsed" />
+            </Grid>
 
             <TextBlock x:Name="Fallback" Text="&#x266B;" FontFamily="Segoe UI Symbol"
                        FontSize="13" Foreground="#55FFFFFF" HorizontalAlignment="Center"
@@ -41,9 +43,7 @@
             </Path>
         </Grid>
 
-        <!-- static CD details -->
-        <Ellipse Stroke="#2CFFFFFF" StrokeThickness="1" IsHitTestVisible="False" />
-        <Ellipse Stroke="#10FFFFFF" StrokeThickness="0.7" Width="29" Height="29" IsHitTestVisible="False" />
+        <!-- static CD spindle (intentional) — no overlaying rings so the artwork stays edge to edge -->
         <Ellipse x:Name="Hole" Width="5.4" Height="5.4" Fill="#FF0F0F12"
                  Stroke="#2EFFFFFF" StrokeThickness="0.5" IsHitTestVisible="False" />
     </Grid>

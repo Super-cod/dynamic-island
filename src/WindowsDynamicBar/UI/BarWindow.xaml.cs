@@ -29,16 +29,19 @@ namespace WindowsDynamicBar.UI;
 public partial class BarWindow : Window, IDisposable
 {
     // ---- geometry (DIPs) ----
-    private const double WinW = 520;
-    private const double WinH = 250;
+    private const double WinH = 300;
     private const double PillTop = 6;
-    private const double MaxPillW = 440;
-    private const double MaxPillH = 210;
+    private const double MaxPillW = 1200;
+    private const double MaxPillH = 280;
 
-    // ---- telemetry zone geometry (DIPs) ----
-    private const double RailZoneW = 130;
-    private const double DetailZoneW = 272;
-    private const double ZonePanelH = 96;
+    // ---- island geometry (DIPs) : matches the reference demo ----
+    private const double IslandExpandedW = 548;    // s2
+    private const double IslandExpandedH = 150;
+    private const double IslandDetailW = 1030;     // s3 (same height as s2, wider to the right)
+    private const double IslandDetailH = IslandExpandedH;
+    private const double DiscCollapsed = 26;
+    private const double DiscExpanded = 112;
+    private const double DetailContentMargin = 150;   // left inset where the big disc ends
 
     // ---- icon glyphs (Segoe Fluent Icons; verified against font render) ----
     private const string IcDot = "\u25CF";
@@ -78,14 +81,13 @@ public partial class BarWindow : Window, IDisposable
     private HwndSource? _src;
     private IntPtr _hwnd;
     private bool _expanded;
-    private bool _overPill;
-    private bool _pendingCollapse;
     private bool _userDismissed;
     private DateTime _dismissedAt;
     private double _currentW;
     private double _currentH;
     private double _maxOffsetDip;
     private bool _dragMoved;
+    private bool _dragPressing;
     private double _dragStartX, _dragStartOffset;
     private string _levelMode = "volume";
     private bool _timerPaused, _stopwatchPaused, _focusPaused;
@@ -104,28 +106,24 @@ public partial class BarWindow : Window, IDisposable
     private FocusInfo? _lastFocus;
     private SystemStats? _lastStats;
 
-    // telemetry zone state
-    private double _zoneW;
-    private TelemetryZoneState _zoneState = TelemetryZoneState.Hidden;
-    private TelemetryAction _pendingAction = TelemetryAction.None;
-    private TelemetryTarget _pendingMetric = TelemetryTarget.Cpu;
-    private DateTime _pendingSince;
+    // ---- Island state machine (Steps 2-8) ----
+    private IslandVisualState _islandState = IslandVisualState.Collapsed;
+    private IslandMetric _activeMetric = IslandMetric.None;
+    private readonly DispatcherTimer _collapseDelay = new() { Interval = TimeSpan.FromMilliseconds(250) };
+    private bool _islandHovering;
+    private bool _pinned;   // clicked open: stays open regardless of hover until clicked again
+    private double _winW = 520;
+    private int _gpuIndex;
     private TelemetrySnapshot? _telemetry;
-    private readonly DispatcherTimer _zoneProbe = new() { Interval = TimeSpan.FromMilliseconds(80) };
 
-    // ---- clock & hover-expand & stats panel ----
+    // ---- clock ----
     private readonly DispatcherTimer _clockTimer = new() { Interval = TimeSpan.FromSeconds(1) };
-    private bool _hoverExpanded;
-    private string _statsPanelTarget = "";
-    private bool _statsPanelOpen;
-    private const double StatsPanelW = 220;
-    private double _statsPanelW;
 
     public BarWindow()
     {
         InitializeComponent();
 
-        Width = WinW;
+        Width = _winW;
         Height = WinH;
 
         _cfg = App.Settings.Load();
@@ -141,9 +139,13 @@ public partial class BarWindow : Window, IDisposable
         // rounded clip for artwork orbs
         HeaderArt.Clip = new RectangleGeometry(new Rect(0, 0, 34, 34), 17, 17);
         OrbDisc.ReduceMotion = _cfg.ReduceMotion;
+        DetailPanelComponent.ReduceMotion = _cfg.ReduceMotion;
 
-        _zoneProbe.Tick += OnZoneProbe;
-        if (_cfg.FeatureSystemMonitor && App.Telemetry is not null) _zoneProbe.Start();
+        IconRow.MetricHovered += OnIconMetricHovered;
+        IconRow.MetricUnhovered += OnIconMetricUnhovered;
+        IconRow.MetricClicked += OnIconMetricClicked;
+        DetailPanelComponent.GpuCycleRequested += OnGpuCycleRequested;
+        _collapseDelay.Tick += OnCollapseDelayTick;
 
         ProgressTrack.SizeChanged += (_, _) => SyncFills();
         LevelRow.SizeChanged += (_, _) => SyncFills();
@@ -151,15 +153,11 @@ public partial class BarWindow : Window, IDisposable
         _clockTimer.Tick += (_, _) => UpdateClock();
         _clockTimer.Start();
         UpdateClock();
-        BigDisc.ReduceMotion = _cfg.ReduceMotion;
-
-        Pill.MouseEnter += OnPillEnter;
-        Pill.MouseLeave += OnPillLeave;
 
         _idleCollapse.Tick += (_, _) =>
         {
             _idleCollapse.Stop();
-            if (!_overPill && App.Bus?.Active is null && _expanded) Collapse();
+            if (!_islandHovering && App.Bus?.Active is null && _expanded) Collapse();
         };
 
         _fullscreenTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1500) };
@@ -245,7 +243,7 @@ public partial class BarWindow : Window, IDisposable
         if (_disposed) return;
         _disposed = true;
         Unsubscribe();
-        try { _zoneProbe.Stop(); } catch { }
+        try { _collapseDelay.Stop(); } catch { }
         try { _clockTimer.Stop(); } catch { }
         try { _fullscreenTimer?.Stop(); } catch { }
         try { _idleCollapse.Stop(); } catch { }
@@ -309,20 +307,11 @@ public partial class BarWindow : Window, IDisposable
             long lp = lParam.ToInt64();
             var screen = new Point((short)(lp & 0xFFFF), (short)((lp >> 16) & 0xFFFF));
             var p = PointFromScreen(screen);
-            double zoneLeft = Math.Max(40, (WinW - _currentW) / 2);
-            double left = zoneLeft;
-            double w = _zoneW > 0.5 ? _zoneW + _currentW : _currentW;
-            double h = _zoneW > 0.5 && ZoneMetricOpen ? ZonePanelH : _currentH;
+            double left = Pill.Margin.Left;
             double minDim = Math.Min(Math.Max(0, _currentW), Math.Max(0, _currentH));
             double r = Math.Max(0, Math.Min(Pill.CornerRadius.TopLeft, minDim / 2));
-            if (InRoundedRect(p.X, p.Y, left, PillTop, w, h, r))
+            if (InRoundedRect(p.X, p.Y, left, PillTop, _currentW, _currentH, r))
                 return new IntPtr(NativeMethods.HTCLIENT);
-            if (_statsPanelOpen && _statsPanelW > 0.5)
-            {
-                double spLeft = _zoneW + zoneLeft + _currentW;
-                if (InRoundedRect(p.X, p.Y, spLeft, PillTop, _statsPanelW, _currentH, 22))
-                    return new IntPtr(NativeMethods.HTCLIENT);
-            }
             return new IntPtr(NativeMethods.HTTRANSPARENT);
         }
         catch { return new IntPtr(NativeMethods.HTCLIENT); }
@@ -368,22 +357,24 @@ public partial class BarWindow : Window, IDisposable
             }
             catch { }
 
-            double totalWidthDip = WinW + _zoneW + (_statsPanelOpen && _statsPanelW > 0.5 ? _statsPanelW : 0);
-            int wPx = (int)Math.Round(totalWidthDip * scale);
-            int hPx = (int)Math.Round(WinH * scale);
-            int boundsW = mon.Bounds.Right - mon.Bounds.Left;
-            _maxOffsetDip = Math.Max(0, (boundsW - wPx) / 2.0 / scale - 8);
+            int workW = mon.WorkArea.Right - mon.WorkArea.Left;
+            double workH = WinH;
+            _winW = workW / scale;
+            _maxOffsetDip = Math.Max(0, (_winW - Math.Max(80, _cfg.BarWidth)) / 2 - 8);
 
             // Clamp a previously saved offset in case the target monitor shrank.
-            double clamped = Math.Clamp(offsetDip, -_maxOffsetDip, _maxOffsetDip);
-            int centerX = mon.Bounds.Left + boundsW / 2;
-            int x = centerX + (int)Math.Round(clamped * scale)
-                - (int)Math.Round((WinW + 2 * _zoneW) * scale / 2.0);
-            int y = mon.Bounds.Top;
-            Width = totalWidthDip;
+            _cfg.CustomOffsetX = Math.Clamp(offsetDip, -_maxOffsetDip, _maxOffsetDip);
+
+            // One fixed full-work-area window; the island morphs inside it (no per-frame resize).
+            Width = _winW;
             Height = WinH;
-            NativeMethods.SetWindowPos(_hwnd, NativeMethods.HWND_TOPMOST, x, y, wPx, hPx,
+            NativeMethods.SetWindowPos(_hwnd, NativeMethods.HWND_TOPMOST,
+                mon.WorkArea.Left, mon.WorkArea.Top,
+                (int)workW, (int)Math.Round(workH * scale),
                 NativeMethods.SWP_NOACTIVATE);
+
+            UpdatePillMargin();
+            RefreshBlur();
         }
         catch (Exception ex) { Log.Debug("Reposition failed", ("error", ex.Message)); }
     }
@@ -397,12 +388,10 @@ public partial class BarWindow : Window, IDisposable
     {
         if (!_blurOn || _hwnd == IntPtr.Zero) return;
         double scale = CurrentDpi();
-        double zoneLeft = Math.Max(40, (WinW - _currentW) / 2);
-        double l = zoneLeft * scale;
+        double l = Pill.Margin.Left * scale;
         double t = PillTop * scale;
-        double totalW = (_zoneW > 0.5 ? _zoneW + _currentW : _currentW) + (_statsPanelOpen && _statsPanelW > 0.5 ? _statsPanelW : 0);
-        double w = totalW * scale;
-        double h = (_zoneW > 0.5 && ZoneMetricOpen ? ZonePanelH : _currentH) * scale;
+        double w = _currentW * scale;
+        double h = _currentH * scale;
         int li = (int)Math.Round(l);
         int ti = (int)Math.Round(t);
         int wi = (int)Math.Round(w);
@@ -439,16 +428,24 @@ public partial class BarWindow : Window, IDisposable
         UpdateShape();
     }
 
-    private bool ZoneMetricOpen => _zoneState is TelemetryZoneState.Cpu or TelemetryZoneState.Gpu or TelemetryZoneState.Ram;
-
+    /// <summary>Position the pill. Up to the normal expanded width it stays centered on screen
+    /// (grows symmetrically in the middle). Wider than that (the detail panel) it keeps its left
+    /// edge and extends to the right. The rule is width-based so the morph stays continuous.</summary>
     private void UpdatePillMargin()
     {
-        double zoneLeft = Math.Max(40, (WinW - _currentW) / 2);
-        double left = _zoneW + zoneLeft;
-        Pill.Margin = new Thickness(left, PillTop, 40, 0);
-        ZoneHost.Margin = new Thickness(zoneLeft, PillTop, 0, 0);
-        double railTop = PillTop + Math.Max(0, (ZoneHost.Height - 41) / 2);
-        if (RailRow.Margin.Top != railTop) RailRow.Margin = new Thickness(0, railTop, 0, 0);
+        double offset = _cfg.CustomOffsetX;
+        double left;
+        if (_currentW <= IslandExpandedW)
+        {
+            left = (_winW - _currentW) / 2 + offset;
+        }
+        else
+        {
+            left = (_winW - IslandExpandedW) / 2 + offset;
+        }
+        double maxLeft = Math.Max(8, _winW - _currentW - 8);
+        left = Math.Max(8, Math.Min(left, maxLeft));
+        Pill.Margin = new Thickness(left, PillTop, 0, 0);
     }
 
     // ---------------------------------------------------------------- expand / collapse
@@ -466,7 +463,7 @@ public partial class BarWindow : Window, IDisposable
     private void Expand()
     {
         if (_shown is null) return;
-        HideZoneNow();
+        if (_islandState != IslandVisualState.Collapsed) SetIslandState(IslandVisualState.Collapsed, IslandMetric.None, force: true);
         double w = Math.Clamp(TargetWidth(_shown.Kind), 120, MaxPillW);
 
         ExpandedHost.Visibility = Visibility.Visible;
@@ -476,7 +473,6 @@ public partial class BarWindow : Window, IDisposable
 
         CancelDelays();
         _expanded = true;
-        _pendingCollapse = false;
         _idleCollapse.Stop();
 
         Fade(CollapsedPanel, 0, 90);
@@ -499,15 +495,6 @@ public partial class BarWindow : Window, IDisposable
         {
             if (!_expanded) ExpandedHost.Visibility = Visibility.Collapsed;
         });
-        if (_hoverExpanded)
-        {
-            _hoverExpanded = false;
-            Fade(ExpandedHoverHost, 0, 110, () =>
-            {
-                if (!_expanded) ExpandedHoverHost.Visibility = Visibility.Collapsed;
-            });
-        }
-        if (_statsPanelOpen) CloseStatsPanel();
         CollapsedPanel.Visibility = Visibility.Visible;
         _delays.Add(RunAfter(60, () => Fade(CollapsedPanel, 1, 140)));
 
@@ -556,16 +543,6 @@ public partial class BarWindow : Window, IDisposable
 
     // ---------------------------------------------------------------- telemetry zone
 
-    private bool ZoneGrabHover() =>
-        _cfg.FeatureSystemMonitor && App.Telemetry is not null && !_expanded &&
-        App.Bus?.Active is null && !App.GamingMode && !AnyPriorityWidget();
-
-    private bool AnyPriorityWidget() =>
-        _lastTimer is { State: TimerState.Running } ||
-        _lastFocus is { Running: true } ||
-        _lastStopwatch is { Running: true } ||
-        _lastMedia is { IsPlaying: true };
-
     private void OnTelemetryUpdated(TelemetrySnapshot snap)
     {
         try { Dispatcher.BeginInvoke(() => ApplyTelemetry(snap)); } catch { }
@@ -574,284 +551,280 @@ public partial class BarWindow : Window, IDisposable
     private void ApplyTelemetry(TelemetrySnapshot snap)
     {
         _telemetry = snap;
-        if (_zoneState != TelemetryZoneState.Hidden) RenderZoneValues();
-        UpdateGauges();
+        if (_islandState == IslandVisualState.Detail) UpdatePanelContent();
+        else if (_islandState == IslandVisualState.Expanded) UpdateIslandContent();
     }
 
-    private void OnZoneProbe(object? sender, EventArgs e)
+
+    /// <summary>Set the Island state: Collapsed, Expanded (hover), or Detail (metric selected).
+    /// One method drives size, disc, content fades, panel and icon highlight (R4/R9).</summary>
+    private void SetIslandState(IslandVisualState state, IslandMetric metric, bool force = false)
     {
-        try
+        if (!force && state == _islandState && metric == _activeMetric) return;
+
+        bool sameState = state == _islandState;
+        _islandState = state;
+        _activeMetric = metric;
+        _collapseDelay.Stop();
+
+        // Switching metric while a panel is already open: only refresh content (no size churn).
+        if (sameState && state == IslandVisualState.Detail)
         {
-            if (_cfg.FeatureSystemMonitor is false || _expanded || App.Telemetry is null || App.GamingMode)
-            {
-                _pendingAction = TelemetryAction.None;
-                return;
-            }
-            if (AnyPriorityWidget())
-            {
-                if (_zoneState != TelemetryZoneState.Hidden) HideZoneNow();
-                return;
-            }
-            if (App.Bus?.Active is not null)
-            {
-                if (_zoneState != TelemetryZoneState.Hidden) HideZoneNow();
-                return;
-            }
-            var target = ZoneTargetAtCursor();
-            var action = TelemetryPolicy.Plan(_zoneState, target);
-            if (action == TelemetryAction.None) { _pendingAction = TelemetryAction.None; return; }
-            if (action == TelemetryAction.OpenMetric) _pendingMetric = target;
-            if (action != _pendingAction) { _pendingAction = action; _pendingSince = DateTime.UtcNow; }
-            int delay = action switch
-            {
-                TelemetryAction.OpenRail => TelemetryPolicy.OpenRailMs,
-                TelemetryAction.OpenMetric => TelemetryPolicy.OpenMetricMs,
-                TelemetryAction.CloseMetricToRail => TelemetryPolicy.CloseMetricMs,
-                TelemetryAction.HideAll => ZoneMetricOpen
-                    ? TelemetryPolicy.CloseMetricMs + TelemetryPolicy.CloseRailMs
-                    : TelemetryPolicy.CloseRailMs,
-                _ => 0,
-            };
-            if ((DateTime.UtcNow - _pendingSince).TotalMilliseconds >= delay)
-                ExecuteZoneAction(action);
+            IconRow.SetActive(metric);
+            UpdatePanelContent();
+            return;
         }
-        catch (Exception ex) { Log.Debug("Zone probe failed", ("error", ex.Message)); }
-    }
 
-    private void ExecuteZoneAction(TelemetryAction action)
-    {
-        _pendingAction = TelemetryAction.None;
-        switch (action)
+        switch (state)
         {
-            case TelemetryAction.OpenRail: OpenZoneRail(); break;
-            case TelemetryAction.OpenMetric: OpenZoneMetric(_pendingMetric); break;
-            case TelemetryAction.CloseMetricToRail: CloseZoneMetric(); break;
-            case TelemetryAction.HideAll: HideZone(); break;
+            case IslandVisualState.Collapsed:
+                _pinned = false;
+                HideIslandContent();
+                AnimateIsland(Math.Max(80, _cfg.BarWidth), Math.Max(24, _cfg.BarHeight));
+                MorphDisc(DiscCollapsed);
+                break;
+
+            case IslandVisualState.Expanded:
+                EnsureTelemetry();
+                ShowIslandContent(withPanel: false);
+                AnimateIsland(IslandExpandedW, IslandExpandedH);
+                MorphDisc(DiscExpanded);
+                break;
+
+            case IslandVisualState.Detail:
+                EnsureTelemetry();
+                ShowIslandContent(withPanel: true);
+                IconRow.SetActive(metric);
+                UpdatePanelContent();
+                AnimateIsland(IslandDetailW, IslandDetailH);
+                MorphDisc(DiscExpanded);
+                break;
         }
     }
 
-    private static TelemetryZoneState StateOf(TelemetryTarget t) => t switch
+    private void AnimateIsland(double w, double h)
     {
-        TelemetryTarget.Cpu => TelemetryZoneState.Cpu,
-        TelemetryTarget.Gpu => TelemetryZoneState.Gpu,
-        TelemetryTarget.Ram => TelemetryZoneState.Ram,
-        _ => TelemetryZoneState.Rail,
-    };
-
-    private static TelemetryTarget TargetOf(TelemetryZoneState s) => s switch
-    {
-        TelemetryZoneState.Cpu => TelemetryTarget.Cpu,
-        TelemetryZoneState.Gpu => TelemetryTarget.Gpu,
-        TelemetryZoneState.Ram => TelemetryTarget.Ram,
-        _ => TelemetryTarget.Rail,
-    };
-
-    private TelemetryTarget ZoneTargetAtCursor()
-    {
-        if (_hwnd == IntPtr.Zero || _cfg.FeatureSystemMonitor is false) return TelemetryTarget.None;
-        NativeMethods.GetCursorPos(out var pt);
-        var wpt = PointFromScreen(new Point(pt.X, pt.Y));
-        double zoneLeft = Math.Max(40, (WinW - _currentW) / 2);
-        double zoneRight = zoneLeft + _zoneW;
-        double pillLeft = zoneRight;
-        double pillRight = pillLeft + _currentW;
-        double regionBottom = PillTop + (_zoneW > 0.5 && ZoneMetricOpen ? ZonePanelH : _currentH);
-
-        double regionLeft = _zoneW > 0.5 ? zoneLeft : pillLeft;
-        if (wpt.X < regionLeft || wpt.X > pillRight || wpt.Y < PillTop || wpt.Y > regionBottom)
-            return TelemetryTarget.None;
-
-        if (_zoneW > 0.5)
-        {
-            double railLeft = zoneRight - RailZoneW;
-            double top = PillTop + Math.Max(0, (ZoneHost.Height - 41) / 2);
-            if (wpt.X >= railLeft && wpt.X <= zoneRight)
-            {
-                if (wpt.Y >= top && wpt.Y <= top + 34)
-                {
-                    TelemetryTarget[] seq = { TelemetryTarget.Cpu, TelemetryTarget.Gpu, TelemetryTarget.Ram };
-                    for (int i = 0; i < 3; i++)
-                    {
-                        double x = railLeft + 7 + 40 * i;
-                        if (wpt.X >= x && wpt.X <= x + 34) return seq[i];
-                    }
-                }
-                return TelemetryTarget.Rail;
-            }
-            if (ZoneMetricOpen && wpt.X >= zoneLeft && wpt.X < railLeft)
-                return TargetOf(_zoneState);
-        }
-
-        if (wpt.X >= pillLeft && wpt.X <= pillRight) return TelemetryTarget.Pill;
-        return TelemetryTarget.None;
-    }
-
-    private void OpenZoneRail()
-    {
-        if (_zoneState != TelemetryZoneState.Hidden) return;
-        _zoneState = TelemetryZoneState.Rail;
-        ZoneHost.Visibility = Visibility.Visible;
-        EnsureTelemetry();
-        _anim.Animate("zx", _zoneW, RailZoneW, ApplyZoneW);
-        _anim.Animate("zh", ZoneHost.Height, _currentH, ApplyZoneH);
-    }
-
-    private void OpenZoneMetric(TelemetryTarget target)
-    {
-        var kind = StateOf(target);
-        bool fromHidden = _zoneState == TelemetryZoneState.Hidden;
-        _zoneState = kind;
-        if (fromHidden) ZoneHost.Visibility = Visibility.Visible;
-        EnsureTelemetry();
-        if (DetailPanelComponent.Visibility != Visibility.Visible)
-        {
-            DetailPanelComponent.Visibility = Visibility.Visible;
-            DetailPanelComponent.Opacity = 0;
-        }
-        RenderZoneValues();
-        _anim.Animate("zx", _zoneW, RailZoneW + DetailZoneW, ApplyZoneW);
-        _anim.Animate("zh", ZoneHost.Height, ZonePanelH, ApplyZoneH);
-        if (DetailPanelComponent.Opacity < 0.05)
-        {
-            if (_cfg.ReduceMotion) DetailPanelComponent.Opacity = 1;
-            else
-            {
-                var tw = new TweenAnimation();
-                _activeFades.Add(tw);
-                tw.Run(0, 1, TimeSpan.FromMilliseconds(180), v => DetailPanelComponent.Opacity = v, Easing.CubicOut);
-                tw.Completed += () => { DetailPanelComponent.Opacity = 1; _activeFades.Remove(tw); };
-            }
-        }
-    }
-
-    private void CloseZoneMetric()
-    {
-        if (!ZoneMetricOpen) return;
-        _zoneState = TelemetryZoneState.Rail;
         if (_cfg.ReduceMotion)
         {
-            DetailPanelComponent.Opacity = 0;
-            DetailPanelComponent.Visibility = Visibility.Collapsed;
+            ApplyW(w);
+            ApplyH(h);
+            return;
         }
-        else
-        {
-            var tw = new TweenAnimation();
-            _activeFades.Add(tw);
-            tw.Run(DetailPanelComponent.Opacity, 0, TimeSpan.FromMilliseconds(150), v => DetailPanelComponent.Opacity = v, Easing.CubicOut);
-            tw.Completed += () =>
-            {
-                DetailPanelComponent.Visibility = Visibility.Collapsed;
-                _activeFades.Remove(tw);
-            };
-        }
-        _anim.Animate("zx", _zoneW, RailZoneW, ApplyZoneW);
-        _anim.Animate("zh", ZoneHost.Height, _currentH, ApplyZoneH);
+        _anim.Animate("w", _currentW, w, ApplyW);
+        _anim.Animate("h", _currentH, h, ApplyH);
     }
 
-    private void HideZone()
+    private void MorphDisc(double size)
     {
-        if (_zoneState == TelemetryZoneState.Hidden) return;
-        _zoneState = TelemetryZoneState.Hidden;
-        _pendingAction = TelemetryAction.None;
-        DetailPanelComponent.Opacity = 0;
-        DetailPanelComponent.Visibility = Visibility.Collapsed;
-        _anim.Animate("zx", _zoneW, 0, ApplyZoneW);
-        _anim.Animate("zh", ZoneHost.Height, _currentH, ApplyZoneH);
-        RunAfter(240, () =>
+        if (_cfg.ReduceMotion)
         {
-            if (_zoneState != TelemetryZoneState.Hidden) return;
-            ZoneHost.Visibility = Visibility.Collapsed;
-            try { if (App.Telemetry is { IsActive: true }) App.Telemetry.Deactivate(); } catch { }
-            _telemetry = null;
+            OrbHost.Width = size;
+            OrbHost.Height = size;
+            OrbHost.CornerRadius = new CornerRadius(size / 2);
+            return;
+        }
+        double from = OrbHost.Width > 0 ? OrbHost.Width : DiscCollapsed;
+        _anim.Animate("disc", from, size, v =>
+        {
+            OrbHost.Width = v;
+            OrbHost.Height = v;
+            OrbHost.CornerRadius = new CornerRadius(v / 2);
         });
     }
 
-    private void HideZoneNow()
+    private void ShowIslandContent(bool withPanel)
     {
-        if (_zoneState == TelemetryZoneState.Hidden) return;
-        _zoneState = TelemetryZoneState.Hidden;
-        _pendingAction = TelemetryAction.None;
-        DetailPanelComponent.Opacity = 0;
-        DetailPanelComponent.Visibility = Visibility.Collapsed;
-        _anim.Jump("zx", 0, ApplyZoneW);
-        _anim.Jump("zh", _currentH, ApplyZoneH);
-        ZoneHost.Visibility = Visibility.Collapsed;
+        CollapsedPanel.Visibility = Visibility.Visible;
+        IslandExpandedHost.Visibility = Visibility.Visible;
+        Fade(CollapsedPanel, 0, 120);
+        Fade(IslandExpandedHost, 1, 160);
+        if (withPanel)
+        {
+            DetailPanelComponent.Visibility = Visibility.Visible;
+            DetailPanelComponent.IsHitTestVisible = true;
+            Fade(DetailPanelComponent, 1, 160);
+        }
+        else
+        {
+            DetailPanelComponent.IsHitTestVisible = false;
+            Fade(DetailPanelComponent, 0, 120,
+                () => { if (_islandState != IslandVisualState.Detail) DetailPanelComponent.Visibility = Visibility.Collapsed; });
+        }
+        UpdateIslandContent();
+    }
+
+    private void HideIslandContent()
+    {
+        IconRow.SetActive(IslandMetric.None);
+        DetailPanelComponent.IsHitTestVisible = false;
+        Fade(IslandExpandedHost, 0, 120,
+            () => { if (_islandState == IslandVisualState.Collapsed) IslandExpandedHost.Visibility = Visibility.Collapsed; });
+        Fade(DetailPanelComponent, 0, 100,
+            () => { if (_islandState == IslandVisualState.Collapsed) DetailPanelComponent.Visibility = Visibility.Collapsed; });
+        CollapsedPanel.Visibility = Visibility.Visible;
+        Fade(CollapsedPanel, 1, 160);
+        UpdateIslandContent();
+    }
+
+    private void UpdateIslandContent()
+    {
+        UpdateCollapsed();
+        var m = _lastMedia;
+        HoverTitle.Text = m is not null && !string.IsNullOrWhiteSpace(m.Title) ? m.Title : "Dynamic";
+        HoverArtist.Text = m is not null && !string.IsNullOrWhiteSpace(m.Artist) ? m.Artist : "Windows Dynamic Bar";
+        double prog = m?.Progress ?? 0;
+        HoverProgressFill.Width = Math.Max(0, HoverProgressTrack.ActualWidth * Math.Clamp(prog, 0, 1));
+        bool playing = m?.IsPlaying == true;
+        HoverPlayGlyph.Text = playing ? IcPause : IcPlay;
+        HoverEq.ReduceMotion = _cfg.ReduceMotion;
+        HoverEq.Running = playing;
+        UpdateIconRowValues();
+    }
+
+    private void UpdateIconRowValues()
+    {
+        var snap = _telemetry;
+        double cpu = snap is not null && snap.Cpu.Available ? snap.Cpu.Utilization : -1;
+        var gpus = App.Telemetry?.SnapshotGpuTracks();
+        double gpu = gpus is { Count: > 0 } ? gpus[0].Utilization : -1;
+        double ram = snap is not null && snap.Memory.Available ? snap.Memory.UsedPercent : -1;
+        IconRow.UpdateValues(cpu, gpu, ram);
+        IconRow.SetAvailability(cpu >= 0, gpu >= 0, ram >= 0);
+    }
+
+    private void UpdatePanelContent()
+    {
+        var snap = _telemetry;
+        var tel = App.Telemetry;
+        if (snap is null || tel is null)
+        {
+            switch (_activeMetric)
+            {
+                case IslandMetric.Cpu:
+                    DetailPanelComponent.ShowCpu(new CpuStats(0, "", 0, 0, 0, false), null, null);
+                    break;
+                case IslandMetric.Gpu:
+                    DetailPanelComponent.ShowGpu(new GpuTrack { Name = "" }, 0, 1, null);
+                    break;
+                case IslandMetric.Ram:
+                    DetailPanelComponent.ShowRam(new MemoryStats(0, 0, 0, false), 0, 0, 0, -1, -1, null);
+                    break;
+            }
+            return;
+        }
+
+        var gpus = tel.SnapshotGpuTracks();
+        var procs = snap.TopProcesses;
+
+        switch (_activeMetric)
+        {
+            case IslandMetric.Cpu:
+                DetailPanelComponent.ShowCpu(snap.Cpu, tel.CpuCoreUsage, tel.CpuHistory, procs);
+                break;
+
+            case IslandMetric.Gpu:
+                if (gpus.Count == 0)
+                {
+                    DetailPanelComponent.ShowGpu(new GpuTrack { Name = "" }, 0, 1, null, procs);
+                    break;
+                }
+                int idx = Math.Clamp(_gpuIndex, 0, gpus.Count - 1);
+                DetailPanelComponent.ShowGpu(gpus[idx], idx, gpus.Count, tel.GetGpuHistory(idx), procs);
+                break;
+
+            case IslandMetric.Ram:
+                DetailPanelComponent.ShowRam(snap.Memory, tel.RamSwapUsedBytes, tel.RamSwapTotalBytes,
+                    tel.RamCacheBytes, tel.DiskReadBytesPerSec, tel.DiskWriteBytesPerSec,
+                    tel.RamHistory, procs);
+                break;
+        }
+    }
+
+    /// <summary>Mouse entered the island region (pill + icons + panel).</summary>
+    private void OnIslandMouseEnter(object sender, MouseEventArgs e)
+    {
+        _islandHovering = true;
+        _collapseDelay.Stop();
+        if (_expanded) return; // event-bus card owns the pill
+
+        var (state, metric) = IslandStateMachine.Resolve(
+            _islandState, _activeMetric, pointerInside: true, IslandMetric.None, collapseElapsed: false);
+        SetIslandState(state, metric);
+    }
+
+    /// <summary>Mouse left the island region entirely (grace timer defers collapse).</summary>
+    private void OnIslandMouseLeave(object sender, MouseEventArgs e)
+    {
+        _islandHovering = false;
+        if (_expanded) return;
+        if (_pinned) return;   // clicked open: hover-leave must not collapse it
+        _collapseDelay.Stop();
+        _collapseDelay.Start();
+    }
+
+    private void OnCollapseDelayTick(object? sender, EventArgs e)
+    {
+        _collapseDelay.Stop();
+        if (_expanded || _pinned) return;
+
+        // Still inside the island but no icon is hovered: close the extended panel but keep the
+        // island in its hover (Expanded) form, since the pointer is still over the island.
+        if (_islandHovering)
+        {
+            if (_islandState == IslandVisualState.Detail)
+                SetIslandState(IslandVisualState.Expanded, IslandMetric.None);
+            return;
+        }
+
+        if (App.Bus?.Active is not null) return;
+        var (state, metric) = IslandStateMachine.Resolve(
+            _islandState, _activeMetric, pointerInside: false, IslandMetric.None, collapseElapsed: true);
+        SetIslandState(state, metric);
         try { if (App.Telemetry is { IsActive: true }) App.Telemetry.Deactivate(); } catch { }
-        _telemetry = null;
+    }
+
+    private void OnIconMetricHovered(IslandMetric metric)
+    {
+        if (_expanded || _pinned) return;   // pinned panel ignores hover until clicked again
+        _collapseDelay.Stop();
+        SetIslandState(IslandVisualState.Detail, metric);
+    }
+
+    private void OnIconMetricUnhovered()
+    {
+        if (_pinned) return;   // pinned panel ignores hover until clicked again
+        // Leaving an icon closes the extended panel after a short grace (so moving between icons
+        // still just switches metric). Hover only previews; use click to keep it open.
+        _collapseDelay.Stop();
+        _collapseDelay.Start();
+    }
+
+    private void OnIconMetricClicked(IslandMetric metric)
+    {
+        // Click the active (pinned) icon again -> close the extended canvas.
+        if (_pinned && _activeMetric == metric)
+        {
+            SetIslandState(IslandVisualState.Collapsed, IslandMetric.None, force: true);
+            return;
+        }
+        // Otherwise click opens the metric's canvas and pins it open.
+        _pinned = true;
+        SetIslandState(IslandVisualState.Detail, metric, force: true);
+    }
+
+    private void OnGpuCycleRequested()
+    {
+        var gpus = App.Telemetry?.SnapshotGpuTracks();
+        int count = gpus?.Count ?? 0;
+        if (count <= 1) return;
+        _gpuIndex = (_gpuIndex + 1) % count;
+        if (_islandState == IslandVisualState.Detail && _activeMetric == IslandMetric.Gpu)
+            UpdatePanelContent();
     }
 
     private void EnsureTelemetry()
     {
         try { if (App.Telemetry is { IsActive: false }) App.Telemetry.Activate(); } catch { }
-    }
-
-    private void ApplyZoneW(double v)
-    {
-        v = Math.Max(0, v);
-        _zoneW = v;
-        bool active = v > 0.5;
-        if (active) ZoneHost.Visibility = Visibility.Visible;
-        else if (_zoneState == TelemetryZoneState.Hidden) ZoneHost.Visibility = Visibility.Collapsed;
-        ZoneHost.Width = v;
-        DetailCol.Width = new GridLength(Math.Max(0, v - RailZoneW));
-        UpdatePillMargin();
-        Reposition();
-        RefreshBlur();
-    }
-
-    private void ApplyZoneH(double v)
-    {
-        v = Math.Max(0, v);
-        ZoneHost.Height = v;
-        UpdatePillMargin();
-        RefreshBlur();
-    }
-
-    private void RenderZoneValues()
-    {
-        var s = _telemetry;
-        if (s is null) return;
-        SetTextFast(RailCpuText, FmtPct(s.Cpu.Available ? s.Cpu.Utilization : null));
-        var gpus = App.Telemetry?.SnapshotGpuTracks();
-        SetTextFast(RailGpuText, FmtPct(gpus is { Count: > 0 } ? gpus[0].Utilization : null));
-        SetTextFast(RailRamText, FmtPct(s.Memory.Available ? s.Memory.UsedPercent : null));
-        if (ZoneMetricOpen) RenderZoneDetail(s);
-    }
-
-    private static string FmtPct(double? v) =>
-        v is null || double.IsNaN(v.Value) ? "n/a" : $"{Math.Round(v.Value)}%";
-
-    private static void SetTextFast(TextBlock t, string v)
-    {
-        if (t.Text != v) t.Text = v;
-    }
-
-    private void RenderZoneDetail(TelemetrySnapshot s)
-    {
-        switch (_zoneState)
-        {
-            case TelemetryZoneState.Cpu:
-                DetailPanelComponent.ShowCpu(s.Cpu, App.Telemetry?.CpuHistory);
-                break;
-
-            case TelemetryZoneState.Gpu:
-                var gpus = App.Telemetry?.SnapshotGpuTracks() ?? new List<GpuTrack>();
-                if (gpus.Count > 0)
-                {
-                    var g = gpus[0];
-                    var gpuStats = new GpuAdapterStats(g.Luid, g.Name, g.Utilization, g.VramUsed, g.VramTotal, g.VramAvailable);
-                    DetailPanelComponent.ShowGpu(gpuStats, g.History);
-                }
-                else
-                {
-                    DetailPanelComponent.ShowGpu(new GpuAdapterStats(0, "No GPU", 0, 0, 0, false), null);
-                }
-                break;
-
-            case TelemetryZoneState.Ram:
-                DetailPanelComponent.ShowRam(s.Memory, App.Telemetry?.RamHistory);
-                break;
-        }
     }
 
     // ---------------------------------------------------------------- events in
@@ -866,8 +839,6 @@ public partial class BarWindow : Window, IDisposable
     {
         try
         {
-            HideZoneNow();
-
             // Refresh in place when the same widget is already on screen.
             if (_shown?.Kind == evt.Kind && _expanded)
             {
@@ -912,8 +883,7 @@ public partial class BarWindow : Window, IDisposable
     {
         _shown = null;
         UpdateCollapsed();
-        if (_overPill) _pendingCollapse = true;
-        else if (_expanded) Collapse();
+        if (_expanded) Collapse();
     }
 
     private void OnMediaChanged(MediaInfo info)
@@ -1009,18 +979,12 @@ public partial class BarWindow : Window, IDisposable
             _cfg.SpringDamping = m.SpringDamping;
             _cfg.ReduceMotion = m.ReduceMotion;
             OrbDisc.ReduceMotion = m.ReduceMotion;
+            DetailPanelComponent.ReduceMotion = m.ReduceMotion;
             _cfg.CollapseDelayMs = m.CollapseDelayMs;
             _cfg.HoverPreview = m.HoverPreview;
             _cfg.SystemMonitorInBar = m.SystemMonitorInBar;
             _cfg.CollapsedMediaArt = m.CollapsedMediaArt;
             _cfg.FeatureSystemMonitor = m.FeatureSystemMonitor;
-            if (_cfg.FeatureSystemMonitor && App.Telemetry is not null && !_zoneProbe.IsEnabled)
-                _zoneProbe.Start();
-            else if (!_cfg.FeatureSystemMonitor && _zoneProbe.IsEnabled)
-            {
-                _zoneProbe.Stop();
-                HideZoneNow();
-            }
             _cfg.AutoHideFullscreen = m.AutoHideFullscreen;
             _cfg.BarEnabled = m.BarEnabled;
             _cfg.MonitorIndex = m.MonitorIndex;
@@ -1074,75 +1038,6 @@ public partial class BarWindow : Window, IDisposable
 
     // ---------------------------------------------------------------- hover / input
 
-    private void OnPillEnter(object sender, MouseEventArgs e)
-    {
-        _overPill = true;
-        _pendingCollapse = false;
-        _idleCollapse.Stop();
-        if (ZoneGrabHover()) return;
-        if (_expanded || !_cfg.HoverPreview) return;
-        if (App.Bus?.Active is BarEvent active)
-        {
-            _shown = active;
-            _userDismissed = false;
-            RenderEvent(active);
-            Expand();
-            return;
-        }
-        // Hover-expand: show big disc + music info + 2x3 gauge grid
-        if (!_expanded && !ZoneGrabHover())
-        {
-            _hoverExpanded = true;
-            var m = _lastMedia;
-            bool playing = m?.IsPlaying ?? false;
-            string title = m is not null && !string.IsNullOrWhiteSpace(m.Title) ? m.Title : "Dynamic";
-            string artist = m is not null && !string.IsNullOrWhiteSpace(m.Artist) ? m.Artist : "Windows Dynamic Bar";
-            var art = m is not null ? BytesToImage(m.ArtworkBytes) : null;
-            BigDisc.SetArtwork(art, playing);
-            BigDisc.ReduceMotion = _cfg.ReduceMotion;
-            HoverTitle.Text = title;
-            HoverArtist.Text = artist;
-            double prog = m?.Progress ?? 0;
-            HoverProgressFill.Width = 0;
-            if (HoverProgressTrack.ActualWidth > 0)
-                HoverProgressFill.Width = Math.Clamp(prog, 0, 1) * HoverProgressTrack.ActualWidth;
-            GaugeGrid.Visibility = Visibility.Visible;
-            EnsureTelemetry();
-            UpdateGauges();
-            ExpandedHoverHost.Visibility = Visibility.Visible;
-            HideZoneNow();
-            double w = Math.Clamp(440, 120, MaxPillW);
-            ExpandedHoverHost.Measure(new Size(w, 10000));
-            double h = Math.Clamp(
-                Math.Max(_cfg.BarHeight, ExpandedHoverHost.DesiredSize.Height + 20), 40, MaxPillH);
-            CancelDelays();
-            _expanded = true;
-            _pendingCollapse = false;
-            _idleCollapse.Stop();
-            Fade(CollapsedPanel, 0, 90);
-            _delays.Add(RunAfter(70, () => Fade(ExpandedHoverHost, 1, 160)));
-            _anim.Animate("w", _currentW, w, ApplyW);
-            _anim.Animate("h", _currentH, h, ApplyH);
-        }
-    }
-
-    private void OnPillLeave(object sender, MouseEventArgs e)
-    {
-        _overPill = false;
-        if (_pendingCollapse && _expanded)
-        {
-            _pendingCollapse = false;
-            if (App.Bus?.Active is null) UserDismiss(clearBus: false);
-            else Collapse();
-            return;
-        }
-        if (_expanded && App.Bus?.Active is null)
-        {
-            _idleCollapse.Interval = TimeSpan.FromMilliseconds(Math.Max(600, _cfg.CollapseDelayMs));
-            _idleCollapse.Start();
-        }
-    }
-
     private void OnPillMouseDown(object sender, MouseButtonEventArgs e)
     {
         if (e.ChangedButton != MouseButton.Left) return;
@@ -1150,17 +1045,21 @@ public partial class BarWindow : Window, IDisposable
         _dragStartX = pt.X;
         _dragStartOffset = _cfg.CustomOffsetX;
         _dragMoved = false;
-        Pill.CaptureMouse();
+        _dragPressing = true;
+        // Do NOT capture yet: capturing here routes the following MouseLeftButtonUp to the
+        // Pill, so clicks on child controls (metric icons, canvas) would never reach them.
+        // Capture only once a real drag begins.
     }
 
     private void OnPillMouseMove(object sender, MouseEventArgs e)
     {
-        if (!Pill.IsMouseCaptured || e.LeftButton != MouseButtonState.Pressed) return;
+        if (!_dragPressing || e.LeftButton != MouseButtonState.Pressed) return;
         NativeMethods.GetCursorPos(out var pt);
         if (!_dragMoved)
         {
             if (Math.Abs(pt.X - _dragStartX) < 5) return;
             _dragMoved = true;
+            Pill.CaptureMouse();
         }
         double scale = CurrentDpi();
         double offset = Math.Clamp(_dragStartOffset + (pt.X - _dragStartX) / scale,
@@ -1172,6 +1071,7 @@ public partial class BarWindow : Window, IDisposable
     private void OnPillMouseUp(object sender, MouseButtonEventArgs e)
     {
         if (Pill.IsMouseCaptured) Pill.ReleaseMouseCapture();
+        _dragPressing = false;
         if (e.ChangedButton != MouseButton.Left) return;
         if (_dragMoved)
         {
@@ -1180,6 +1080,14 @@ public partial class BarWindow : Window, IDisposable
             try { App.Settings?.Update(s => s.CustomOffsetX = saved); } catch { }
             return;
         }
+        // Clicking the open (pinned) canvas closes it.
+        if (_pinned)
+        {
+            SetIslandState(IslandVisualState.Collapsed, IslandMetric.None, force: true);
+            return;
+        }
+        // While the island is open the pill is an interactive surface, not the volume card toggle.
+        if (_islandState != IslandVisualState.Collapsed) return;
         Toggle();
     }
 
@@ -1759,8 +1667,6 @@ public partial class BarWindow : Window, IDisposable
         {
             CollapsedTitle.Text = string.IsNullOrWhiteSpace(m.Title) ? "Playing" : m.Title;
             ShowDisc(m);
-            var bigArt = BytesToImage(m.ArtworkBytes);
-            BigDisc.SetArtwork(bigArt, m.IsPlaying);
         }
         else
         {
@@ -1931,169 +1837,4 @@ public partial class BarWindow : Window, IDisposable
         CollapsedDate.Text = now.ToString("ddd d MMM");
     }
 
-    private void UpdateGauges()
-    {
-        var snap = _telemetry;
-        if (snap is null) return;
-        var gpus = App.Telemetry?.SnapshotGpuTracks();
-        SetTextFast(GaugeCpuPct, FmtPct(snap.Cpu.Available ? snap.Cpu.Utilization : null));
-        SetTextFast(GaugeGpuPct, FmtPct(gpus is { Count: > 0 } ? gpus[0].Utilization : null));
-        SetTextFast(GaugeRamPct, FmtPct(snap.Memory.Available ? snap.Memory.UsedPercent : null));
-        if (_statsPanelOpen) RenderStatsPanelContent(_statsPanelTarget);
-    }
-
-    private void OnGaugeCpuClick(object sender, MouseButtonEventArgs e)
-    {
-        e.Handled = true;
-        OnGaugeClick("CPU");
-    }
-
-    private void OnGaugeGpuClick(object sender, MouseButtonEventArgs e)
-    {
-        e.Handled = true;
-        OnGaugeClick("GPU");
-    }
-
-    private void OnGaugeRamClick(object sender, MouseButtonEventArgs e)
-    {
-        e.Handled = true;
-        OnGaugeClick("RAM");
-    }
-
-    private void OnGaugeClick(string target)
-    {
-        if (_statsPanelOpen && _statsPanelTarget == target)
-        {
-            CloseStatsPanel();
-            return;
-        }
-        _statsPanelTarget = target;
-        OpenStatsPanel(target);
-    }
-
-    private void OpenStatsPanel(string target)
-    {
-        _statsPanelOpen = true;
-        StatsPanelTitle.Text = $"{target} STATS";
-        RenderStatsPanelContent(target);
-        StatsPanel.Visibility = Visibility.Visible;
-        UpdateStatsPanelMargin();
-        _anim.Animate("sp", _statsPanelW, StatsPanelW, ApplyStatsPanelW);
-    }
-
-    private void CloseStatsPanel()
-    {
-        _statsPanelOpen = false;
-        _anim.Animate("sp", _statsPanelW, 0, ApplyStatsPanelW);
-        RunAfter(250, () =>
-        {
-            if (!_statsPanelOpen) StatsPanel.Visibility = Visibility.Collapsed;
-        });
-    }
-
-    private void ApplyStatsPanelW(double v)
-    {
-        v = Math.Max(0, v);
-        _statsPanelW = v;
-        StatsPanel.Width = v;
-        if (v > 0.5) StatsPanel.Visibility = Visibility.Visible;
-        else if (!_statsPanelOpen) StatsPanel.Visibility = Visibility.Collapsed;
-        UpdateStatsPanelMargin();
-        Reposition();
-        RefreshBlur();
-    }
-
-    private void UpdateStatsPanelMargin()
-    {
-        double zoneLeft = Math.Max(40, (WinW - _currentW) / 2);
-        double pillRight = _zoneW + zoneLeft + _currentW;
-        StatsPanel.Margin = new Thickness(pillRight, PillTop, 0, 0);
-        StatsPanel.Height = _currentH;
-    }
-
-    private void RenderStatsPanelContent(string target)
-    {
-        var snap = _telemetry;
-        if (snap is null) return;
-        switch (target)
-        {
-            case "CPU":
-                StatsPanelTitle.Text = "CPU STATS";
-                StatsPanelPercent.Text = FmtPct(snap.Cpu.Available ? snap.Cpu.Utilization : null);
-                StatsPanelInfo.Text = snap.Cpu.Available
-                    ? $"{snap.Cpu.Name}\n{TelemetryFormat.Frequency(snap.Cpu.FrequencyMhz)} · {snap.Cpu.PhysicalCores}c/{snap.Cpu.LogicalThreads}t"
-                    : "Data unavailable";
-                RedrawStatsPanelGraph(App.Telemetry?.CpuHistory);
-                break;
-            case "GPU":
-                StatsPanelTitle.Text = "GPU STATS";
-                var gpus = App.Telemetry?.SnapshotGpuTracks();
-                if (gpus is { Count: > 0 })
-                {
-                    var g = gpus[0];
-                    StatsPanelPercent.Text = FmtPct(g.Utilization);
-                    StatsPanelInfo.Text = g.VramAvailable
-                        ? $"{g.Name}\nVRAM: {TelemetryFormat.Bytes(g.VramUsed)} / {TelemetryFormat.Bytes(g.VramTotal)}"
-                        : g.Name;
-                    RedrawStatsPanelGraph(g.History);
-                }
-                else
-                {
-                    StatsPanelPercent.Text = "n/a";
-                    StatsPanelInfo.Text = "No GPU data available";
-                    RedrawStatsPanelGraph(null);
-                }
-                break;
-            case "RAM":
-                StatsPanelTitle.Text = "RAM STATS";
-                StatsPanelPercent.Text = FmtPct(snap.Memory.Available ? snap.Memory.UsedPercent : null);
-                StatsPanelInfo.Text = snap.Memory.Available
-                    ? $"Used: {TelemetryFormat.Bytes(snap.Memory.UsedBytes)} / {TelemetryFormat.Bytes(snap.Memory.TotalBytes)}\nTotal physical memory"
-                    : "Data unavailable";
-                RedrawStatsPanelGraph(App.Telemetry?.RamHistory);
-                break;
-        }
-    }
-
-    private void RedrawStatsPanelGraph(TelemetryHistory? h)
-    {
-        double gw = Math.Max(40, StatsPanelW - 28);
-        double gh = 60;
-        RedrawGraphTo(h, gw, gh, StatsPanelGraphLine, StatsPanelGraphFill);
-    }
-
-    private void RedrawGraphTo(TelemetryHistory? h, double w, double hh,
-        System.Windows.Shapes.Path linePath, System.Windows.Shapes.Path fillPath)
-    {
-        if (h is null || h.IsEmpty || w < 8 || hh < 4)
-        {
-            linePath.Data = null;
-            fillPath.Data = null;
-            return;
-        }
-        double[] vals = h.Snapshot();
-        int n = vals.Length;
-        double xStep = w / Math.Max(1, n - 1);
-        double usable = Math.Max(4, hh - 4);
-        var points = new Point[n];
-        for (int i = 0; i < n; i++)
-        {
-            double v = Math.Clamp(vals[i], 0, 100);
-            points[i] = new Point(i * xStep, hh - 2 - (v / 100.0) * usable);
-        }
-        var lineFig = new PathFigure { StartPoint = points[0], IsFilled = false };
-        for (int i = 1; i < n; i++) lineFig.Segments.Add(new LineSegment(points[i], true));
-        var line = new PathGeometry();
-        line.Figures.Add(lineFig);
-        linePath.Data = line;
-
-        var fillPts = new List<Point>(points);
-        fillPts.Add(new Point(points[n - 1].X, hh));
-        fillPts.Add(new Point(points[0].X, hh));
-        var fillFig = new PathFigure { StartPoint = points[0], IsClosed = true };
-        fillFig.Segments.Add(new PolyLineSegment(fillPts, true));
-        var fillGeo = new PathGeometry();
-        fillGeo.Figures.Add(fillFig);
-        fillPath.Data = fillGeo;
-    }
 }

@@ -346,10 +346,10 @@ public partial class SettingsWindow : Window
             8, 40, s.CornerRadius, v => Set(x => x.CornerRadius = v),
             v => $"{Math.Round(v)}"));
         root.Children.Add(SliderRow("Collapsed pill width", null,
-            160, 380, s.BarWidth, v => Set(x => x.BarWidth = v),
+            300, 760, s.BarWidth, v => Set(x => x.BarWidth = v),
             v => $"{Math.Round(v)} px"));
         root.Children.Add(SliderRow("Collapsed pill height", null,
-            28, 64, s.BarHeight, v => Set(x => x.BarHeight = v),
+            28, 80, s.BarHeight, v => Set(x => x.BarHeight = v),
             v => $"{Math.Round(v)} px"));
         root.Children.Add(ToggleRow("Backdrop blur", "DWM blur clipped to the pill shape",
             s.BlurEnabled, v => Set(x => x.BlurEnabled = v)));

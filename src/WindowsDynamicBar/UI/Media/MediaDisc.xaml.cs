@@ -131,7 +131,9 @@ public partial class MediaDisc : UserControl
             Spin.Angle = 0;
             return;
         }
-        if (_playing)
+        // Always keep timer running if omega > 0.5, regardless of playing state
+        // This allows the disc to decelerate smoothly when paused
+        if (_omega >= 0.5)
         {
             if (!_spin.IsEnabled)
             {
@@ -139,18 +141,20 @@ public partial class MediaDisc : UserControl
                 _spin.Start();
             }
         }
-        else if (_spin.IsEnabled)
+        else if (_playing)
         {
-            if (_omega < 0.5)
+            // Start spinning when playing and omega is below threshold
+            if (!_spin.IsEnabled)
             {
-                _spin.Stop();
-                _omega = 0;
+                _lastTickMs = _clock.ElapsedMilliseconds;
+                _spin.Start();
             }
         }
-        else if (_omega >= 0.5)
+        else
         {
-            _lastTickMs = _clock.ElapsedMilliseconds;
-            _spin.Start();
+            // Stopped and omega is low enough
+            _spin.Stop();
+            _omega = 0;
         }
     }
 
@@ -161,7 +165,7 @@ public partial class MediaDisc : UserControl
         _lastTickMs = now;
         (_angle, _omega) = DiscRotation.Step(_angle, _omega, _playing, dt);
         Spin.Angle = _angle;
-        if (!_playing && DiscRotation.ShouldTrim(false, _omega))
+        if (DiscRotation.ShouldTrim(_playing, _omega))
         {
             _omega = 0;
             _spin.Stop();

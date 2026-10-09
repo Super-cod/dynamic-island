@@ -93,7 +93,7 @@ public sealed class MediaService : IDisposable
             if (_current is null) return;
             var info = await BuildInfoAsync();
             if (info is null) return;
-            if (info.IsPlaying) MediaChanged?.Invoke(info);
+            MediaChanged?.Invoke(info);  // Fire on ALL state changes (playing and paused)
         });
     }
 

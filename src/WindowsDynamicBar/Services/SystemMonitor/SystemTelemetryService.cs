@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.Management;
 using System.Runtime.InteropServices;
@@ -19,7 +20,12 @@ public sealed class GpuTrack
     public long VramUsed;
     public long VramTotal;
     public bool VramAvailable;
-    public TelemetryHistory History { get; } = new(60);
+    public double Engine3D;
+    public double EngineCopy;
+    public double EngineEncode;
+    public double EngineDecode;
+    public bool EnginesAvailable;
+    public TelemetryHistory History { get; } = new(240);
 }
 
 public sealed class SystemTelemetryService : IDisposable
@@ -29,6 +35,10 @@ public sealed class SystemTelemetryService : IDisposable
 
     private IntPtr _cpuQuery = IntPtr.Zero;
     private IntPtr _cpuCounter = IntPtr.Zero;
+    private IntPtr _cpuCoresQuery = IntPtr.Zero;
+    private IntPtr _cpuCoresCounter = IntPtr.Zero;
+    private bool _cpuCoresAvailable;
+    private double[] _cpuCoreUsage = Array.Empty<double>();
     private IntPtr _engineQuery = IntPtr.Zero;
     private IntPtr _gpuEngineCounter = IntPtr.Zero;
     private bool _engineExpanded;
@@ -37,6 +47,18 @@ public sealed class SystemTelemetryService : IDisposable
     private readonly List<VramCounter> _vramCounters = new();
     private bool _vramAvailable;
 
+    private IntPtr _diskQuery = IntPtr.Zero;
+    private IntPtr _diskReadCounter = IntPtr.Zero;
+    private IntPtr _diskWriteCounter = IntPtr.Zero;
+    private bool _diskAvailable;
+    private long _diskRead;
+    private long _diskWrite;
+
+    private IntPtr _sysMemQuery = IntPtr.Zero;
+    private IntPtr _cacheCounter = IntPtr.Zero;
+    private bool _cacheAvailable;
+    private long _ramCache;
+
     private System.Threading.Timer? _timer;
     private bool _active;
 
@@ -44,8 +66,14 @@ public sealed class SystemTelemetryService : IDisposable
     private double _ramPercent;
     private long _ramUsed;
     private long _ramTotal;
+    private long _ramSwapUsed;
+    private long _ramSwapTotal;
     private bool _cpuAvailable;
     private bool _memoryAvailable;
+
+    private readonly Dictionary<int, TimeSpan> _procCpu = new();
+    private DateTime _lastProcSampleUtc;
+    private IReadOnlyList<ProcessSample> _topProcesses = Array.Empty<ProcessSample>();
 
     private CpuInfo? _cpuInfo;
     private readonly List<GpuTrack> _gpuTracks = new();
@@ -55,9 +83,29 @@ public sealed class SystemTelemetryService : IDisposable
 
     public event Action<TelemetrySnapshot>? TelemetryUpdated;
 
-    public TelemetryHistory CpuHistory { get; } = new(60);
-    public TelemetryHistory RamHistory { get; } = new(60);
+    public TelemetryHistory CpuHistory { get; } = new(240);
+    public TelemetryHistory RamHistory { get; } = new(240);
     public bool IsActive { get { lock (_sync) return _active; } }
+
+    /// <summary>Per-logical-core CPU utilization (0..100), or empty when unavailable.</summary>
+    public double[] CpuCoreUsage { get { lock (_sync) return (double[])_cpuCoreUsage.Clone(); } }
+    public long RamSwapUsedBytes { get { lock (_sync) return _ramSwapUsed; } }
+    public long RamSwapTotalBytes { get { lock (_sync) return _ramSwapTotal; } }
+    public long RamCacheBytes { get { lock (_sync) return _cacheAvailable ? _ramCache : 0; } }
+    public long DiskReadBytesPerSec { get { lock (_sync) return _diskAvailable ? _diskRead : -1; } }
+    public long DiskWriteBytesPerSec { get { lock (_sync) return _diskAvailable ? _diskWrite : -1; } }
+
+    /// <summary>Live history buffer for the GPU adapter at <paramref name="index"/> (creation order).</summary>
+    public TelemetryHistory? GetGpuHistory(int index)
+    {
+        lock (_sync) return index >= 0 && index < _gpuTracks.Count ? _gpuTracks[index].History : null;
+    }
+
+    /// <summary>Top processes by CPU share for the most recent sample.</summary>
+    public IReadOnlyList<ProcessSample> SnapshotTopProcesses()
+    {
+        lock (_sync) return _topProcesses;
+    }
 
     public IReadOnlyList<GpuTrack> SnapshotGpuTracks()
     {
@@ -71,6 +119,11 @@ public sealed class SystemTelemetryService : IDisposable
                 VramUsed = t.VramUsed,
                 VramTotal = t.VramTotal,
                 VramAvailable = t.VramAvailable,
+                Engine3D = t.Engine3D,
+                EngineCopy = t.EngineCopy,
+                EngineEncode = t.EngineEncode,
+                EngineDecode = t.EngineDecode,
+                EnginesAvailable = t.EnginesAvailable,
             }).ToList();
         }
     }
@@ -177,6 +230,22 @@ public sealed class SystemTelemetryService : IDisposable
                 else _cpuAvailable = false;
             }
 
+            if (_cpuCoresQuery == IntPtr.Zero)
+            {
+                if (PdhOpenQueryW(null, IntPtr.Zero, out _cpuCoresQuery) == 0 &&
+                    PdhAddEnglishCounterW(_cpuCoresQuery, @"\Processor(*)\% Processor Time",
+                        IntPtr.Zero, out _cpuCoresCounter) == 0)
+                {
+                    PdhCollectQueryData(_cpuCoresQuery);
+                    _cpuCoresAvailable = true;
+                }
+                else
+                {
+                    _cpuCoresAvailable = false;
+                    Log.Info("Per-core CPU counter unavailable");
+                }
+            }
+
             if (!_engineExpanded)
             {
                 if (PdhOpenQueryW(null, IntPtr.Zero, out _engineQuery) == 0 &&
@@ -217,6 +286,32 @@ public sealed class SystemTelemetryService : IDisposable
                         _vramAvailable = true;
                     }
                 }
+            }
+
+            if (_diskQuery == IntPtr.Zero)
+            {
+                if (PdhOpenQueryW(null, IntPtr.Zero, out _diskQuery) == 0 &&
+                    PdhAddEnglishCounterW(_diskQuery, @"\PhysicalDisk(_Total)\Disk Read Bytes/sec",
+                        IntPtr.Zero, out _diskReadCounter) == 0 &&
+                    PdhAddEnglishCounterW(_diskQuery, @"\PhysicalDisk(_Total)\Disk Write Bytes/sec",
+                        IntPtr.Zero, out _diskWriteCounter) == 0)
+                {
+                    PdhCollectQueryData(_diskQuery);
+                    _diskAvailable = true;
+                }
+                else _diskAvailable = false;
+            }
+
+            if (_sysMemQuery == IntPtr.Zero)
+            {
+                if (PdhOpenQueryW(null, IntPtr.Zero, out _sysMemQuery) == 0 &&
+                    PdhAddEnglishCounterW(_sysMemQuery, @"\Memory\Cache Bytes",
+                        IntPtr.Zero, out _cacheCounter) == 0)
+                {
+                    PdhCollectQueryData(_sysMemQuery);
+                    _cacheAvailable = true;
+                }
+                else _cacheAvailable = false;
             }
         }
         catch (Exception ex)
@@ -285,8 +380,11 @@ public sealed class SystemTelemetryService : IDisposable
             lock (_sync)
             {
                 SampleCpu();
+                SampleCpuCores();
                 SampleGpu();
                 SampleMemory();
+                SampleDiskCache();
+                SampleProcesses();
                 PushHistories();
                 snapshot = BuildSnapshot();
             }
@@ -303,13 +401,49 @@ public sealed class SystemTelemetryService : IDisposable
         if (!_cpuAvailable || _cpuQuery == IntPtr.Zero) return;
         PdhCollectQueryData(_cpuQuery);
         var buf = new PDH_FMT_COUNTERVALUE_DOUBLE[1];
-        if (PdhGetFormattedCounterValueDouble(_cpuCounter, out _, buf) == 0)
+        if (PdhGetFormattedCounterValue(_cpuCounter, 0x00000200, out _, buf) == 0)
             _cpu = Math.Round(Math.Clamp(buf[0].doubleValue, 0, 100), 1);
+    }
+
+    private void SampleCpuCores()
+    {
+        if (!_cpuCoresAvailable || _cpuCoresQuery == IntPtr.Zero || _cpuCoresCounter == IntPtr.Zero)
+            return;
+
+        PdhCollectQueryData(_cpuCoresQuery);
+        uint bufferSize = 0, itemCount = 0;
+        int status = PdhGetFormattedCounterArrayW(_cpuCoresCounter, 0x00000200 /*PDH_FMT_DOUBLE*/,
+            ref bufferSize, ref itemCount, IntPtr.Zero);
+        if (status != PDH_MORE_DATA || itemCount == 0) return;
+
+        IntPtr pBuf = Marshal.AllocHGlobal((int)bufferSize);
+        try
+        {
+            status = PdhGetFormattedCounterArrayW(_cpuCoresCounter, 0x00000200,
+                ref bufferSize, ref itemCount, pBuf);
+            if (status != 0) return;
+
+            var cores = new List<(int Index, double Value)>((int)itemCount);
+            for (int i = 0; i < itemCount; i++)
+            {
+                IntPtr szName = Marshal.ReadIntPtr(pBuf, i * 24);
+                string? inst = szName != IntPtr.Zero ? Marshal.PtrToStringUni(szName) : null;
+                if (string.IsNullOrEmpty(inst) || inst.StartsWith("_", StringComparison.Ordinal)) continue;
+                if (!int.TryParse(inst, out int coreIndex)) continue;
+                long bits = Marshal.ReadInt64(pBuf, i * 24 + 16);
+                double val = Math.Clamp(BitConverter.Int64BitsToDouble(bits), 0, 100);
+                cores.Add((coreIndex, Math.Round(val, 1)));
+            }
+            cores.Sort((a, b) => a.Index.CompareTo(b.Index));
+            _cpuCoreUsage = cores.Select(c => c.Value).ToArray();
+        }
+        finally { Marshal.FreeHGlobal(pBuf); }
     }
 
     private void SampleGpu()
     {
         var sums = new Dictionary<long, double>();
+        var engines = new Dictionary<long, GpuEngineParser.EngineBreakdown>();
         if (_engineQuery != IntPtr.Zero && _gpuEngineCounter != IntPtr.Zero)
         {
             PdhCollectQueryData(_engineQuery);
@@ -339,6 +473,7 @@ public sealed class SystemTelemetryService : IDisposable
                             }
                         }
                         sums = GpuEngineParser.GroupUtilization(samples);
+                        engines = GpuEngineParser.GroupByType(samples);
                     }
                 }
                 finally { Marshal.FreeHGlobal(pBuf); }
@@ -351,6 +486,15 @@ public sealed class SystemTelemetryService : IDisposable
                 track.Utilization = Math.Round(util, 1);
             else
                 track.Utilization = 0;
+
+            if (engines.TryGetValue(track.Luid, out var eb))
+            {
+                track.Engine3D = Math.Round(eb.D3, 1);
+                track.EngineCopy = Math.Round(eb.Copy, 1);
+                track.EngineEncode = Math.Round(eb.Enc, 1);
+                track.EngineDecode = Math.Round(eb.Dec, 1);
+                track.EnginesAvailable = true;
+            }
             if (track.VramTotal > 0 && !track.VramAvailable) track.VramAvailable = true;
         }
 
@@ -376,8 +520,8 @@ public sealed class SystemTelemetryService : IDisposable
                 var vc = _vramCounters[i];
                 var ub = new PDH_FMT_COUNTERVALUE_DOUBLE[1];
                 var lb = new PDH_FMT_COUNTERVALUE_DOUBLE[1];
-                if (PdhGetFormattedCounterValueDouble(vc.Usage, out _, ub) != 0) continue;
-                if (PdhGetFormattedCounterValueDouble(vc.Limit, out _, lb) != 0) continue;
+                if (PdhGetFormattedCounterValue(vc.Usage, 0x00000200, out _, ub) != 0) continue;
+                if (PdhGetFormattedCounterValue(vc.Limit, 0x00000200, out _, lb) != 0) continue;
                 var track = _gpuTracks.FirstOrDefault(t => t.Luid == vc.Luid)
                          ?? (i < _gpuTracks.Count ? _gpuTracks[i] : null);
                 if (track != null)
@@ -410,9 +554,73 @@ public sealed class SystemTelemetryService : IDisposable
             _ramPercent = _ramTotal > 0
                 ? Math.Round(Math.Clamp((double)_ramUsed / _ramTotal * 100, 0, 100), 1)
                 : 0;
+            _ramSwapTotal = (long)mi.ullTotalPageFile;
+            _ramSwapUsed = Math.Max(0, _ramSwapTotal - (long)mi.ullAvailPageFile);
             _memoryAvailable = true;
         }
         else _memoryAvailable = false;
+    }
+
+    private void SampleDiskCache()
+    {
+        if (_diskAvailable && _diskQuery != IntPtr.Zero)
+        {
+            PdhCollectQueryData(_diskQuery);
+            var rb = new PDH_FMT_COUNTERVALUE_DOUBLE[1];
+            if (PdhGetFormattedCounterValue(_diskReadCounter, 0x00000200, out _, rb) == 0)
+                _diskRead = (long)Math.Max(0, rb[0].doubleValue);
+            var wb = new PDH_FMT_COUNTERVALUE_DOUBLE[1];
+            if (PdhGetFormattedCounterValue(_diskWriteCounter, 0x00000200, out _, wb) == 0)
+                _diskWrite = (long)Math.Max(0, wb[0].doubleValue);
+        }
+        if (_cacheAvailable && _sysMemQuery != IntPtr.Zero)
+        {
+            PdhCollectQueryData(_sysMemQuery);
+            var cb = new PDH_FMT_COUNTERVALUE_DOUBLE[1];
+            if (PdhGetFormattedCounterValue(_cacheCounter, 0x00000200, out _, cb) == 0)
+                _ramCache = (long)Math.Max(0, cb[0].doubleValue);
+        }
+    }
+
+    /// <summary>Top-3 processes by CPU share, derived from TotalProcessorTime deltas.</summary>
+    private void SampleProcesses()
+    {
+        var now = DateTime.UtcNow;
+        double elapsed = (now - _lastProcSampleUtc).TotalSeconds;
+        _lastProcSampleUtc = now;
+
+        int ncpu = Math.Max(1, Environment.ProcessorCount);
+        var next = new Dictionary<int, TimeSpan>(_procCpu.Count + 8);
+        var list = new List<ProcessSample>(_procCpu.Count);
+
+        Process[] procs;
+        try { procs = Process.GetProcesses(); }
+        catch { return; }
+
+        foreach (var p in procs)
+        {
+            try
+            {
+                int id = p.Id;
+                TimeSpan t;
+                try { t = p.TotalProcessorTime; }
+                catch { continue; }
+
+                next[id] = t;
+                if (elapsed > 0.05 && _procCpu.TryGetValue(id, out var prev))
+                {
+                    double dp = (t - prev).TotalSeconds;
+                    double pct = Math.Clamp(dp / elapsed / ncpu * 100.0, 0, 100);
+                    if (pct > 0.1) list.Add(new ProcessSample(p.ProcessName, Math.Round(pct, 1)));
+                }
+            }
+            catch { /* process exited mid-enumeration */ }
+            finally { p.Dispose(); }
+        }
+
+        _procCpu.Clear();
+        foreach (var kv in next) _procCpu[kv.Key] = kv.Value;
+        _topProcesses = list.OrderByDescending(x => x.CpuPercent).Take(3).ToList();
     }
 
     private void PushHistories()
@@ -434,7 +642,7 @@ public sealed class SystemTelemetryService : IDisposable
             gpus.Add(new GpuAdapterStats(track.Luid, track.Name, track.Utilization,
                 track.VramUsed, track.VramTotal, track.VramAvailable));
         }
-        return new TelemetrySnapshot(cpu, gpus, memory, DateTime.UtcNow);
+        return new TelemetrySnapshot(cpu, gpus, memory, DateTime.UtcNow, _topProcesses);
     }
 
     private static List<string> ExpandInstances(string wildcard)
@@ -477,8 +685,11 @@ public sealed class SystemTelemetryService : IDisposable
     {
         Deactivate();
         if (_cpuQuery != IntPtr.Zero) { PdhCloseQuery(_cpuQuery); _cpuQuery = IntPtr.Zero; }
+        if (_cpuCoresQuery != IntPtr.Zero) { PdhCloseQuery(_cpuCoresQuery); _cpuCoresQuery = IntPtr.Zero; }
         if (_engineQuery != IntPtr.Zero) { PdhCloseQuery(_engineQuery); _engineQuery = IntPtr.Zero; }
         if (_memQuery != IntPtr.Zero) { PdhCloseQuery(_memQuery); _memQuery = IntPtr.Zero; }
+        if (_diskQuery != IntPtr.Zero) { PdhCloseQuery(_diskQuery); _diskQuery = IntPtr.Zero; }
+        if (_sysMemQuery != IntPtr.Zero) { PdhCloseQuery(_sysMemQuery); _sysMemQuery = IntPtr.Zero; }
         _vramCounters.Clear();
     }
 
@@ -501,7 +712,7 @@ public sealed class SystemTelemetryService : IDisposable
     [DllImport("pdh.dll")]
     private static extern int PdhCollectQueryData(IntPtr query);
     [DllImport("pdh.dll")]
-    private static extern int PdhGetFormattedCounterValueDouble(IntPtr counter, out IntPtr type,
+    private static extern int PdhGetFormattedCounterValue(IntPtr counter, int format, out int type,
         [Out] PDH_FMT_COUNTERVALUE_DOUBLE[] value);
     [DllImport("pdh.dll", CharSet = CharSet.Unicode)]
     private static extern int PdhGetFormattedCounterArrayW(IntPtr counter, int format, ref uint bufferSize, ref uint itemCount, IntPtr buffer);

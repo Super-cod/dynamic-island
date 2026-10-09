@@ -22,8 +22,12 @@ public sealed record GpuAdapterStats(
     long VramTotalBytes,
     bool VramAvailable);
 
+/// <summary>A single process row for the top-process list (CPU share 0..100).</summary>
+public sealed record ProcessSample(string Name, double CpuPercent);
+
 public sealed record TelemetrySnapshot(
     CpuStats Cpu,
     IReadOnlyList<GpuAdapterStats> Gpus,
     MemoryStats Memory,
-    DateTime Timestamp);
+    DateTime Timestamp,
+    IReadOnlyList<ProcessSample>? TopProcesses = null);

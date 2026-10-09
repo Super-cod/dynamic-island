@@ -75,7 +75,7 @@ internal static class NativeMethods
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFOEX lpmi);
 
-    public sealed record MonitorInfoEx(IntPtr Handle, RECT Bounds, string Device);
+    public sealed record MonitorInfoEx(IntPtr Handle, RECT Bounds, RECT WorkArea, string Device);
 
     /// <summary>Enumerate physical monitors in OS order (stable indexing for settings).</summary>
     public static List<MonitorInfoEx> GetMonitors()
@@ -86,7 +86,7 @@ internal static class NativeMethods
             {
                 var mi = new MONITORINFOEX { cbSize = Marshal.SizeOf<MONITORINFOEX>() };
                 if (GetMonitorInfo(hMon, ref mi))
-                    list.Add(new MonitorInfoEx(hMon, mi.rcMonitor, mi.szDevice));
+                    list.Add(new MonitorInfoEx(hMon, mi.rcMonitor, mi.rcWork, mi.szDevice));
                 return true;
             }, IntPtr.Zero);
         return list;

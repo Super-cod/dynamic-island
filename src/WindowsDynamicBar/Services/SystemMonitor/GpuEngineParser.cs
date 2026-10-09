@@ -39,6 +39,27 @@ public static class GpuEngineParser
         return grouped;
     }
 
+    public readonly record struct EngineBreakdown(double D3, double Copy, double Enc, double Dec);
+
+    /// <summary>Per-adapter utilization split into 3D / Copy / Encode / Decode engine classes.</summary>
+    public static Dictionary<long, EngineBreakdown> GroupByType(
+        IReadOnlyCollection<(string Instance, double Value)> samples)
+    {
+        var grouped = new Dictionary<long, EngineBreakdown>();
+        foreach (var (instance, value) in samples)
+        {
+            if (!TryParse(instance, out var info)) continue;
+            grouped.TryGetValue(info.Luid, out var cur);
+            string t = info.EngType.ToLowerInvariant();
+            if (t.Contains("3d")) cur = cur with { D3 = Math.Min(100, cur.D3 + value) };
+            else if (t.Contains("copy")) cur = cur with { Copy = Math.Min(100, cur.Copy + value) };
+            else if (t.Contains("encode")) cur = cur with { Enc = Math.Min(100, cur.Enc + value) };
+            else if (t.Contains("decode")) cur = cur with { Dec = Math.Min(100, cur.Dec + value) };
+            grouped[info.Luid] = cur;
+        }
+        return grouped;
+    }
+
     private static bool TrySegment(string[] parts, string name, out int index)
     {
         for (int i = 0; i < parts.Length; i++)

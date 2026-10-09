@@ -7,6 +7,9 @@ public sealed class TelemetryHistory
     private int _start;
     private int _count;
 
+    /// <summary>Default ring buffer sized for ~2 minutes of 500 ms samples.</summary>
+    public TelemetryHistory() : this(240) { }
+
     public TelemetryHistory(int capacity)
     {
         if (capacity <= 0) throw new ArgumentOutOfRangeException(nameof(capacity));

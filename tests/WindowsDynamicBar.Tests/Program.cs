@@ -55,6 +55,9 @@ internal static class Program
         Run("GpuEngineParser groups utilization per adapter", TestGpuEngineGrouping);
         Run("DiscRotation spins, decelerates, stays continuous", TestDiscRotation);
         Run("TelemetryPolicy plans zone transitions", TestTelemetryPolicy);
+        Run("Island state machine transitions", TestIslandStateMachine);
+        Run("DotBar color ramp green→red", TestDotBarColorRamp);
+        Run("TelemetryHistory capacity default is 240", TestTelemetryHistoryCapacity);
 
         Console.WriteLine(new string('-', 46));
         Console.WriteLine($"passed: {_pass}   failed: {_fail}");
@@ -551,6 +554,67 @@ internal static class Program
         AssertEq(TelemetryAction.CloseMetricToRail, TelemetryPolicy.Plan(TelemetryZoneState.Ram, TelemetryTarget.Pill), "close metric to rail");
         AssertEq(TelemetryAction.HideAll, TelemetryPolicy.Plan(TelemetryZoneState.Rail, TelemetryTarget.None), "hide rail");
         AssertEq(TelemetryAction.CloseMetricToRail, TelemetryPolicy.Plan(TelemetryZoneState.Cpu, TelemetryTarget.None), "metric hide two-phase");
+    }
+
+    private static void TestIslandStateMachine()
+    {
+        // Outside, no grace elapsed: state unchanged.
+        var (s0, m0) = IslandStateMachine.Resolve(
+            IslandVisualState.Collapsed, IslandMetric.None, false, IslandMetric.None, false);
+        AssertEq(IslandVisualState.Collapsed, s0, "outside stays collapsed");
+        AssertEq(IslandMetric.None, m0, "outside metric cleared");
+
+        // Outside with grace elapsed: collapse.
+        var (s1, _) = IslandStateMachine.Resolve(
+            IslandVisualState.Detail, IslandMetric.Cpu, false, IslandMetric.None, true);
+        AssertEq(IslandVisualState.Collapsed, s1, "grace elapsed collapses");
+
+        // Pointer inside, no icon: expand.
+        var (s2, m2) = IslandStateMachine.Resolve(
+            IslandVisualState.Collapsed, IslandMetric.None, true, IslandMetric.None, false);
+        AssertEq(IslandVisualState.Expanded, s2, "hover expands");
+        AssertEq(IslandMetric.None, m2, "no metric yet");
+
+        // Icon hovered: detail for that metric.
+        var (s3, m3) = IslandStateMachine.Resolve(
+            IslandVisualState.Expanded, IslandMetric.None, true, IslandMetric.Cpu, false);
+        AssertEq(IslandVisualState.Detail, s3, "icon opens detail");
+        AssertEq(IslandMetric.Cpu, m3, "cpu selected");
+
+        // Switching metric keeps detail open.
+        var (s4, m4) = IslandStateMachine.Resolve(
+            IslandVisualState.Detail, IslandMetric.Cpu, true, IslandMetric.Gpu, false);
+        AssertEq(IslandVisualState.Detail, s4, "switch keeps detail");
+        AssertEq(IslandMetric.Gpu, m4, "gpu selected");
+
+        // Moving onto the panel (inside, no icon) keeps the current detail open.
+        var (s5, m5) = IslandStateMachine.Resolve(
+            IslandVisualState.Detail, IslandMetric.Gpu, true, IslandMetric.None, false);
+        AssertEq(IslandVisualState.Detail, s5, "moving to panel keeps detail");
+        AssertEq(IslandMetric.Gpu, m5, "gpu stays selected");
+
+        // Round-trip metric keys.
+        AssertEq("cpu", IslandStateMachine.MetricKey(IslandMetric.Cpu), "cpu key");
+        AssertEq(IslandMetric.Ram, IslandStateMachine.ParseMetric("ram"), "parse ram");
+        AssertEq(IslandMetric.None, IslandStateMachine.ParseMetric("bogus"), "parse bogus");
+        AssertEq(IslandMetric.None, IslandStateMachine.ParseMetric(null), "parse null");
+    }
+
+    private static void TestDotBarColorRamp()
+    {
+        var low = DotBar.ValueColor(0);
+        var high = DotBar.ValueColor(100);
+        Assert(low.G > low.R, "low load is green-dominant (safe)");
+        Assert(high.R > high.G, "high load is red-dominant (alarm)");
+    }
+
+    private static void TestTelemetryHistoryCapacity()
+    {
+        var h = new TelemetryHistory();
+        AssertEq(240, h.Capacity, "default telemetry history capacity");
+        for (int i = 0; i < 500; i++) h.Push(i % 100);
+        AssertEq(240, h.Count, "count capped at default capacity");
+        AssertEq(240, h.Snapshot().Length, "snapshot capped at default capacity");
     }
 }
 

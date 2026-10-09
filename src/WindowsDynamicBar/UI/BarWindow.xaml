@@ -145,25 +145,31 @@
 
     </Window.Resources>
 
-    <!-- Window root: transparent canvas; pill centered horizontally, anchored top -->
+    <!-- Window root: transparent canvas. The island is a single morphing shape inside one
+         continuous hover region; the panel is part of the island so there is no gap. -->
     <Grid x:Name="RootGrid" Background="Transparent" UseLayoutRounding="True">
 
-        <!-- ================= PILL ================= -->
-        <Border x:Name="Pill"
-                Margin="40,6,40,0"
-                VerticalAlignment="Top"
-                HorizontalAlignment="Left"
-                CornerRadius="26"
-                BorderThickness="1"
-                BorderBrush="{DynamicResource WdbHairlineBrush}"
-                Background="{DynamicResource WdbBgBrush}"
-                SnapsToDevicePixels="True"
-                UseLayoutRounding="True"
-                MouseLeftButtonDown="OnPillMouseDown"
-                MouseLeftButtonUp="OnPillMouseUp"
-                MouseMove="OnPillMouseMove"
-                PreviewMouseWheel="OnPillMouseWheel"
-                Cursor="Hand">
+        <!-- ================= ISLAND (single hover region: pill + icons + panel) ================= -->
+        <Grid x:Name="IslandRegion" Background="Transparent" HorizontalAlignment="Left" VerticalAlignment="Top"
+              MouseEnter="OnIslandMouseEnter" MouseLeave="OnIslandMouseLeave">
+
+            <!-- ================= THE ONE SHAPE THAT MORPHS ================= -->
+            <Border x:Name="Pill"
+                    Margin="40,6,40,0"
+                    VerticalAlignment="Top"
+                    HorizontalAlignment="Left"
+                    CornerRadius="26"
+                    BorderThickness="1"
+                    BorderBrush="{DynamicResource WdbHairlineBrush}"
+                    Background="#FF000000"
+                    ClipToBounds="True"
+                    SnapsToDevicePixels="True"
+                    UseLayoutRounding="True"
+                    MouseLeftButtonDown="OnPillMouseDown"
+                    MouseLeftButtonUp="OnPillMouseUp"
+                    MouseMove="OnPillMouseMove"
+                    PreviewMouseWheel="OnPillMouseWheel"
+                    Cursor="Hand">
 
             <Border.Effect>
                 <DropShadowEffect Color="#000000" BlurRadius="24" ShadowDepth="4" Opacity="0.55" Direction="270" />
@@ -171,43 +177,30 @@
 
             <Grid x:Name="PillGrid">
 
-                <!-- ============ COLLAPSED CONTENT ============ -->
-                <Grid x:Name="CollapsedPanel" VerticalAlignment="Center" Margin="10,0">
+                <!-- ============ COLLAPSED CONTENT (mini row) ============ -->
+                <Grid x:Name="CollapsedPanel" VerticalAlignment="Center" Margin="48,0,12,0">
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
 
-                    <Border x:Name="OrbHost" Width="36" Height="36" CornerRadius="18"
-                            Background="{DynamicResource WdbDimBrush}" Margin="0,0,9,0" VerticalAlignment="Center">
-                        <Grid>
-                            <media:MediaDisc x:Name="OrbDisc" Diameter="36" Visibility="Collapsed" />
-                            <Image x:Name="OrbArt" Stretch="UniformToFill" Visibility="Collapsed" />
-                            <TextBlock x:Name="OrbGlyph" Style="{StaticResource WdbGlyph}"
-                                       FontSize="12" Text="&#x25CF;" Foreground="#FF0A84FF" />
-                            <Ellipse x:Name="OrbPulse" Width="36" Height="36"
-                                     Stroke="#FF0A84FF" StrokeThickness="1.5" Opacity="0" />
-                        </Grid>
-                    </Border>
-
-                    <TextBlock x:Name="CollapsedTitle" Grid.Column="1" Style="{StaticResource WdbTitleText}"
-                               Text="Dynamic" MaxWidth="190" />
-                    <TextBlock x:Name="CollapsedValue" Grid.Column="2" Style="{StaticResource WdbSubText}"
-                               Margin="8,0,0,0" Foreground="#FF0A84FF" Visibility="Collapsed" />
-                    <StackPanel Grid.Column="3" Margin="10,0,2,0" VerticalAlignment="Center">
+                    <TextBlock x:Name="CollapsedTitle" Grid.Column="0" Style="{StaticResource WdbTitleText}"
+                               Text="Dynamic" />
+                    <TextBlock x:Name="CollapsedValue" Grid.Column="1" Style="{StaticResource WdbSubText}"
+                               Margin="8,0,0,0" Foreground="{DynamicResource WdbAccentBrush}" Visibility="Collapsed" />
+                    <StackPanel Grid.Column="2" Margin="12,0,2,0" VerticalAlignment="Center">
                         <TextBlock x:Name="CollapsedClock" FontFamily="Segoe UI Variable Text, Segoe UI"
                                    FontSize="13" FontWeight="SemiBold"
                                    Foreground="{DynamicResource WdbAccentBrush}"
-                                   HorizontalAlignment="Center" />
+                                   HorizontalAlignment="Right" />
                         <TextBlock x:Name="CollapsedDate" FontFamily="Segoe UI Variable Text, Segoe UI"
                                    FontSize="9" Foreground="{DynamicResource WdbTextMutedBrush}"
-                                   HorizontalAlignment="Center" />
+                                   HorizontalAlignment="Right" />
                     </StackPanel>
                 </Grid>
 
-                <!-- ============ EXPANDED CONTENT ============ -->
+                <!-- ============ EVENT-BUS CONTENT (media / volume / timer cards) ============ -->
                 <StackPanel x:Name="ExpandedHost" Orientation="Vertical"
                             Margin="16,13,16,14" Visibility="Collapsed" Opacity="0">
 
@@ -366,220 +359,69 @@
                                Margin="0,8,0,0" Visibility="Collapsed" />
                 </StackPanel>
 
-                <!-- ============ HOVER EXPANDED: big disc + music info + gauge grid ============ -->
-                <Grid x:Name="ExpandedHoverHost" Margin="12,10,12,10" Visibility="Collapsed" Opacity="0">
+                <!-- ============ ISLAND EXPANDED (.full: music + icon grid, left:150, centred) ============ -->
+                <Grid x:Name="IslandExpandedHost" Panel.ZIndex="10" HorizontalAlignment="Left" VerticalAlignment="Center"
+                      Margin="150,0,0,0" Visibility="Collapsed" Opacity="0">
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto" />
-                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="200" />
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
 
-                    <!-- Big spinning disc (col 0) -->
-                    <Border Width="70" Height="70" CornerRadius="35"
-                            Background="{DynamicResource WdbDimBrush}" Margin="0,0,10,0"
-                            VerticalAlignment="Center">
-                        <media:MediaDisc x:Name="BigDisc" Diameter="64" />
-                    </Border>
-
-                    <!-- Music info stack (col 1) -->
-                    <StackPanel x:Name="MediaInfoStack" Grid.Column="1" VerticalAlignment="Center">
-                        <TextBlock x:Name="HoverTitle" Style="{StaticResource WdbTitleText}" FontSize="13" Text="" />
-                        <TextBlock x:Name="HoverArtist" Style="{StaticResource WdbSubText}" Text="" Margin="0,2,0,6" />
-                        <Grid x:Name="HoverProgressTrack" Height="5" VerticalAlignment="Center">
-                            <Border Height="5" CornerRadius="2.5" Background="{DynamicResource WdbTrackBrush}" />
-                            <Border x:Name="HoverProgressFill" Height="5" CornerRadius="2.5"
-                                    HorizontalAlignment="Left" Width="0" Background="{DynamicResource WdbAccentBrush}" />
+                    <StackPanel x:Name="MediaInfoStack" Grid.Column="0" Width="200" VerticalAlignment="Center">
+                        <TextBlock x:Name="HoverTitle" Style="{StaticResource WdbTitleText}" FontSize="16" Text="" />
+                        <TextBlock x:Name="HoverArtist" Style="{StaticResource WdbSubText}" Text="" Margin="0,2,0,14" />
+                        <Grid x:Name="HoverProgressTrack" Height="4" VerticalAlignment="Center">
+                            <Border Height="4" CornerRadius="2" Background="{DynamicResource WdbTrackBrush}" />
+                            <Border x:Name="HoverProgressFill" Height="4" CornerRadius="2"
+                                    HorizontalAlignment="Left" Width="0" Background="{DynamicResource WdbTextBrush}" />
                         </Grid>
+                        <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                            <Button Style="{StaticResource WdbIconButton}" Width="28" Height="28"
+                                    Click="OnPrevClick" ToolTip="Previous">
+                                <TextBlock Style="{StaticResource WdbGlyph}" FontSize="12" Text="&#xE892;" />
+                            </Button>
+                            <Button x:Name="HoverPlayButton" Style="{StaticResource WdbIconButton}"
+                                    Width="28" Height="28" Margin="6,0,0,0"
+                                    Click="OnPlayPauseClick" ToolTip="Play / Pause">
+                                <TextBlock x:Name="HoverPlayGlyph" Style="{StaticResource WdbGlyph}"
+                                           FontSize="12" Text="&#xE769;" />
+                            </Button>
+                            <Button Style="{StaticResource WdbIconButton}" Width="28" Height="28"
+                                    Margin="6,0,0,0" Click="OnNextClick" ToolTip="Next">
+                                <TextBlock Style="{StaticResource WdbGlyph}" FontSize="12" Text="&#xE893;" />
+                            </Button>
+                            <local:Equalizer x:Name="HoverEq" Width="150" Height="26"
+                                             VerticalAlignment="Center" Margin="6,0,0,0" />
+                        </StackPanel>
                     </StackPanel>
 
-                    <!-- Gauge grid 2×3 (col 2) -->
-                    <UniformGrid x:Name="GaugeGrid" Grid.Column="2" Columns="2" Rows="3"
-                                 Width="88" Visibility="Collapsed" Margin="10,0,0,0">
-
-                        <!-- CPU gauge -->
-                        <StackPanel HorizontalAlignment="Center" Margin="2">
-                            <Border Width="36" Height="36" CornerRadius="18"
-                                    Background="{DynamicResource WdbDimBrush}"
-                                    BorderBrush="{DynamicResource WdbHairlineBrush}" BorderThickness="1"
-                                    MouseLeftButtonDown="OnGaugeCpuClick" Cursor="Hand">
-                                <TextBlock x:Name="GaugeCpuPct" HorizontalAlignment="Center" VerticalAlignment="Center"
-                                           FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="9"
-                                           Foreground="{DynamicResource WdbAccentBrush}" Text="…" />
-                            </Border>
-                            <TextBlock Text="CPU" FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="7.5"
-                                       Foreground="{DynamicResource WdbTextMutedBrush}"
-                                       HorizontalAlignment="Center" Margin="0,2,0,0" />
-                        </StackPanel>
-
-                        <!-- GPU gauge -->
-                        <StackPanel HorizontalAlignment="Center" Margin="2">
-                            <Border Width="36" Height="36" CornerRadius="18"
-                                    Background="{DynamicResource WdbDimBrush}"
-                                    BorderBrush="{DynamicResource WdbHairlineBrush}" BorderThickness="1"
-                                    MouseLeftButtonDown="OnGaugeGpuClick" Cursor="Hand">
-                                <TextBlock x:Name="GaugeGpuPct" HorizontalAlignment="Center" VerticalAlignment="Center"
-                                           FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="9"
-                                           Foreground="{DynamicResource WdbAccentBrush}" Text="…" />
-                            </Border>
-                            <TextBlock Text="GPU" FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="7.5"
-                                       Foreground="{DynamicResource WdbTextMutedBrush}"
-                                       HorizontalAlignment="Center" Margin="0,2,0,0" />
-                        </StackPanel>
-
-                        <!-- RAM gauge -->
-                        <StackPanel HorizontalAlignment="Center" Margin="2">
-                            <Border Width="36" Height="36" CornerRadius="18"
-                                    Background="{DynamicResource WdbDimBrush}"
-                                    BorderBrush="{DynamicResource WdbHairlineBrush}" BorderThickness="1"
-                                    MouseLeftButtonDown="OnGaugeRamClick" Cursor="Hand">
-                                <TextBlock x:Name="GaugeRamPct" HorizontalAlignment="Center" VerticalAlignment="Center"
-                                           FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="9"
-                                           Foreground="{DynamicResource WdbAccentBrush}" Text="…" />
-                            </Border>
-                            <TextBlock Text="RAM" FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="7.5"
-                                       Foreground="{DynamicResource WdbTextMutedBrush}"
-                                       HorizontalAlignment="Center" Margin="0,2,0,0" />
-                        </StackPanel>
-
-                        <!-- Placeholder 1 -->
-                        <StackPanel HorizontalAlignment="Center" Margin="2">
-                            <Border Width="36" Height="36" CornerRadius="18"
-                                    Background="{DynamicResource WdbDimBrush}"
-                                    BorderBrush="{DynamicResource WdbHairlineBrush}" BorderThickness="1">
-                                <TextBlock x:Name="GaugeCpu2" HorizontalAlignment="Center" VerticalAlignment="Center"
-                                           FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="9"
-                                           Foreground="{DynamicResource WdbTextMutedBrush}" Text="CPU" />
-                            </Border>
-                            <TextBlock Text="" FontSize="7.5" HorizontalAlignment="Center" Margin="0,2,0,0" />
-                        </StackPanel>
-
-                        <!-- Placeholder 2 -->
-                        <StackPanel HorizontalAlignment="Center" Margin="2">
-                            <Border Width="36" Height="36" CornerRadius="18"
-                                    Background="{DynamicResource WdbDimBrush}"
-                                    BorderBrush="{DynamicResource WdbHairlineBrush}" BorderThickness="1">
-                                <TextBlock x:Name="GaugeGpu2" HorizontalAlignment="Center" VerticalAlignment="Center"
-                                           FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="9"
-                                           Foreground="{DynamicResource WdbTextMutedBrush}" Text="GPU" />
-                            </Border>
-                            <TextBlock Text="" FontSize="7.5" HorizontalAlignment="Center" Margin="0,2,0,0" />
-                        </StackPanel>
-
-                        <!-- Placeholder 3 -->
-                        <StackPanel HorizontalAlignment="Center" Margin="2">
-                            <Border Width="36" Height="36" CornerRadius="18"
-                                    Background="{DynamicResource WdbDimBrush}"
-                                    BorderBrush="{DynamicResource WdbHairlineBrush}" BorderThickness="1">
-                                <TextBlock x:Name="GaugeRam2" HorizontalAlignment="Center" VerticalAlignment="Center"
-                                           FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="9"
-                                           Foreground="{DynamicResource WdbTextMutedBrush}" Text="RAM" />
-                            </Border>
-                            <TextBlock Text="" FontSize="7.5" HorizontalAlignment="Center" Margin="0,2,0,0" />
-                        </StackPanel>
-
-                    </UniformGrid>
+                    <local:TelemetryIconRow x:Name="IconRow" Grid.Column="1"
+                                            HorizontalAlignment="Left" VerticalAlignment="Center"
+                                            Margin="22,0,0,0" />
                 </Grid>
 
+                <!-- ============ THE (single) MORPHING DISC ============ -->
+                <Border x:Name="OrbHost" Panel.ZIndex="10" Width="26" Height="26" CornerRadius="13"
+                        Background="{DynamicResource WdbDimBrush}"
+                        HorizontalAlignment="Left" VerticalAlignment="Center" Margin="10,0,0,0">
+                    <Grid>
+                        <media:MediaDisc x:Name="OrbDisc" Diameter="{Binding ActualWidth, ElementName=OrbHost}"
+                                         Visibility="Collapsed" />
+                        <Image x:Name="OrbArt" Stretch="UniformToFill" Visibility="Collapsed" />
+                        <TextBlock x:Name="OrbGlyph" Style="{StaticResource WdbGlyph}"
+                                   FontSize="12" Text="&#x25CF;" Foreground="#FF0A84FF" />
+                    </Grid>
+                </Border>
+
+                <!-- ============ RIGHT DETAIL PANEL (boxed card, inset 16px) ============ -->
+                <local:TelemetryDetailPanel x:Name="DetailPanelComponent"
+                                            Panel.ZIndex="1" HorizontalAlignment="Right" Width="486"
+                                            VerticalAlignment="Stretch"
+                                            Visibility="Collapsed" Opacity="0" IsHitTestVisible="False" />
+
             </Grid>
         </Border>
 
-        <!-- ================= STATS PANEL (slides out right of pill) ================= -->
-        <Border x:Name="StatsPanel"
-                HorizontalAlignment="Left" VerticalAlignment="Top"
-                Width="0" Visibility="Collapsed"
-                CornerRadius="0,22,22,0"
-                BorderThickness="0,1,1,1"
-                BorderBrush="{DynamicResource WdbHairlineBrush}"
-                Background="{DynamicResource WdbBgBrush}"
-                SnapsToDevicePixels="True"
-                UseLayoutRounding="True">
-            <Border.Effect>
-                <DropShadowEffect Color="#000000" BlurRadius="24" ShadowDepth="4" Opacity="0.55" Direction="270" />
-            </Border.Effect>
-            <Grid Margin="14,12,14,12">
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="60" />
-                </Grid.RowDefinitions>
-                <TextBlock x:Name="StatsPanelTitle" Style="{StaticResource WdbTitleText}" Text="GPU" />
-                <TextBlock x:Name="StatsPanelPercent" Grid.Row="1"
-                           FontFamily="Segoe UI Variable Display, Segoe UI" FontSize="32" FontWeight="SemiBold"
-                           Foreground="{DynamicResource WdbAccentBrush}" Margin="0,4,0,0" />
-                <TextBlock x:Name="StatsPanelInfo" Grid.Row="2" Style="{StaticResource WdbSubText}"
-                           Margin="0,4,0,6" TextWrapping="Wrap" />
-                <Grid Grid.Row="3">
-                    <Path x:Name="StatsPanelGraphFill" Stretch="None"
-                          Fill="{DynamicResource WdbAccentBrush}" Opacity="0.14"
-                          VerticalAlignment="Stretch" HorizontalAlignment="Stretch" />
-                    <Path x:Name="StatsPanelGraphLine" Stretch="None"
-                          Stroke="{DynamicResource WdbAccentBrush}" StrokeThickness="1.6"
-                          StrokeLineJoin="Round"
-                          VerticalAlignment="Stretch" HorizontalAlignment="Stretch" />
-                </Grid>
-            </Grid>
-        </Border>
-
-        <!-- ================= TELEMETRY ZONE (left of pill) ================= -->
-        <Border x:Name="ZoneHost" HorizontalAlignment="Left" VerticalAlignment="Top"
-                Margin="0,6,0,0" Width="0" Height="40"
-                CornerRadius="14,0,0,14"
-                BorderThickness="1,1,0,1"
-                BorderBrush="{DynamicResource WdbHairlineBrush}"
-                Background="{DynamicResource WdbBgBrush}"
-                SnapsToDevicePixels="True"
-                UseLayoutRounding="True"
-                Visibility="Collapsed">
-            <Grid x:Name="ZoneGrid">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition x:Name="DetailCol" Width="0" />
-                    <ColumnDefinition Width="130" />
-                </Grid.ColumnDefinitions>
-
-                <!-- metric detail panel (using new TelemetryDetailPanel component) -->
-                <local:TelemetryDetailPanel x:Name="DetailPanelComponent" Margin="14,0,8,0"
-                                             Visibility="Collapsed" Opacity="0" IsHitTestVisible="False" />
-
-
-                <!-- hover rail: compact metric circles -->
-                <StackPanel x:Name="RailRow" Grid.Column="1" Orientation="Horizontal"
-                            HorizontalAlignment="Center" VerticalAlignment="Top">
-                    <StackPanel Width="36" Margin="0,0,4,0">
-                        <Border x:Name="RailCpu" Width="30" Height="30" CornerRadius="15"
-                                Background="{DynamicResource WdbDimBrush}"
-                                BorderBrush="{DynamicResource WdbHairlineBrush}" BorderThickness="1">
-                            <TextBlock x:Name="RailCpuText" HorizontalAlignment="Center"
-                                       VerticalAlignment="Center" Style="{StaticResource WdbGlyph}"
-                                       FontSize="10" Foreground="{DynamicResource WdbAccentBrush}" Text="0%" />
-                        </Border>
-                        <TextBlock Text="CPU" Style="{StaticResource WdbSubText}" FontSize="7.5"
-                                   HorizontalAlignment="Center" Margin="0,2,0,0" />
-                    </StackPanel>
-                    <StackPanel Width="36" Margin="0,0,4,0">
-                        <Border x:Name="RailGpu" Width="30" Height="30" CornerRadius="15"
-                                Background="{DynamicResource WdbDimBrush}"
-                                BorderBrush="{DynamicResource WdbHairlineBrush}" BorderThickness="1">
-                            <TextBlock x:Name="RailGpuText" HorizontalAlignment="Center"
-                                       VerticalAlignment="Center" Style="{StaticResource WdbGlyph}"
-                                       FontSize="10" Foreground="{DynamicResource WdbAccentBrush}" Text="0%" />
-                        </Border>
-                        <TextBlock Text="GPU" Style="{StaticResource WdbSubText}" FontSize="7.5"
-                                   HorizontalAlignment="Center" Margin="0,2,0,0" />
-                    </StackPanel>
-                    <StackPanel Width="36">
-                        <Border x:Name="RailRam" Width="30" Height="30" CornerRadius="15"
-                                Background="{DynamicResource WdbDimBrush}"
-                                BorderBrush="{DynamicResource WdbHairlineBrush}" BorderThickness="1">
-                            <TextBlock x:Name="RailRamText" HorizontalAlignment="Center"
-                                       VerticalAlignment="Center" Style="{StaticResource WdbGlyph}"
-                                       FontSize="10" Foreground="{DynamicResource WdbAccentBrush}" Text="0%" />
-                        </Border>
-                        <TextBlock Text="RAM" Style="{StaticResource WdbSubText}" FontSize="7.5"
-                                   HorizontalAlignment="Center" Margin="0,2,0,0" />
-                    </StackPanel>
-                </StackPanel>
-            </Grid>
-        </Border>
+        </Grid>
     </Grid>
 </Window>
