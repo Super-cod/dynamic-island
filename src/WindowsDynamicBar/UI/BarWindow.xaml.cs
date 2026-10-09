@@ -36,15 +36,47 @@ public partial class BarWindow : Window, IDisposable
     private const double MaxPillW = 1200;
     private const double MaxPillH = 280;
 
-    // ---- island geometry (DIPs) : matches the reference demo ----
-    private const double IslandExpandedW = 575;    // s2
-    private const double IslandDetailW = 1082;     // s3 (wider than s2)
-    private const double IslandMirrorW = 879;      // s3 mirror: same left edge as the 494px cards, island ends at the camera
-    private const double IslandDualW = 1627;       // two cards open: hub (575) + a 526px card+gap on each side
+    // ---- island geometry (DIPs) : dynamic based on screen size ----
+    private const double IslandExpandedW = 575;    // s2 (hover hub)
+    private const double BaseDetailW = 1082;       // s3 baseline on >= 1650px desktop displays
+    private const double BaseMirrorW = 879;        // s3 mirror baseline
+    private const double BaseDetailCardW = 494;    // native card width
+    private const double BaseMirrorCardW = 291;    // native mirror card width
     private const double DiscCollapsed = 27;
     private const double DiscExpanded = 118;
     private const double IslandPadV = 13;          // symmetric top/bottom padding inside the island
     private const double MinIslandH = 63;          // smallest island height (empty/placeholder content)
+
+    /// <summary>
+    /// Dynamic scale factor for the opened detail island and card based on screen width.
+    /// On large desktop monitors (>= 1650 DIPs) it returns 1.0 (original full size).
+    /// On laptop screens (1200 - 1650 DIPs) it scales gracefully between 0.78 and 1.0,
+    /// ensuring the opened island never touches the right screen edge or pushes the island off-balance.
+    /// </summary>
+    private double GetDynamicOpenScale()
+    {
+        if (_winW >= 1650) return 1.0;
+        double t = Math.Clamp((_winW - 1200.0) / (1650.0 - 1200.0), 0.0, 1.0);
+        return 0.78 + 0.22 * t;
+    }
+
+    private double DynamicDetailCardW => Math.Round(BaseDetailCardW * GetDynamicOpenScale());
+    private double DynamicMirrorCardW => Math.Round(BaseMirrorCardW * GetDynamicOpenScale());
+
+    private double DynamicDetailW => Math.Round(IslandExpandedW + 13 + DynamicDetailCardW);
+    private double DynamicMirrorW => Math.Round(IslandExpandedW + 13 + DynamicMirrorCardW);
+
+    private double DetailWidth() => _activeMetric == IslandMetric.Mirror ? DynamicMirrorW : DynamicDetailW;
+
+    private void ApplyDynamicCardScale()
+    {
+        double scale = GetDynamicOpenScale();
+        ScaleTransform? st = scale < 0.999 ? new ScaleTransform(scale, scale) : null;
+        DetailPanelComponent.LayoutTransform = st;
+        NetPanelComponent.LayoutTransform = st;
+        WeatherPanelComponent.LayoutTransform = st;
+        MirrorPanelComponent.LayoutTransform = st;
+    }
 
     // ---- icon glyphs (Segoe Fluent Icons; verified against font render) ----
     private const string IcDot = "\u25CF";
@@ -117,19 +149,11 @@ public partial class BarWindow : Window, IDisposable
 
     // ---- Island state machine (Steps 2-8) ----
     private IslandVisualState _islandState = IslandVisualState.Collapsed;
-    // Two independent detail slots. The first click fills the right slot, the second the left;
-    // once both are full a new selection replaces the oldest of the two.
-    private IslandMetric _rightMetric = IslandMetric.None;
-    private IslandMetric _leftMetric = IslandMetric.None;
-    private long _rightTick, _leftTick, _tick;
-    private TelemetryDetailPanel? _telRight;   // telemetry card instance shown in the right slot
-    private TelemetryDetailPanel? _telLeft;    // telemetry card instance shown in the left slot
-    private readonly HashSet<UIElement> _usedPanels = new();  // card instances currently in a slot
+    private IslandMetric _activeMetric = IslandMetric.None;
     private readonly DispatcherTimer _collapseDelay = new() { Interval = TimeSpan.FromMilliseconds(250) };
     private bool _islandHovering;
-    private bool _pinned;   // any slot open: stays open regardless of hover until toggled off
+    private bool _pinned;   // detail panel open: stays open regardless of hover until toggled off
     private double _winW = 520;
-    private bool _pillCentered;   // dual-card layout: grow symmetrically about screen centre
     private int _gpuIndex;
     private TelemetrySnapshot? _telemetry;
     private NetworkMonitor? _netMonitor;
@@ -150,6 +174,7 @@ public partial class BarWindow : Window, IDisposable
         _currentH = Math.Max(24, _cfg.BarHeight);
         Pill.Width = _currentW;
         Pill.Height = _currentH;
+        ApplyDynamicCardScale();
         UpdatePillMargin();
 
         _anim = CreateAnimator(_cfg);
@@ -159,13 +184,13 @@ public partial class BarWindow : Window, IDisposable
         HeaderArt.Clip = new RectangleGeometry(new Rect(0, 0, 34, 34), 17, 17);
         OrbDisc.ReduceMotion = _cfg.ReduceMotion;
         DetailPanelComponent.ReduceMotion = _cfg.ReduceMotion;
-        DetailPanelB.ReduceMotion = _cfg.ReduceMotion;
         NetPanelComponent.ReduceMotion = _cfg.ReduceMotion;
         MirrorPanelComponent.ReduceMotion = _cfg.ReduceMotion;
 
+        IconRow.MetricHovered += OnIconMetricHovered;
+        IconRow.MetricUnhovered += OnIconMetricUnhovered;
         IconRow.MetricClicked += OnIconMetricClicked;
         DetailPanelComponent.GpuCycleRequested += OnGpuCycleRequested;
-        DetailPanelB.GpuCycleRequested += OnGpuCycleRequested;
         NetPanelComponent.TestToggleRequested += OnNetTestToggle;
         MirrorPanelComponent.CameraStateChanged += OnMirrorCameraStateChanged;
         _collapseDelay.Tick += OnCollapseDelayTick;
@@ -399,6 +424,7 @@ public partial class BarWindow : Window, IDisposable
                 (int)workW, (int)Math.Round(workH * scale),
                 NativeMethods.SWP_NOACTIVATE);
 
+            ApplyDynamicCardScale();
             UpdatePillMargin();
             RefreshBlur();
         }
@@ -441,7 +467,6 @@ public partial class BarWindow : Window, IDisposable
         _currentW = v;
         Pill.Width = v;
         UpdatePillMargin();
-        if (_pillCentered) PositionDualHub();
         UpdateShape();
         SyncFills();
     }
@@ -455,22 +480,43 @@ public partial class BarWindow : Window, IDisposable
         UpdateShape();
     }
 
-    /// <summary>Position the pill. Up to the normal expanded width it stays centered on screen
-    /// (grows symmetrically in the middle). Wider than that (the detail panel) it keeps its left
-    /// edge and extends to the right. The rule is width-based so the morph stays continuous.</summary>
+    /// <summary>Position the pill. Up to the normal expanded width it stays centred on screen and
+    /// grows symmetrically about the centre (the small pill expands evenly on both sides on hover).
+    /// Wider than that - i.e. the detail panel - it extends to the right dynamically sized to the screen.
+    /// On large screens it keeps its left edge fixed. On smaller laptop screens it smoothly adjusts
+    /// so it never touches the right screen edge or pushes the island abruptly.</summary>
     private void UpdatePillMargin()
     {
         double offset = _cfg.CustomOffsetX;
         double left;
-        if (_currentW <= IslandExpandedW || _pillCentered)
+        if (_currentW <= IslandExpandedW)
         {
-            // Collapsed/hover and the dual-card layout stay centred so the disc + icons do not
-            // move as the island grows; the single detail panel keeps its left edge fixed.
+            // Collapsed and hover: stay centred so the pill grows evenly on both sides.
             left = (_winW - _currentW) / 2 + offset;
         }
         else
         {
-            left = (_winW - IslandExpandedW) / 2 + offset;
+            // Detail panel is open or opening.
+            // On desktop: keep left edge fixed at the hover center so disc/icons don't shift.
+            // On laptop: if extending to targetDetailW would exceed screen bounds (safe right margin 24 DIPs),
+            // smoothly and proportionally adjust left so it never touches the right edge or jerks.
+            double hoverLeft = (_winW - IslandExpandedW) / 2 + offset;
+            double targetW = DetailWidth();
+            const double safeMargin = 24.0;
+            double maxAllowedLeft = _winW - targetW - safeMargin;
+
+            if (hoverLeft <= maxAllowedLeft)
+            {
+                // Plenty of room on the right (desktop monitor) - left edge stays completely stationary!
+                left = hoverLeft;
+            }
+            else
+            {
+                // Smaller screen (laptop) - interpolate left smoothly as _currentW expands
+                // so the movement is gentle, fluid and proportional throughout the spring animation.
+                double progress = Math.Clamp((_currentW - IslandExpandedW) / Math.Max(1.0, targetW - IslandExpandedW), 0.0, 1.0);
+                left = hoverLeft + (maxAllowedLeft - hoverLeft) * progress;
+            }
         }
         double maxLeft = Math.Max(8, _winW - _currentW - 8);
         left = Math.Max(8, Math.Min(left, maxLeft));
@@ -492,7 +538,7 @@ public partial class BarWindow : Window, IDisposable
     private void Expand()
     {
         if (_shown is null) return;
-        if (_islandState != IslandVisualState.Collapsed) SetIslandState(IslandVisualState.Collapsed, force: true);
+        if (_islandState != IslandVisualState.Collapsed) SetIslandState(IslandVisualState.Collapsed, IslandMetric.None, force: true);
         double w = Math.Clamp(TargetWidth(_shown.Kind), 120, MaxPillW);
 
         ExpandedHost.Visibility = Visibility.Visible;
@@ -589,23 +635,37 @@ public partial class BarWindow : Window, IDisposable
     }
 
 
-    /// <summary>Set the Island state: Collapsed, Expanded (hover), or Detail (one or two metric
-    /// cards open). One method drives size, disc, content fades, panels and icon highlight (R4/R9).</summary>
-    private void SetIslandState(IslandVisualState state, bool force = false)
+    /// <summary>Set the Island state: Collapsed, Expanded (hover), or Detail (a single metric card
+    /// open). One method drives size, disc, content fades, panels and icon highlight (R4/R9).</summary>
+    private void SetIslandState(IslandVisualState state, IslandMetric metric, bool force = false)
     {
-        if (!force && state == _islandState) return;
+        if (!force && state == _islandState && metric == _activeMetric) return;
 
+        bool sameState = state == _islandState;
         _islandState = state;
+        _activeMetric = metric;
         _collapseDelay.Stop();
 
-        // Privacy: the mirror camera only lives while the mirror card occupies a slot.
-        if (_rightMetric != IslandMetric.Mirror && _leftMetric != IslandMetric.Mirror)
-            MirrorPanelComponent.StopCamera();
+        // Privacy: the mirror camera is released the moment it is no longer the active metric
+        // (hovering another icon, collapsing, switching panels). Starting it only ever happens
+        // from an explicit Mirror icon click or the panel's CAMERA ON button.
+        if (metric != IslandMetric.Mirror) MirrorPanelComponent.StopCamera();
+
+        // Switching metric while a panel is already open: refresh content (height never changes
+        // once enlarged - the panel rides inside the expanded island and only the width extends).
+        if (sameState && state == IslandVisualState.Detail)
+        {
+            IconRow.SetActive(metric);
+            SwitchPanel();
+            UpdatePanelContent();
+            AnimateIsland(DetailWidth(), MeasureIslandHeight());
+            return;
+        }
 
         switch (state)
         {
             case IslandVisualState.Collapsed:
-                ClearSlots();
+                _pinned = false;
                 HideIslandContent();
                 AnimateIsland(Math.Max(80, _cfg.BarWidth), Math.Max(24, _cfg.BarHeight));
                 MorphDisc(DiscCollapsed);
@@ -621,146 +681,10 @@ public partial class BarWindow : Window, IDisposable
             case IslandVisualState.Detail:
                 EnsureTelemetry();
                 ShowIslandContent(withPanel: true);
-                RefreshDetail();
+                IconRow.SetActive(metric);
+                UpdatePanelContent();
+                AnimateIsland(DetailWidth(), MeasureIslandHeight());
                 MorphDisc(DiscExpanded);
-                break;
-        }
-
-        _pinned = HasOpenSlots;
-    }
-
-    // ---------------------------------------------------------------- detail slots
-
-    private bool HasOpenSlots => _rightMetric != IslandMetric.None || _leftMetric != IslandMetric.None;
-
-    private static bool IsTelemetryMetric(IslandMetric m)
-        => m is IslandMetric.Cpu or IslandMetric.Gpu or IslandMetric.Ram;
-
-    /// <summary>Toggle a metric into/out of the two slots. The first selection fills the right
-    /// slot, the second the left; once both are full a new selection replaces the older one.
-    /// Re-selecting a metric that is already open closes it.</summary>
-    private void ToggleMetric(IslandMetric metric)
-    {
-        if (metric == IslandMetric.None) return;
-
-        // Mirror is exclusive (owns the camera); it opens alone and toggles off on re-click.
-        if (metric == IslandMetric.Mirror)
-        {
-            bool open = _rightMetric == metric || _leftMetric == metric;
-            ClearSlots();
-            if (!open)
-            {
-                _rightMetric = metric;
-                _rightTick = ++_tick;
-                MirrorPanelComponent.StartCamera();
-            }
-            else MirrorPanelComponent.StopCamera();
-            ApplySlotsOrCollapse();
-            return;
-        }
-
-        // Opening a normal card while the mirror is up releases the camera.
-        if (_rightMetric == IslandMetric.Mirror || _leftMetric == IslandMetric.Mirror)
-        {
-            MirrorPanelComponent.StopCamera();
-            ClearSlots();
-        }
-
-        if (_rightMetric == metric) _rightMetric = IslandMetric.None;
-        else if (_leftMetric == metric) _leftMetric = IslandMetric.None;
-        else if (_rightMetric == IslandMetric.None) { _rightMetric = metric; _rightTick = ++_tick; }
-        else if (_leftMetric == IslandMetric.None) { _leftMetric = metric; _leftTick = ++_tick; }
-        else if (_rightTick <= _leftTick) { _rightMetric = metric; _rightTick = ++_tick; }
-        else { _leftMetric = metric; _leftTick = ++_tick; }
-
-        ApplySlotsOrCollapse();
-    }
-
-    private void ClearSlots()
-    {
-        _rightMetric = IslandMetric.None;
-        _leftMetric = IslandMetric.None;
-    }
-
-    private void ApplySlotsOrCollapse()
-        => SetIslandState(HasOpenSlots ? IslandVisualState.Detail : IslandVisualState.Collapsed, force: true);
-
-    private UIElement[] AllPanels => new UIElement[]
-        { DetailPanelComponent, DetailPanelB, NetPanelComponent, MirrorPanelComponent, WeatherPanelComponent };
-
-    private readonly record struct SlotInfo(IslandMetric Metric, bool Left);
-
-    private void AddSlot(Dictionary<UIElement, SlotInfo> map, IslandMetric m, bool left)
-    {
-        if (m == IslandMetric.None) return;
-        UIElement? el = m switch
-        {
-            IslandMetric.Cpu or IslandMetric.Gpu or IslandMetric.Ram => left ? _telLeft : _telRight,
-            IslandMetric.Net => NetPanelComponent,
-            IslandMetric.Weather => WeatherPanelComponent,
-            IslandMetric.Mirror => MirrorPanelComponent,
-            _ => null,
-        };
-        if (el is not null) map[el] = new SlotInfo(m, left);
-    }
-
-    /// <summary>Assign the open slots to concrete card instances, dock them to the left/right
-    /// edge, re-centre the hub when two cards are up, push fresh content and resize the island.</summary>
-    private void RefreshDetail()
-    {
-        bool mirror = _rightMetric == IslandMetric.Mirror || _leftMetric == IslandMetric.Mirror;
-        bool rTel = IsTelemetryMetric(_rightMetric);
-        bool lTel = IsTelemetryMetric(_leftMetric);
-        _telRight = rTel ? DetailPanelComponent : null;
-        _telLeft = lTel ? (rTel ? DetailPanelB : DetailPanelComponent) : null;
-
-        var map = new Dictionary<UIElement, SlotInfo>();
-        AddSlot(map, _rightMetric, left: false);
-        AddSlot(map, _leftMetric, left: true);
-
-        bool dual = !mirror && _rightMetric != IslandMetric.None && _leftMetric != IslandMetric.None;
-        SetHubLayout(dual);
-
-        _usedPanels.Clear();
-        foreach (var el in map.Keys) _usedPanels.Add(el);
-
-        foreach (var p in AllPanels)
-        {
-            if (map.TryGetValue(p, out var slot))
-            {
-                var fe = (FrameworkElement)p;
-                fe.HorizontalAlignment = slot.Left ? HorizontalAlignment.Left : HorizontalAlignment.Right;
-                fe.Margin = slot.Left ? new Thickness(16, 0, 0, 0) : new Thickness(0, 0, 16, 0);
-                p.Visibility = Visibility.Visible;
-                p.IsHitTestVisible = true;
-                Fade(p, 1, 160);
-                RenderSlot(p, slot.Metric);
-            }
-            else
-            {
-                p.IsHitTestVisible = false;
-                Fade(p, 0, 120, () => { if (!_usedPanels.Contains(p)) p.Visibility = Visibility.Collapsed; });
-            }
-        }
-
-        IconRow.SetActive(_rightMetric, _leftMetric);
-        AnimateIsland(DetailWidth(), MeasureIslandHeight());
-    }
-
-    private void RenderSlot(UIElement panel, IslandMetric metric)
-    {
-        switch (metric)
-        {
-            case IslandMetric.Net:
-                if (_netMonitor is not null) NetPanelComponent.Render(_netMonitor);
-                break;
-            case IslandMetric.Weather:
-                if (_weather is not null) WeatherPanelComponent.Render(_weather.Snapshot);
-                break;
-            case IslandMetric.Mirror:
-                break; // the camera renders its own frames
-            default:
-                RenderTelemetry((TelemetryDetailPanel)panel, metric);
                 break;
         }
     }
@@ -802,34 +726,6 @@ public partial class BarWindow : Window, IDisposable
         }
     }
 
-    /// <summary>With two cards open the full hub (disc + music + icons) is kept at exactly the same
-    /// screen position it has in the single-panel layout; only the island's left and right borders
-    /// extend outward. Otherwise the standard single-panel layout is restored.</summary>
-    private void SetHubLayout(bool dual)
-    {
-        _pillCentered = dual;
-        OrbHost.Visibility = Visibility.Visible;
-        IslandExpandedHost.HorizontalAlignment = HorizontalAlignment.Left;
-        OrbHost.HorizontalAlignment = HorizontalAlignment.Left;
-
-        if (dual) PositionDualHub();
-        else
-        {
-            IslandExpandedHost.Margin = new Thickness(158, 0, 0, 0);
-            OrbHost.Margin = new Thickness(10.5, 0, 0, 0);
-        }
-    }
-
-    /// <summary>Centre the 575px hub block inside the (centred) pill. Because the pill is centred
-    /// too, the hub stays at the same screen x for any pill width, so nothing shifts while the
-    /// borders animate outward.</summary>
-    private void PositionDualHub()
-    {
-        double coreLeft = (_currentW - IslandExpandedW) / 2;
-        OrbHost.Margin = new Thickness(coreLeft + 10.5, 0, 0, 0);
-        IslandExpandedHost.Margin = new Thickness(coreLeft + 158, 0, 0, 0);
-    }
-
     private void AnimateIsland(double w, double h)
     {
         if (_cfg.ReduceMotion)
@@ -842,13 +738,6 @@ public partial class BarWindow : Window, IDisposable
         _anim.Animate("h", _currentH, h, ApplyH);
     }
 
-    private double DetailWidth()
-    {
-        if (_rightMetric == IslandMetric.Mirror || _leftMetric == IslandMetric.Mirror) return IslandMirrorW;
-        if (_rightMetric != IslandMetric.None && _leftMetric != IslandMetric.None) return IslandDualW;
-        return IslandDetailW;
-    }
-
     /// <summary>Height of the island derived from its hover content: the tallest of the media
     /// cluster or the disc, plus symmetric vertical padding, clamped to the allowed range. The
     /// detail panel never grows the island - it rides inside this height so opening a metric only
@@ -859,18 +748,14 @@ public partial class BarWindow : Window, IDisposable
 
         if (IslandExpandedHost.Visibility == Visibility.Visible)
         {
-            IslandExpandedHost.Measure(new Size(IslandDetailW, double.PositiveInfinity));
+            IslandExpandedHost.Measure(new Size(DynamicDetailW, double.PositiveInfinity));
             content = Math.Max(content, IslandExpandedHost.DesiredSize.Height);
         }
 
-        if (_islandState == IslandVisualState.Detail)
+        if (_islandState == IslandVisualState.Detail && ActivePanel is FrameworkElement panel && panel.Visibility == Visibility.Visible)
         {
-            foreach (var p in AllPanels)
-            {
-                if (p is not FrameworkElement fe || fe.Visibility != Visibility.Visible) continue;
-                fe.Measure(new Size(fe.Width, double.PositiveInfinity));
-                content = Math.Max(content, fe.DesiredSize.Height);
-            }
+            panel.Measure(new Size(panel.Width, double.PositiveInfinity));
+            content = Math.Max(content, panel.DesiredSize.Height);
         }
 
         return Math.Clamp(content + IslandPadV * 2, MinIslandH, MaxPillH);
@@ -905,6 +790,7 @@ public partial class BarWindow : Window, IDisposable
 
     private void ShowIslandContent(bool withPanel)
     {
+        ApplyDynamicCardScale();
         CollapsedPanel.Visibility = Visibility.Visible;
         IslandExpandedHost.Visibility = Visibility.Visible;
         Fade(CollapsedPanel, 0, 120);
@@ -918,31 +804,60 @@ public partial class BarWindow : Window, IDisposable
         }
         else
         {
-            HideAllPanels();
+            foreach (UIElement panel in AllPanels)
+            {
+                panel.IsHitTestVisible = false;
+                Fade(panel, 0, 120, () =>
+                {
+                    if (_islandState != IslandVisualState.Detail) panel.Visibility = Visibility.Collapsed;
+                });
+            }
         }
         UpdateIslandContent();
     }
 
-    private void HideAllPanels()
+    private UIElement[] AllPanels => new UIElement[]
+        { DetailPanelComponent, NetPanelComponent, MirrorPanelComponent, WeatherPanelComponent };
+
+    /// <summary>Shows the panel matching the active metric (telemetry card, net card, mirror card
+    /// or weather card) and fades the others out. Only meaningful in the island's Detail state.</summary>
+    private UIElement ActivePanel => _activeMetric switch
     {
-        foreach (var p in AllPanels)
+        IslandMetric.Net => NetPanelComponent,
+        IslandMetric.Mirror => MirrorPanelComponent,
+        IslandMetric.Weather => WeatherPanelComponent,
+        _ => DetailPanelComponent,
+    };
+
+    private void SwitchPanel()
+    {
+        ApplyDynamicCardScale();
+        var show = ActivePanel;
+        foreach (UIElement panel in AllPanels)
         {
-            p.IsHitTestVisible = false;
-            Fade(p, 0, 120,
-                () => { if (_islandState != IslandVisualState.Detail) p.Visibility = Visibility.Collapsed; });
+            if (ReferenceEquals(panel, show)) continue;
+            panel.IsHitTestVisible = false;
+            Fade(panel, 0, 120, () =>
+            {
+                if (!ReferenceEquals(ActivePanel, panel)) panel.Visibility = Visibility.Collapsed;
+            });
         }
+
+        show.Visibility = Visibility.Visible;
+        show.IsHitTestVisible = true;
+        Fade(show, 1, 160);
     }
 
     private void HideIslandContent()
     {
-        IconRow.SetActive(IslandMetric.None, IslandMetric.None);
-        _usedPanels.Clear();
-        SetHubLayout(false);
-        foreach (var p in AllPanels)
+        IconRow.SetActive(IslandMetric.None);
+        foreach (UIElement panel in AllPanels)
         {
-            p.IsHitTestVisible = false;
-            Fade(p, 0, 100,
-                () => { if (_islandState == IslandVisualState.Collapsed) p.Visibility = Visibility.Collapsed; });
+            panel.IsHitTestVisible = false;
+            Fade(panel, 0, 100, () =>
+            {
+                if (_islandState == IslandVisualState.Collapsed) panel.Visibility = Visibility.Collapsed;
+            });
         }
         Fade(IslandExpandedHost, 0, 120,
             () => { if (_islandState == IslandVisualState.Collapsed) IslandExpandedHost.Visibility = Visibility.Collapsed; });
@@ -1051,7 +966,7 @@ public partial class BarWindow : Window, IDisposable
             {
                 if (IslandExpandedHost.Visibility != Visibility.Visible) return;
                 UpdateNetIcon();
-                if (_islandState == IslandVisualState.Detail && (_rightMetric == IslandMetric.Net || _leftMetric == IslandMetric.Net) && _netMonitor is not null)
+                if (_islandState == IslandVisualState.Detail && _activeMetric == IslandMetric.Net && _netMonitor is not null)
                     NetPanelComponent.Render(_netMonitor);
             });
         }
@@ -1081,7 +996,7 @@ public partial class BarWindow : Window, IDisposable
             Dispatcher.BeginInvoke(() =>
             {
                 if (IslandExpandedHost.Visibility == Visibility.Visible) UpdateWeatherIcon();
-                if (_islandState == IslandVisualState.Detail && (_rightMetric == IslandMetric.Weather || _leftMetric == IslandMetric.Weather) && _weather is not null)
+                if (_islandState == IslandVisualState.Detail && _activeMetric == IslandMetric.Weather && _weather is not null)
                     WeatherPanelComponent.Render(_weather.Snapshot);
             });
         }
@@ -1090,20 +1005,32 @@ public partial class BarWindow : Window, IDisposable
 
     private void UpdatePanelContent()
     {
-        if (_rightMetric != IslandMetric.None)
-            RenderSlot(PanelFor(_rightMetric, _telRight), _rightMetric);
-        if (_leftMetric != IslandMetric.None)
-            RenderSlot(PanelFor(_leftMetric, _telLeft), _leftMetric);
+        if (_activeMetric == IslandMetric.Mirror)
+        {
+            // The mirror panel owns its own rendering (camera frames); nothing to push here.
+            UpdateIconRowValues();
+            return;
+        }
+
+        if (_activeMetric == IslandMetric.Net)
+        {
+            EnsureNetMonitor();
+            if (_netMonitor is not null) NetPanelComponent.Render(_netMonitor);
+            UpdateIconRowValues();
+            return;
+        }
+
+        if (_activeMetric == IslandMetric.Weather)
+        {
+            EnsureWeather();
+            if (_weather is not null) WeatherPanelComponent.Render(_weather.Snapshot);
+            UpdateIconRowValues();
+            return;
+        }
+
+        RenderTelemetry(DetailPanelComponent, _activeMetric);
         UpdateIconRowValues();
     }
-
-    private UIElement PanelFor(IslandMetric m, TelemetryDetailPanel? tel) => m switch
-    {
-        IslandMetric.Net => NetPanelComponent,
-        IslandMetric.Weather => WeatherPanelComponent,
-        IslandMetric.Mirror => MirrorPanelComponent,
-        _ => (UIElement?)tel ?? DetailPanelComponent,
-    };
 
     /// <summary>Mouse entered the island region (pill + icons + panel).</summary>
     private void OnIslandMouseEnter(object sender, MouseEventArgs e)
@@ -1112,9 +1039,9 @@ public partial class BarWindow : Window, IDisposable
         _collapseDelay.Stop();
         if (_expanded) return; // event-bus card owns the pill
 
-        var (state, _) = IslandStateMachine.Resolve(
-            _islandState, _rightMetric, pointerInside: true, IslandMetric.None, collapseElapsed: false);
-        SetIslandState(state);
+        var (state, metric) = IslandStateMachine.Resolve(
+            _islandState, _activeMetric, pointerInside: true, IslandMetric.None, collapseElapsed: false);
+        SetIslandState(state, metric);
     }
 
     /// <summary>Mouse left the island region entirely (grace timer defers collapse).</summary>
@@ -1137,18 +1064,62 @@ public partial class BarWindow : Window, IDisposable
         if (_islandHovering)
         {
             if (_islandState == IslandVisualState.Detail)
-                SetIslandState(IslandVisualState.Expanded);
+                SetIslandState(IslandVisualState.Expanded, IslandMetric.None);
             return;
         }
 
         if (App.Bus?.Active is not null) return;
-        var (state, _) = IslandStateMachine.Resolve(
-            _islandState, _rightMetric, pointerInside: false, IslandMetric.None, collapseElapsed: true);
-        SetIslandState(state);
+        var (state, metric) = IslandStateMachine.Resolve(
+            _islandState, _activeMetric, pointerInside: false, IslandMetric.None, collapseElapsed: true);
+        SetIslandState(state, metric);
         try { if (App.Telemetry is { IsActive: true }) App.Telemetry.Deactivate(); } catch { }
     }
 
-    private void OnIconMetricClicked(IslandMetric metric) => ToggleMetric(metric);
+    private void OnIconMetricHovered(IslandMetric metric)
+    {
+        if (_expanded || _pinned) return;   // pinned panel ignores hover until clicked again
+        _collapseDelay.Stop();
+        SetIslandState(IslandVisualState.Detail, metric);
+    }
+
+    private void OnIconMetricUnhovered()
+    {
+        if (_pinned) return;   // pinned panel ignores hover until clicked again
+        // Leaving an icon closes the extended panel after a short grace (so moving between icons
+        // still just switches metric). Hover only previews; use click to keep it open.
+        _collapseDelay.Stop();
+        _collapseDelay.Start();
+    }
+
+    private void OnIconMetricClicked(IslandMetric metric)
+    {
+        // Mirror: a click toggles the camera (per privacy design). Click once to start and pin the
+        // panel; click again to stop the camera and shrink back to the collapsed island.
+        if (metric == IslandMetric.Mirror)
+        {
+            if (MirrorPanelComponent.IsCameraLive)
+            {
+                MirrorPanelComponent.StopCamera();
+                _pinned = false;
+                SetIslandState(IslandVisualState.Collapsed, IslandMetric.None, force: true);
+                return;
+            }
+            _pinned = true;
+            SetIslandState(IslandVisualState.Detail, metric, force: true);
+            MirrorPanelComponent.StartCamera();
+            return;
+        }
+
+        // Click the active (pinned) icon again -> close the extended canvas.
+        if (_pinned && _activeMetric == metric)
+        {
+            SetIslandState(IslandVisualState.Collapsed, IslandMetric.None, force: true);
+            return;
+        }
+        // Otherwise click opens the metric's canvas and pins it open.
+        _pinned = true;
+        SetIslandState(IslandVisualState.Detail, metric, force: true);
+    }
 
     private void OnMirrorCameraStateChanged(bool live)
         => IconRow.UpdateMirror(live, live ? "LIVE" : "off");
@@ -1159,7 +1130,7 @@ public partial class BarWindow : Window, IDisposable
         int count = gpus?.Count ?? 0;
         if (count <= 1) return;
         _gpuIndex = (_gpuIndex + 1) % count;
-        if (_islandState == IslandVisualState.Detail && (_rightMetric == IslandMetric.Gpu || _leftMetric == IslandMetric.Gpu))
+        if (_islandState == IslandVisualState.Detail && _activeMetric == IslandMetric.Gpu)
         {
             UpdatePanelContent();
             FitIslandHeight();
@@ -1324,7 +1295,6 @@ public partial class BarWindow : Window, IDisposable
             _cfg.ReduceMotion = m.ReduceMotion;
             OrbDisc.ReduceMotion = m.ReduceMotion;
             DetailPanelComponent.ReduceMotion = m.ReduceMotion;
-            DetailPanelB.ReduceMotion = m.ReduceMotion;
             NetPanelComponent.ReduceMotion = m.ReduceMotion;
             MirrorPanelComponent.ReduceMotion = m.ReduceMotion;
             _cfg.CollapseDelayMs = m.CollapseDelayMs;
@@ -1450,7 +1420,7 @@ public partial class BarWindow : Window, IDisposable
         // Clicking the open (pinned) canvas closes it.
         if (_pinned)
         {
-            SetIslandState(IslandVisualState.Collapsed, force: true);
+            SetIslandState(IslandVisualState.Collapsed, IslandMetric.None, force: true);
             return;
         }
         // While the island is open the pill is an interactive surface, not the volume card toggle.

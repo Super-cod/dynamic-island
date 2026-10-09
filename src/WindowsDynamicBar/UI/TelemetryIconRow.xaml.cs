@@ -43,7 +43,7 @@ public partial class TelemetryIconRow : UserControl
                 if (Available(metric)) MetricClicked?.Invoke(metric);
             };
         }
-        SetActive(IslandMetric.None, IslandMetric.None);
+        SetActive(IslandMetric.None);
     }
 
     /// <summary>Pointer entered the metric icon.</summary>
@@ -98,13 +98,10 @@ public partial class TelemetryIconRow : UserControl
         ApplyAvail(NetCell, NetBorder, _netAvail);
     }
 
-    public void SetActive(IslandMetric metric) => SetActive(metric, IslandMetric.None);
-
-    /// <summary>Highlights both open slots (right and left).</summary>
-    public void SetActive(IslandMetric right, IslandMetric left)
+    public void SetActive(IslandMetric metric)
     {
         foreach (var ic in _icons)
-            Highlight(ic.Border, ic.Metric == right || ic.Metric == left);
+            Highlight(ic.Border, ic.Metric == metric);
     }
 
     private bool Available(IslandMetric m) => m switch
