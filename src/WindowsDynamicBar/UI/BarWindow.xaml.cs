@@ -91,6 +91,12 @@ public partial class BarWindow : Window, IDisposable
     private bool _dragPressing;
     private double _dragStartX, _dragStartOffset;
     private string _levelMode = "volume";
+
+    // ---- volume / brightness HUD accents ----
+    private static readonly Color VolAccent = Color.FromRgb(0x2F, 0xD2, 0xB0);
+    private static readonly Color BrightAccent = Color.FromRgb(0xFF, 0xC2, 0x4D);
+    private static readonly Brush HudMutedBrush = FrozenHud(Color.FromRgb(0xE5, 0x48, 0x4D));
+    private static readonly Brush HudValueBrush = FrozenHud(Color.FromRgb(0xE8, 0xE8, 0xDC));
     private bool _timerPaused, _stopwatchPaused, _focusPaused;
     private bool _disposed;
 
@@ -154,7 +160,7 @@ public partial class BarWindow : Window, IDisposable
         _collapseDelay.Tick += OnCollapseDelayTick;
 
         ProgressTrack.SizeChanged += (_, _) => SyncFills();
-        LevelRow.SizeChanged += (_, _) => SyncFills();
+        VolumeHudBar.Scrub += OnVolumeHudScrub;
 
         _clockTimer.Tick += (_, _) => UpdateClock();
         _clockTimer.Start();
@@ -461,7 +467,7 @@ public partial class BarWindow : Window, IDisposable
     private static double TargetWidth(BarEventKind kind) => kind switch
     {
         BarEventKind.Media => 420,
-        BarEventKind.Volume or BarEventKind.Brightness => 300,
+        BarEventKind.Volume or BarEventKind.Brightness => 380,
         BarEventKind.Download => 380,
         BarEventKind.SystemMonitor => 360,
         BarEventKind.Timer or BarEventKind.Stopwatch or BarEventKind.Focus => 330,
@@ -1476,8 +1482,9 @@ public partial class BarWindow : Window, IDisposable
         ProgressRow.Visibility = Visibility.Collapsed;
         ProgressSlider.IsEnabled = true;
         TransportRow.Visibility = Visibility.Collapsed;
-        LevelRow.Visibility = Visibility.Collapsed;
-        LevelCaption.Visibility = Visibility.Collapsed;
+        HeaderRow.Visibility = Visibility.Visible;
+        VolumeHudRow.Visibility = Visibility.Collapsed;
+        VolumeHudGlow.Visibility = Visibility.Collapsed;
         BarsRow.Visibility = Visibility.Collapsed;
         SetBars(0);
         SysMonRow.Visibility = Visibility.Collapsed;
@@ -1591,23 +1598,38 @@ public partial class BarWindow : Window, IDisposable
         else if (evt.Payload is float fl) level = fl;
         else if (evt.Payload is double dl) level = dl;
         if (isVolume && dev is null) dev = App.Volume?.DeviceName;
+        level = Math.Clamp(level, 0, 1);
+        Color accent = isVolume ? VolAccent : BrightAccent;
 
-        HeaderGlyph.Text = isVolume ? (muted ? IcMute : IcVolume) : IcBrightness;
-        HeaderText.Text = isVolume ? "Volume" : "Brightness";
-        HeaderSub.Text = dev ?? (isVolume ? "Default output" : "Internal display");
-        HeaderValue.Text = evt.ValueText ?? $"{Math.Round(Math.Clamp(level, 0, 1) * 100)}%";
-        HeaderValue.Visibility = Visibility.Visible;
+        HeaderRow.Visibility = Visibility.Collapsed;
+        VolumeHudRow.Visibility = Visibility.Visible;
 
-        LevelRow.Visibility = Visibility.Visible;
-        LevelGlyph.Text = isVolume ? (muted ? IcMute : IcVolume) : IcBrightness;
-        _syncing = true;
-        try { LevelSlider.Value = Math.Clamp(level, 0, 1); }
-        finally { _syncing = false; }
+        VolumeHudIcon.Text = isVolume ? (muted ? IcMute : IcVolume) : IcBrightness;
+        VolumeHudIcon.Foreground = HudValueBrush;
+        VolumeHudLabel.Text = muted ? "MUTED" : isVolume ? "SPEAKERS" : "DISPLAY";
 
-        LevelCaption.Visibility = Visibility.Visible;
-        LevelCaption.Text = isVolume
-            ? (muted ? "Muted" : (dev is null ? "Default output" : dev))
-            : "Internal panel (WMI)";
+        VolumeHudBar.Bright = !isVolume;
+        VolumeHudBar.Muted = isVolume && muted;
+        VolumeHudBar.ReduceMotion = _cfg.ReduceMotion;
+        VolumeHudBar.Level = muted ? 0 : level;
+
+        if (muted)
+        {
+            VolumeHudValue.Text = "Muted";
+            VolumeHudValue.FontSize = 13;
+            VolumeHudValue.Foreground = HudMutedBrush;
+        }
+        else
+        {
+            VolumeHudValue.Text = Math.Round(level * 100).ToString();
+            VolumeHudValue.FontSize = 24;
+            VolumeHudValue.Foreground = HudValueBrush;
+        }
+
+        // Accent wash behind the whole pill, brightness scaled by the level (mirrors the reference).
+        byte a = (byte)Math.Round(0x61 * (muted ? 0.0 : 0.35 + level * 0.65));
+        VolumeHudGlowStop.Color = Color.FromArgb(a, accent.R, accent.G, accent.B);
+        VolumeHudGlow.Visibility = Visibility.Visible;
     }
 
     private void RenderBattery(BarEvent evt)
@@ -1941,8 +1963,6 @@ public partial class BarWindow : Window, IDisposable
     {
         if (ProgressSlider.ActualWidth > 0)
             ProgressFill.Width = Math.Clamp(ProgressSlider.Value, 0, 1) * ProgressSlider.ActualWidth;
-        if (LevelSlider.ActualWidth > 0)
-            LevelFill.Width = Math.Clamp(LevelSlider.Value, 0, 1) * LevelSlider.ActualWidth;
     }
 
     private void OnProgressSliderChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
@@ -1959,18 +1979,26 @@ public partial class BarWindow : Window, IDisposable
             catch { }
     }
 
-    private void OnLevelSliderChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    private void OnVolumeHudScrub(double v)
     {
-        if (LevelSlider.ActualWidth > 0)
-            LevelFill.Width = Math.Clamp(e.NewValue, 0, 1) * LevelSlider.ActualWidth;
-        if (_syncing) return;
-        double v = Math.Clamp(e.NewValue, 0, 1);
+        v = Math.Clamp(v, 0, 1);
         try
         {
-            if (_levelMode == "volume") App.Volume?.SetLevel((float)v);
+            if (_levelMode == "volume")
+            {
+                if (v > 0 && App.Volume?.Muted == true) App.Volume.ToggleMute();
+                App.Volume?.SetLevel((float)v);
+            }
             else App.Brightness?.SetLevel((float)v);
         }
         catch (Exception ex) { Log.Debug("Set level failed", ("error", ex.Message)); }
+    }
+
+    private static SolidColorBrush FrozenHud(Color c)
+    {
+        var b = new SolidColorBrush(c);
+        b.Freeze();
+        return b;
     }
 
     // ---------------------------------------------------------------- buttons

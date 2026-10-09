@@ -177,6 +177,17 @@
 
             <Grid x:Name="PillGrid">
 
+                <!-- ============ ACCENT GLOW (volume / brightness HUD) ============ -->
+                <Border x:Name="VolumeHudGlow" Panel.ZIndex="0" Visibility="Collapsed" IsHitTestVisible="False">
+                    <Border.Background>
+                        <RadialGradientBrush GradientOrigin="0.08,0.5" Center="0.08,0.5"
+                                             RadiusX="0.9" RadiusY="1.6">
+                            <GradientStop x:Name="VolumeHudGlowStop" Color="#00000000" Offset="0" />
+                            <GradientStop Color="#00000000" Offset="0.7" />
+                        </RadialGradientBrush>
+                    </Border.Background>
+                </Border>
+
                 <!-- ============ COLLAPSED CONTENT (mini row) ============ -->
                 <Grid x:Name="CollapsedPanel" VerticalAlignment="Center" Margin="48,0,12,0">
                     <Grid.ColumnDefinitions>
@@ -266,26 +277,25 @@
                         </Button>
                     </StackPanel>
 
-                    <!-- volume/brightness slider block -->
-                    <Grid x:Name="LevelRow" Margin="0,10,0,0" Visibility="Collapsed">
+                    <!-- volume/brightness HUD (icon | label + dot-matrix bar | value) -->
+                    <Grid x:Name="VolumeHudRow" Visibility="Collapsed" MinWidth="330">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto" />
                             <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
-                        <TextBlock x:Name="LevelGlyph" Style="{StaticResource WdbGlyph}"
-                                   FontSize="15" Margin="0,0,10,0" />
-                        <Grid Grid.Column="1" Height="14" VerticalAlignment="Center">
-                            <Border Height="5" VerticalAlignment="Center" CornerRadius="2.5" Background="{DynamicResource WdbTrackBrush}" />
-                            <Border x:Name="LevelFill" Height="5" VerticalAlignment="Center"
-                                    HorizontalAlignment="Left" Width="0" CornerRadius="2.5" Background="{DynamicResource WdbAccentBrush}" />
-                            <Slider x:Name="LevelSlider" Minimum="0" Maximum="1" Value="0.5"
-                                    Cursor="Hand" IsMoveToPointEnabled="True"
-                                    Template="{StaticResource WdbSliderTemplate}"
-                                    ValueChanged="OnLevelSliderChanged" />
-                        </Grid>
+                        <TextBlock x:Name="VolumeHudIcon" Grid.Column="0" Style="{StaticResource WdbGlyph}"
+                                   FontSize="24" Margin="2,0,16,0" VerticalAlignment="Center"
+                                   Foreground="{DynamicResource WdbTextBrush}" />
+                        <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                            <TextBlock x:Name="VolumeHudLabel" Style="{StaticResource WdbSubText}"
+                                       FontSize="10" FontWeight="SemiBold" Margin="0,0,0,5"
+                                       Foreground="{DynamicResource WdbTextMutedBrush}" />
+                            <local:VolumeLevelBar x:Name="VolumeHudBar" HorizontalAlignment="Stretch" />
+                        </StackPanel>
+                        <TextBlock x:Name="VolumeHudValue" Grid.Column="2" Style="{StaticResource WdbBigText}"
+                                   FontSize="24" Margin="16,0,2,0" VerticalAlignment="Center" />
                     </Grid>
-                    <TextBlock x:Name="LevelCaption" Style="{StaticResource WdbSubText}"
-                               Margin="0,6,0,0" Visibility="Collapsed" />
 
                     <!-- signal bars (network) -->
                     <StackPanel x:Name="BarsRow" Orientation="Horizontal" HorizontalAlignment="Left"
