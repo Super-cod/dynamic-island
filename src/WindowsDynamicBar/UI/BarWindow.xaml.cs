@@ -550,9 +550,13 @@ public partial class BarWindow : Window, IDisposable
         _expanded = true;
         _idleCollapse.Stop();
 
-        Fade(CollapsedPanel, 0, 90);
-        _delays.Add(RunAfter(70, () =>
-            Fade(ExpandedHost, 1, 160)));
+        Fade(CollapsedPanel, 0, 50);
+        Fade(OrbHost, 0, 50, () =>
+        {
+            if (_expanded) OrbHost.Visibility = Visibility.Collapsed;
+        });
+        _delays.Add(RunAfter(40, () =>
+            Fade(ExpandedHost, 1, 120)));
 
         _anim.Animate("w", _currentW, w, ApplyW);
         _anim.Animate("h", _currentH, h, ApplyH);
@@ -571,7 +575,12 @@ public partial class BarWindow : Window, IDisposable
             if (!_expanded) ExpandedHost.Visibility = Visibility.Collapsed;
         });
         CollapsedPanel.Visibility = Visibility.Visible;
-        _delays.Add(RunAfter(60, () => Fade(CollapsedPanel, 1, 140)));
+        OrbHost.Visibility = Visibility.Visible;
+        _delays.Add(RunAfter(60, () =>
+        {
+            Fade(CollapsedPanel, 1, 140);
+            Fade(OrbHost, 1, 140);
+        }));
 
         double w = Math.Max(80, _cfg.BarWidth);
         double h = Math.Max(24, _cfg.BarHeight);
@@ -792,6 +801,8 @@ public partial class BarWindow : Window, IDisposable
     {
         ApplyDynamicCardScale();
         CollapsedPanel.Visibility = Visibility.Visible;
+        OrbHost.Visibility = Visibility.Visible;
+        Fade(OrbHost, 1, 160);
         IslandExpandedHost.Visibility = Visibility.Visible;
         Fade(CollapsedPanel, 0, 120);
         Fade(IslandExpandedHost, 1, 160);
@@ -865,7 +876,9 @@ public partial class BarWindow : Window, IDisposable
         _weather?.Stop();
         MirrorPanelComponent.StopCamera();
         CollapsedPanel.Visibility = Visibility.Visible;
+        OrbHost.Visibility = Visibility.Visible;
         Fade(CollapsedPanel, 1, 160);
+        Fade(OrbHost, 1, 160);
         UpdateIslandContent();
     }
 
@@ -1159,6 +1172,8 @@ public partial class BarWindow : Window, IDisposable
             {
                 _shown = evt;
                 RenderEvent(evt);
+                if (evt.Kind is BarEventKind.Volume or BarEventKind.Brightness)
+                    TriggerLevelNudge();
                 return;
             }
 
@@ -1755,6 +1770,30 @@ public partial class BarWindow : Window, IDisposable
         byte a = (byte)Math.Round(0x61 * (muted ? 0.0 : 0.35 + level * 0.65));
         VolumeHudGlowStop.Color = Color.FromArgb(a, accent.R, accent.G, accent.B);
         VolumeHudGlow.Visibility = Visibility.Visible;
+    }
+
+    private void TriggerLevelNudge()
+    {
+        if (_cfg.ReduceMotion) return;
+        double targetW = Math.Clamp(TargetWidth(_shown?.Kind ?? BarEventKind.Volume), 120, MaxPillW);
+        // Elastic spring nudge: small impulse expands width momentarily (+160 velocity) and bounces back
+        _anim.Animate("w", _currentW, targetW, ApplyW, velocity: 160);
+        AnimateIconPop(VolumeHudIconScale);
+    }
+
+    private void AnimateIconPop(ScaleTransform? st)
+    {
+        if (st is null || _cfg.ReduceMotion) return;
+        st.ScaleX = 1.15;
+        st.ScaleY = 1.15;
+        var tw = new TweenAnimation();
+        _activeFades.Add(tw);
+        tw.Completed += () => _activeFades.Remove(tw);
+        tw.Run(1.15, 1.0, TimeSpan.FromMilliseconds(200), v =>
+        {
+            st.ScaleX = v;
+            st.ScaleY = v;
+        }, Easing.CubicOut);
     }
 
     private void RenderBattery(BarEvent evt)

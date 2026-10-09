@@ -58,6 +58,7 @@ internal static class Program
         Run("Island state machine transitions", TestIslandStateMachine);
         Run("DotBar color ramp green→red", TestDotBarColorRamp);
         Run("TelemetryHistory capacity default is 240", TestTelemetryHistoryCapacity);
+        Run("EventBus interactive preemption preempts active card", TestBusPreemption);
 
         Console.WriteLine(new string('-', 46));
         Console.WriteLine($"passed: {_pass}   failed: {_fail}");
@@ -150,6 +151,26 @@ internal static class Program
         Assert(bus.Active is not null && bus.Active.Kind == BarEventKind.Toast,
             "high-priority toast should take over after expiry");
         Assert(got is not null && got.Kind == BarEventKind.Toast, "toast delivered");
+    }
+
+    private static void TestBusPreemption()
+    {
+        var bus = new EventBus(Dispatcher.CurrentDispatcher);
+        BarEvent? got = null;
+        bus.EventRaised += e => got = e;
+
+        // Ambient media event holds the stage for 4.5s
+        bus.Raise(BarEvent.Create(BarEventKind.Media, "Song Title",
+            priority: 60, displayDuration: TimeSpan.FromSeconds(4.5)));
+        AssertEq(BarEventKind.Media, bus.Active!.Kind, "media holds stage initially");
+
+        // User presses Volume key -> interactive preempting event
+        bus.Raise(BarEvent.Create(BarEventKind.Volume, "70%",
+            priority: 70, displayDuration: TimeSpan.FromSeconds(2.5), preempt: true));
+
+        // Must preempt immediately without waiting!
+        AssertEq(BarEventKind.Volume, bus.Active!.Kind, "volume preempts media immediately");
+        AssertEq(BarEventKind.Volume, got!.Kind, "event raised for volume");
     }
 
     private static void TestBusIdle()

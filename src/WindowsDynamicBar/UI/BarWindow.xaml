@@ -286,7 +286,12 @@
                         </Grid.ColumnDefinitions>
                         <TextBlock x:Name="VolumeHudIcon" Grid.Column="0" Style="{StaticResource WdbGlyph}"
                                    FontSize="24" Margin="2,0,16,0" VerticalAlignment="Center"
-                                   Foreground="{DynamicResource WdbTextBrush}" />
+                                   RenderTransformOrigin="0.5,0.5"
+                                   Foreground="{DynamicResource WdbTextBrush}">
+                            <TextBlock.RenderTransform>
+                                <ScaleTransform x:Name="VolumeHudIconScale" ScaleX="1" ScaleY="1" />
+                            </TextBlock.RenderTransform>
+                        </TextBlock>
                         <StackPanel Grid.Column="1" VerticalAlignment="Center">
                             <TextBlock x:Name="VolumeHudLabel" Style="{StaticResource WdbSubText}"
                                        FontSize="10" FontWeight="SemiBold" Margin="0,0,0,5"

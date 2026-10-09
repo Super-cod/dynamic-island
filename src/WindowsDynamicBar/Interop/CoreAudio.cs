@@ -11,6 +11,7 @@ namespace WindowsDynamicBar.Interop;
 internal static class CoreAudio
 {
     private const int DEVICE_RENDER = 0;   // eRender
+    private const int ROLE_CONSOLE = 0;    // eConsole (system volume, hardware keys)
     private const int ROLE_MULTIMEDIA = 1; // eMultimedia
     private const int STGM_READ = 0;
 
@@ -154,7 +155,46 @@ internal static class CoreAudio
         try
         {
             _enumerator = (IMMDeviceEnumerator)new MMDeviceEnumeratorCom();
-            int hr = _enumerator.GetDefaultAudioEndpoint(DEVICE_RENDER, ROLE_MULTIMEDIA, out var device);
+            _sink = new VolumeChangeSink(onVolumeChanged, () =>
+            {
+                AttachDefaultEndpoint();
+                onDefaultDeviceChanged?.Invoke();
+            });
+
+            _notificationClientPtr = Marshal.GetComInterfaceForObject(_sink, typeof(IMMNotificationClient));
+            _enumerator.RegisterEndpointNotificationCallback(_notificationClientPtr);
+
+            _volumeCallbackPtr = Marshal.GetComInterfaceForObject(_sink, typeof(IAudioEndpointVolumeCallback));
+
+            return AttachDefaultEndpoint(out error);
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+            Log.Warning("Core Audio init failed", ("error", ex.Message));
+            return false;
+        }
+    }
+
+    public static bool AttachDefaultEndpoint() => AttachDefaultEndpoint(out _);
+
+    private static bool AttachDefaultEndpoint(out string? error)
+    {
+        error = null;
+        if (_enumerator is null) return false;
+
+        if (_endpoint is not null && _volumeCallbackPtr != IntPtr.Zero)
+        {
+            try { _endpoint.UnregisterControlChangeNotify(_volumeCallbackPtr); } catch { }
+            _endpoint = null;
+        }
+
+        try
+        {
+            int hr = _enumerator.GetDefaultAudioEndpoint(DEVICE_RENDER, ROLE_CONSOLE, out var device);
+            if (hr != 0 || device is null)
+                hr = _enumerator.GetDefaultAudioEndpoint(DEVICE_RENDER, ROLE_MULTIMEDIA, out device);
+
             if (hr != 0 || device is null)
             {
                 error = $"No default render device (0x{hr:X8})";
@@ -166,24 +206,21 @@ internal static class CoreAudio
             if (hr != 0) { error = $"Activate failed 0x{hr:X8}"; return false; }
             _endpoint = (IAudioEndpointVolume)obj;
 
-            _sink = new VolumeChangeSink(onVolumeChanged, onDefaultDeviceChanged);
-            _volumeCallbackPtr = Marshal.GetComInterfaceForObject(_sink, typeof(IAudioEndpointVolumeCallback));
-            hr = _endpoint.RegisterControlChangeNotify(_volumeCallbackPtr);
-            if (hr != 0)
+            if (_volumeCallbackPtr != IntPtr.Zero)
             {
-                error = $"RegisterControlChangeNotify 0x{hr:X8}";
-                Log.Warning("Volume callback registration failed", ("hr", hr));
-                return false;
+                hr = _endpoint.RegisterControlChangeNotify(_volumeCallbackPtr);
+                if (hr != 0)
+                {
+                    error = $"RegisterControlChangeNotify 0x{hr:X8}";
+                    Log.Warning("Volume callback registration failed", ("hr", hr));
+                    return false;
+                }
             }
-
-            _notificationClientPtr = Marshal.GetComInterfaceForObject(_sink, typeof(IMMNotificationClient));
-            _enumerator.RegisterEndpointNotificationCallback(_notificationClientPtr);
             return true;
         }
         catch (Exception ex)
         {
             error = ex.Message;
-            Log.Warning("Core Audio init failed", ("error", ex.Message));
             return false;
         }
     }
@@ -233,8 +270,10 @@ internal static class CoreAudio
         try
         {
             if (_enumerator is null) return null;
-            if (_enumerator.GetDefaultAudioEndpoint(DEVICE_RENDER, ROLE_MULTIMEDIA, out var dev) != 0 || dev is null)
-                return null;
+            int hr = _enumerator.GetDefaultAudioEndpoint(DEVICE_RENDER, ROLE_CONSOLE, out var dev);
+            if (hr != 0 || dev is null)
+                hr = _enumerator.GetDefaultAudioEndpoint(DEVICE_RENDER, ROLE_MULTIMEDIA, out dev);
+            if (hr != 0 || dev is null) return null;
             if (dev.OpenPropertyStore(STGM_READ, out IntPtr propsPtr) != 0 || propsPtr == IntPtr.Zero) return null;
             var store = (IPropertyStore)Marshal.GetObjectForIUnknown(propsPtr);
             Marshal.Release(propsPtr);

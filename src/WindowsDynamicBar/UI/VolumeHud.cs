@@ -69,9 +69,10 @@ public sealed class VolumeLevelBar : FrameworkElement
     private static void OnLevelChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
         var bar = (VolumeLevelBar)d;
-        if (bar.ReduceMotion)
+        double val = (double)e.NewValue;
+        if (bar.ReduceMotion || !bar.IsVisible || bar.ActualWidth <= 0)
         {
-            bar._display = (double)e.NewValue;
+            bar._display = val;
             bar.InvalidateVisual();
             return;
         }
@@ -82,8 +83,8 @@ public sealed class VolumeLevelBar : FrameworkElement
     private void Settle()
     {
         double target = Math.Clamp(Level, 0, 1);
-        _display += (target - _display) * 0.35;
-        if (Math.Abs(target - _display) < 0.004) { _display = target; _settle.Stop(); }
+        _display += (target - _display) * 0.24;
+        if (Math.Abs(target - _display) < 0.0015) { _display = target; _settle.Stop(); }
         InvalidateVisual();
     }
 

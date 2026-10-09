@@ -36,13 +36,15 @@ public sealed record BarEvent(
     int Priority = 0,              // higher wins when queued
     TimeSpan? DisplayDuration = null, // null = sticky until dismissed/timeout rules
     DateTimeOffset Timestamp = default,
-    bool IsTick = false)           // ambient progress refresh: never pops the bar open
+    bool IsTick = false,           // ambient progress refresh: never pops the bar open
+    bool Preempt = false)          // interactive HUD: takes over immediately from active cards
 {
     public static BarEvent Create(BarEventKind kind, string title, string? subtitle = null,
         double? value = null, string? valueText = null, object? payload = null,
-        int priority = 0, TimeSpan? displayDuration = null, bool isTick = false)
+        int priority = 0, TimeSpan? displayDuration = null, bool isTick = false,
+        bool preempt = false)
         => new(kind, title, subtitle, value, valueText, payload, priority, displayDuration,
-            DateTimeOffset.Now, isTick);
+            DateTimeOffset.Now, isTick, preempt);
 }
 
 public sealed class EventBus
@@ -77,6 +79,21 @@ public sealed class EventBus
                 EventRaised?.Invoke(evt);
                 ArmExpiry(evt);
                 return;
+            }
+
+            // Preemption: interactive HUDs (Volume, Brightness) take over immediately from ambient cards
+            if (evt.Preempt && Active is not null && Active.Kind != evt.Kind)
+            {
+                lock (_sync)
+                {
+                    if (Active.DisplayDuration is null || DateTime.UtcNow - _activeShownAt < Active.DisplayDuration.Value)
+                    {
+                        var old = Active;
+                        if (!_queue.Any(e => e.Kind == old.Kind))
+                            _queue.Add(old);
+                    }
+                }
+                Active = null;
             }
 
             lock (_sync)

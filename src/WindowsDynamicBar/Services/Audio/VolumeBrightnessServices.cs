@@ -49,10 +49,9 @@ public sealed class VolumeService : IDisposable
         Muted = muted;
         VolumeChanged?.Invoke(level, muted);
 
-        // Debounce rapid events (scroll-wheel volume ramps).
         var now = DateTime.UtcNow;
-        if (now - _lastEvent < TimeSpan.FromMilliseconds(60)) return;
-        if (Math.Abs(level - _lastLevel) < 0.001 && muted == _lastMute) return;
+        // Suppress duplicate identical updates within 500ms
+        if (Math.Abs(level - _lastLevel) < 0.001 && muted == _lastMute && now - _lastEvent < TimeSpan.FromMilliseconds(500)) return;
         _lastEvent = now;
         _lastLevel = level;
         _lastMute = muted;
@@ -62,7 +61,7 @@ public sealed class VolumeService : IDisposable
         string icon = muted ? "Muted" : level <= 0 ? "Silent" : level < 0.5 ? "Low" : "High";
         _bus.Raise(BarEvent.Create(BarEventKind.Volume, icon, text,
             value: muted ? 0 : level, valueText: text, payload: (level, muted, DeviceName),
-            priority: 70, displayDuration: TimeSpan.FromSeconds(2.5)));
+            priority: 70, displayDuration: TimeSpan.FromSeconds(2.5), preempt: true));
     }
 
     private void OnDefaultDeviceChanged()
@@ -74,8 +73,8 @@ public sealed class VolumeService : IDisposable
         if (_settings.Current.FeatureVolume)
             _bus.Raise(BarEvent.Create(BarEventKind.Volume, "Output device", DeviceName ?? "Default",
                 value: Muted ? 0 : Level, valueText: $"{Math.Round(Level * 100)}%",
-                payload: (Level, Muted, DeviceName), priority: 55,
-                displayDuration: TimeSpan.FromSeconds(3)));
+                payload: (Level, Muted, DeviceName), priority: 70,
+                displayDuration: TimeSpan.FromSeconds(3), preempt: true));
     }
 
     public void SetLevel(float level01)
@@ -96,7 +95,7 @@ public sealed class VolumeService : IDisposable
 }
 
 /// <summary>
-/// Brightness via WMI (WmiMonitorBrightness / WmiMonitorBrightnessMethods).
+/// Brightness via WMI (WmiMonitorBrightnessEvent / WmiMonitorBrightnessMethods).
 /// LIMITATION (documented): this API only controls internal laptop panels / monitors
 /// exposing WMI brightness. External monitors via DDC/CI are not supported; we fail
 /// gracefully and disable the feature.
@@ -132,15 +131,29 @@ public sealed class BrightnessService : IDisposable
                 return;
             }
 
-            // Event-driven: WMI modification events on WmiMonitorBrightness (poll-free).
             var scope = new ManagementScope(@"\\.\root\wmi");
             scope.Connect();
-            var query = new WqlEventQuery(
-                "SELECT * FROM __InstanceModificationEvent WITHIN 1 WHERE TargetInstance ISA 'WmiMonitorBrightness'");
-            _watcher = new ManagementEventWatcher(scope, query);
-            _watcher.EventArrived += OnBrightnessEvent;
-            _watcher.Start();
-            Log.Info("Brightness service started", ("level", Level));
+
+            // Try the native WmiMonitorBrightnessEvent first: fired directly by the ACPI display driver
+            // with 0 delay (no polling loop).
+            try
+            {
+                var query = new WqlEventQuery("SELECT * FROM WmiMonitorBrightnessEvent");
+                _watcher = new ManagementEventWatcher(scope, query);
+                _watcher.EventArrived += OnBrightnessEvent;
+                _watcher.Start();
+                Log.Info("Brightness service started (instant ACPI events)", ("level", Level));
+            }
+            catch
+            {
+                // Fallback to intrinsic modification polling if driver does not support extrinsic event
+                var query = new WqlEventQuery(
+                    "SELECT * FROM __InstanceModificationEvent WITHIN 1 WHERE TargetInstance ISA 'WmiMonitorBrightness'");
+                _watcher = new ManagementEventWatcher(scope, query);
+                _watcher.EventArrived += OnBrightnessEvent;
+                _watcher.Start();
+                Log.Info("Brightness service started (polling fallback)", ("level", Level));
+            }
         }
         catch (Exception ex)
         {
@@ -153,12 +166,22 @@ public sealed class BrightnessService : IDisposable
     {
         try
         {
-            var target = e.NewEvent["TargetInstance"] as ManagementBaseObject;
-            float value = Convert.ToSingle(target?["CurrentBrightness"] ?? -1);
+            float value = -1;
+            // Native WmiMonitorBrightnessEvent carries Brightness directly
+            if (e.NewEvent.Properties["Brightness"]?.Value is not null)
+            {
+                value = Convert.ToSingle(e.NewEvent["Brightness"]);
+            }
+            // Fallback modification event carries TargetInstance["CurrentBrightness"]
+            else if (e.NewEvent["TargetInstance"] is ManagementBaseObject target)
+            {
+                value = Convert.ToSingle(target["CurrentBrightness"] ?? -1);
+            }
+
             if (value < 0) return;
 
             var now = DateTime.UtcNow;
-            if (now - _lastEvent < TimeSpan.FromMilliseconds(300) || Math.Abs(value - _lastValue) < 0.5f) return;
+            if (now - _lastEvent < TimeSpan.FromMilliseconds(40) || Math.Abs(value - _lastValue) < 0.5f) return;
             _lastEvent = now;
             _lastValue = value;
             Level = value / 100f;
@@ -168,7 +191,7 @@ public sealed class BrightnessService : IDisposable
             string text = $"{Math.Round(value)}%";
             _bus.Raise(BarEvent.Create(BarEventKind.Brightness, "Brightness", text,
                 value: Level, valueText: text, priority: 70,
-                displayDuration: TimeSpan.FromSeconds(2.5)));
+                displayDuration: TimeSpan.FromSeconds(2.5), preempt: true));
         }
         catch (Exception ex) { Log.Debug("Brightness event error", ("error", ex.Message)); }
     }
