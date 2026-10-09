@@ -36,12 +36,11 @@ public partial class BarWindow : Window, IDisposable
 
     // ---- island geometry (DIPs) : matches the reference demo ----
     private const double IslandExpandedW = 548;    // s2
-    private const double IslandExpandedH = 150;
-    private const double IslandDetailW = 1030;     // s3 (same height as s2, wider to the right)
-    private const double IslandDetailH = IslandExpandedH;
+    private const double IslandDetailW = 1030;     // s3 (wider than s2)
     private const double DiscCollapsed = 26;
     private const double DiscExpanded = 112;
-    private const double DetailContentMargin = 150;   // left inset where the big disc ends
+    private const double IslandPadV = 12;          // symmetric top/bottom padding inside the island
+    private const double MinIslandH = 60;          // smallest island height (empty/placeholder content)
 
     // ---- icon glyphs (Segoe Fluent Icons; verified against font render) ----
     private const string IcDot = "\u25CF";
@@ -551,7 +550,11 @@ public partial class BarWindow : Window, IDisposable
     private void ApplyTelemetry(TelemetrySnapshot snap)
     {
         _telemetry = snap;
-        if (_islandState == IslandVisualState.Detail) UpdatePanelContent();
+        if (_islandState == IslandVisualState.Detail)
+        {
+            UpdatePanelContent();
+            FitIslandHeight();
+        }
         else if (_islandState == IslandVisualState.Expanded) UpdateIslandContent();
     }
 
@@ -567,11 +570,12 @@ public partial class BarWindow : Window, IDisposable
         _activeMetric = metric;
         _collapseDelay.Stop();
 
-        // Switching metric while a panel is already open: only refresh content (no size churn).
+        // Switching metric while a panel is already open: refresh content and re-fit the height.
         if (sameState && state == IslandVisualState.Detail)
         {
             IconRow.SetActive(metric);
             UpdatePanelContent();
+            AnimateIsland(IslandDetailW, MeasureIslandHeight(withPanel: true));
             return;
         }
 
@@ -587,7 +591,7 @@ public partial class BarWindow : Window, IDisposable
             case IslandVisualState.Expanded:
                 EnsureTelemetry();
                 ShowIslandContent(withPanel: false);
-                AnimateIsland(IslandExpandedW, IslandExpandedH);
+                AnimateIsland(IslandExpandedW, MeasureIslandHeight(withPanel: false));
                 MorphDisc(DiscExpanded);
                 break;
 
@@ -596,7 +600,7 @@ public partial class BarWindow : Window, IDisposable
                 ShowIslandContent(withPanel: true);
                 IconRow.SetActive(metric);
                 UpdatePanelContent();
-                AnimateIsland(IslandDetailW, IslandDetailH);
+                AnimateIsland(IslandDetailW, MeasureIslandHeight(withPanel: true));
                 MorphDisc(DiscExpanded);
                 break;
         }
@@ -612,6 +616,37 @@ public partial class BarWindow : Window, IDisposable
         }
         _anim.Animate("w", _currentW, w, ApplyW);
         _anim.Animate("h", _currentH, h, ApplyH);
+    }
+
+    /// <summary>Height of the island derived from its actual content: the tallest visible block
+    /// (media cluster, disc, or detail panel) plus symmetric vertical padding, clamped to the
+    /// allowed range. This keeps the pill hug its content instead of a hardcoded height.</summary>
+    private double MeasureIslandHeight(bool withPanel)
+    {
+        double content = DiscExpanded;
+
+        if (IslandExpandedHost.Visibility == Visibility.Visible)
+        {
+            IslandExpandedHost.Measure(new Size(IslandDetailW, double.PositiveInfinity));
+            content = Math.Max(content, IslandExpandedHost.DesiredSize.Height);
+        }
+
+        if (withPanel && DetailPanelComponent.Visibility == Visibility.Visible)
+        {
+            DetailPanelComponent.Measure(new Size(IslandDetailW, double.PositiveInfinity));
+            content = Math.Max(content, DetailPanelComponent.DesiredSize.Height);
+        }
+
+        return Math.Clamp(content + IslandPadV * 2, MinIslandH, MaxPillH);
+    }
+
+    /// <summary>Re-fit the island height after telemetry updated the panel, animating only when
+    /// the content-driven target actually changed (avoids per-tick churn).</summary>
+    private void FitIslandHeight()
+    {
+        double target = MeasureIslandHeight(withPanel: true);
+        if (Math.Abs(target - _currentH) > 0.5)
+            AnimateIsland(IslandDetailW, target);
     }
 
     private void MorphDisc(double size)
@@ -819,7 +854,10 @@ public partial class BarWindow : Window, IDisposable
         if (count <= 1) return;
         _gpuIndex = (_gpuIndex + 1) % count;
         if (_islandState == IslandVisualState.Detail && _activeMetric == IslandMetric.Gpu)
+        {
             UpdatePanelContent();
+            FitIslandHeight();
+        }
     }
 
     private void EnsureTelemetry()

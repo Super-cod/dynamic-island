@@ -85,12 +85,9 @@ public partial class TelemetryDetailPanel : UserControl
         {
             AddBar("3D", gpu.Engine3D, $"{Math.Round(gpu.Engine3D)}%");
             AddBar("Copy", gpu.EngineCopy, $"{Math.Round(gpu.EngineCopy)}%");
-            AddBar("Enc", gpu.EngineEncode, $"{Math.Round(gpu.EngineEncode)}%");
-            AddBar("Dec", gpu.EngineDecode, $"{Math.Round(gpu.EngineDecode)}%");
         }
         AddLine("temp", "N/A");
         AddLine("clock", "N/A");
-        AddLine("TX/RX", "N/A");
 
         Render(history, procs);
         SetTitle(count > 1 ? $"gpu{index}" : "gpu", pct, history);

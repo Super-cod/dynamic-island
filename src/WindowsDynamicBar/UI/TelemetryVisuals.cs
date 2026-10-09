@@ -289,14 +289,15 @@ public sealed class DotBar : FrameworkElement
 }
 
 /// <summary>
-/// Decorative "now playing" equalizer: a row of thin bars that undulate while audio plays.
-/// Time-driven and deterministic (no captured audio, no fabricated data values); it is pure
-/// ornamentation and renders a flat baseline when <see cref="Running"/> is false.
+/// Decorative "now playing" equalizer rendered as an animated dot-matrix wave: columns of dots
+/// that undulate while audio plays. Time-driven and deterministic (no captured audio, no
+/// fabricated data values); it is pure ornamentation and renders a flat baseline row when
+/// <see cref="Running"/> is false (or when reduced motion is requested).
 /// </summary>
 public sealed class Equalizer : FrameworkElement
 {
-    private const double BarWidth = 3.0;
-    private const double BarGap = 1.0;
+    private const double Cell = 4.0;
+    private const double Dot = 3.0;
     private readonly DateTime _t0 = DateTime.UtcNow;
     private bool _hooked;
 
@@ -326,22 +327,26 @@ public sealed class Equalizer : FrameworkElement
     protected override void OnRender(DrawingContext dc)
     {
         double w = ActualWidth, h = ActualHeight;
-        if (w <= 0 || h <= 0) return;
+        if (w < 2 || h < 2) return;
 
-        double step = BarWidth + BarGap;
-        int bars = (int)(w / step);
-        if (bars < 1) return;
+        int rows = (int)Math.Floor(h / Cell);
+        if (rows < 1) return;
+
+        int cols = (int)Math.Floor(w / Cell);
+        if (cols < 1) return;
 
         double t = (DateTime.UtcNow - _t0).TotalSeconds;
         bool animate = Running && !ReduceMotion;
+        double inset = (Cell - Dot) / 2;
 
-        for (int i = 0; i < bars; i++)
+        for (int i = 0; i < cols; i++)
         {
-            double ratio = animate ? BarHeightAt(t, i, bars) : 0.06;
-            double barH = Math.Max(2, ratio * h);
-            double x = i * step;
+            double ratio = animate ? BarHeightAt(t, i, cols) : 0.0;
+            int filled = animate ? Math.Max(1, (int)Math.Round(ratio * rows)) : 1;
             var brush = Frozen(Hsl(235 - ratio * 14, 0.70, 0.62 + ratio * 0.03));
-            dc.DrawRectangle(brush, null, new Rect(x, h - barH, BarWidth, barH));
+            double x = i * Cell + inset;
+            for (int r = 0; r < filled; r++)
+                dc.DrawRectangle(brush, null, new Rect(x, h - (r + 1) * Cell + inset, Dot, Dot));
         }
     }
 

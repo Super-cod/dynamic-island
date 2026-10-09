@@ -416,7 +416,7 @@
                 <!-- ============ RIGHT DETAIL PANEL (boxed card, inset 16px) ============ -->
                 <local:TelemetryDetailPanel x:Name="DetailPanelComponent"
                                             Panel.ZIndex="1" HorizontalAlignment="Right" Width="486"
-                                            VerticalAlignment="Stretch"
+                                            VerticalAlignment="Center"
                                             Visibility="Collapsed" Opacity="0" IsHitTestVisible="False" />
 
             </Grid>

@@ -7,24 +7,24 @@
     <!-- btop / Hyprland style boxed panel: thin green rounded border with a title tag on the
          top edge; a main graph column (single graph + process list) and a stats column. -->
     <Grid>
-        <Border x:Name="Frame" Width="470" HorizontalAlignment="Right" VerticalAlignment="Stretch"
-                Margin="0,16,16,16"
+        <Border x:Name="Frame" Width="470" HorizontalAlignment="Right" VerticalAlignment="Top"
+                Margin="0"
                 BorderBrush="#8AB478" BorderThickness="1" CornerRadius="12"
                 Background="#FF000000">
-            <Grid Margin="12,14,12,10">
+            <Grid Margin="16">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="190" />
                 </Grid.ColumnDefinitions>
 
-                <!-- graph column: single main graph + process list -->
+                <!-- graph column: reduced-height graph (~60% of the former full height) with the process list below -->
                 <Grid Grid.Column="0">
                     <Grid.RowDefinitions>
-                        <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
                     </Grid.RowDefinitions>
 
-                    <Border Grid.Row="0" CornerRadius="4" ClipToBounds="True" MinHeight="30">
+                    <Border Grid.Row="0" Height="85" CornerRadius="4" ClipToBounds="True">
                         <local:DotMatrixGraph x:Name="Graph" />
                     </Border>
 
@@ -37,7 +37,7 @@
 
         <!-- title tag:  ┤cpu├┤42%├┤peak 71%├  -->
         <Border x:Name="TitleTag" HorizontalAlignment="Right" VerticalAlignment="Top"
-                Margin="0,8,28,0" Background="#FF000000" Padding="6,0">
+                Margin="0,0,28,0" Background="#FF000000" Padding="6,0">
             <TextBlock x:Name="TitleText"
                        FontFamily="Cascadia Mono, Consolas, Courier New"
                        FontSize="11" />
