@@ -30,6 +30,7 @@ public partial class TelemetryIconRow : UserControl
             new Icon(RamCell, RamBorder, RamRing, RamPct, IslandMetric.Ram),
             new Icon(MirrorCell, MirrorBorder, MirrorRing, MirrorPct, IslandMetric.Mirror),
             new Icon(NetCell, NetBorder, NetRing, NetPct, IslandMetric.Net),
+            new Icon(WeatherCell, WeatherBorder, WeatherRing, WeatherPct, IslandMetric.Weather),
         };
         foreach (var ic in _icons)
         {
@@ -42,7 +43,7 @@ public partial class TelemetryIconRow : UserControl
                 if (Available(metric)) MetricClicked?.Invoke(metric);
             };
         }
-        SetActive(IslandMetric.None);
+        SetActive(IslandMetric.None, IslandMetric.None);
     }
 
     /// <summary>Pointer entered the metric icon.</summary>
@@ -76,6 +77,15 @@ public partial class TelemetryIconRow : UserControl
         MirrorPct.Text = label;
     }
 
+    /// <summary>Weather gauge ring (0..100, or negative for none) with an accent colour and its
+    /// short label (e.g. "28°", "—").</summary>
+    public void UpdateWeather(double ringPercent, string label, Color color)
+    {
+        WeatherRing.Value = ringPercent < 0 ? -1 : Math.Clamp(ringPercent, 0, 100);
+        WeatherRing.RingColor = color;
+        WeatherPct.Text = label;
+    }
+
     public void SetAvailability(bool cpu, bool gpu, bool ram)
     {
         _cpuAvail = cpu;
@@ -88,10 +98,13 @@ public partial class TelemetryIconRow : UserControl
         ApplyAvail(NetCell, NetBorder, _netAvail);
     }
 
-    public void SetActive(IslandMetric metric)
+    public void SetActive(IslandMetric metric) => SetActive(metric, IslandMetric.None);
+
+    /// <summary>Highlights both open slots (right and left).</summary>
+    public void SetActive(IslandMetric right, IslandMetric left)
     {
         foreach (var ic in _icons)
-            Highlight(ic.Border, ic.Metric == metric);
+            Highlight(ic.Border, ic.Metric == right || ic.Metric == left);
     }
 
     private bool Available(IslandMetric m) => m switch
@@ -101,6 +114,7 @@ public partial class TelemetryIconRow : UserControl
         IslandMetric.Ram => _ramAvail,
         IslandMetric.Mirror => true,
         IslandMetric.Net => _netAvail,
+        IslandMetric.Weather => true,
         _ => false,
     };
 

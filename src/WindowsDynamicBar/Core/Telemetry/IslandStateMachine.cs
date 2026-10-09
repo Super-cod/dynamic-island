@@ -4,7 +4,7 @@ namespace WindowsDynamicBar.Core.Telemetry;
 public enum IslandVisualState { Collapsed, Expanded, Detail }
 
 /// <summary>Which telemetry metric the detail panel shows.</summary>
-public enum IslandMetric { None, Cpu, Gpu, Ram, Mirror, Net }
+public enum IslandMetric { None, Cpu, Gpu, Ram, Mirror, Net, Weather }
 
 /// <summary>
 /// Pure island transition logic (no WPF dependency) so it can be unit-tested and so that
@@ -48,6 +48,7 @@ public static class IslandStateMachine
         IslandMetric.Ram => "ram",
         IslandMetric.Mirror => "mir",
         IslandMetric.Net => "net",
+        IslandMetric.Weather => "wx",
         _ => "",
     };
 
@@ -58,6 +59,7 @@ public static class IslandStateMachine
         "ram" => IslandMetric.Ram,
         "mir" => IslandMetric.Mirror,
         "net" => IslandMetric.Net,
+        "wx" => IslandMetric.Weather,
         _ => IslandMetric.None,
     };
 }

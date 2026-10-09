@@ -7,7 +7,7 @@
     <!-- btop / Hyprland style boxed panel for live network activity + speed test. Compact so it
          fits the fixed island height: mirrored graph, live rate, latency tiles and a stats column. -->
     <Grid>
-        <Border x:Name="Frame" Width="494" HorizontalAlignment="Right" VerticalAlignment="Top"
+        <Border x:Name="Frame" Width="494" Height="138" HorizontalAlignment="Right" VerticalAlignment="Top"
                 Margin="0"
                 BorderBrush="#8AB478" BorderThickness="1" CornerRadius="12"
                 Background="#FF000000">

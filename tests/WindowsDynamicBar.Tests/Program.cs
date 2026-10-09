@@ -598,6 +598,8 @@ internal static class Program
         AssertEq(IslandMetric.Ram, IslandStateMachine.ParseMetric("ram"), "parse ram");
         AssertEq(IslandMetric.None, IslandStateMachine.ParseMetric("bogus"), "parse bogus");
         AssertEq(IslandMetric.None, IslandStateMachine.ParseMetric(null), "parse null");
+        AssertEq(IslandMetric.Weather, IslandStateMachine.ParseMetric("wx"), "parse wx");
+        AssertEq("wx", IslandStateMachine.MetricKey(IslandMetric.Weather), "wx key");
     }
 
     private static void TestDotBarColorRamp()

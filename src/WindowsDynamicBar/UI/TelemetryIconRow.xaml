@@ -5,7 +5,7 @@
              Background="Transparent"
              UseLayoutRounding="True">
 
-    <!-- 3x2 grid of 46px circles: CPU/GPU/RAM/Mirror/Net live gauges + Temp placeholder (disabled). -->
+    <!-- 3x2 grid of 46px circles: CPU/GPU/RAM/Mirror/Net/Weather live gauges. -->
     <WrapPanel Width="175" HorizontalAlignment="Center" VerticalAlignment="Center">
 
         <Grid x:Name="CpuCell" Width="46" Height="46" Margin="0,0,10.5,10.5" Background="Transparent" Cursor="Hand">
@@ -83,14 +83,20 @@
             </Border>
         </Grid>
 
-        <Border Width="46" Height="46" CornerRadius="23" Margin="0,0,10.5,0"
-                Background="{DynamicResource WdbDimBrush}"
-                BorderBrush="{DynamicResource WdbHairlineBrush}" BorderThickness="1"
-                Opacity="0.35" ToolTip="Not set up yet">
-            <TextBlock Text="Temp" FontFamily="Cascadia Mono, Consolas" FontSize="9"
-                       Foreground="{DynamicResource WdbTextMutedBrush}"
-                       HorizontalAlignment="Center" VerticalAlignment="Center" />
-        </Border>
+        <Grid x:Name="WeatherCell" Width="46" Height="46" Margin="0,0,10.5,0" Background="Transparent" Cursor="Hand">
+            <local:RingGauge x:Name="WeatherRing" Thickness="2.6" RingColor="#E8B04B" />
+            <Border x:Name="WeatherBorder" Width="38" Height="38" CornerRadius="19"
+                    HorizontalAlignment="Center" VerticalAlignment="Center"
+                    Background="{DynamicResource WdbDimBrush}"
+                    BorderBrush="{DynamicResource WdbHairlineBrush}" BorderThickness="1">
+                <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
+                    <TextBlock Text="WX" FontFamily="Cascadia Mono, Consolas" FontSize="9"
+                               Foreground="{DynamicResource WdbTextMutedBrush}" HorizontalAlignment="Center" />
+                    <TextBlock x:Name="WeatherPct" Text="&#x2014;" FontFamily="Cascadia Mono, Consolas"
+                               FontSize="8.5" Foreground="{DynamicResource WdbTextBrush}" HorizontalAlignment="Center" />
+                </StackPanel>
+            </Border>
+        </Grid>
 
     </WrapPanel>
 

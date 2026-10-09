@@ -1,0 +1,91 @@
+<UserControl x:Class="WindowsDynamicBar.UI.WeatherDetailPanel"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:WindowsDynamicBar.UI"
+             UseLayoutRounding="True">
+
+    <!-- Weather card. Same footprint as the net card (494x auto, 36px graph, 176px stats column) so
+         opening it never changes the island height. Real Open-Meteo values only. -->
+    <Grid>
+        <Border x:Name="Frame" Width="494" Height="138" HorizontalAlignment="Right" VerticalAlignment="Top"
+                Margin="0"
+                BorderBrush="#8AB478" BorderThickness="1" CornerRadius="12"
+                Background="#FF000000">
+            <Grid Margin="11">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="176" />
+                </Grid.ColumnDefinitions>
+
+                <!-- graph / current line / forecast tiles / daylight -->
+                <Grid Grid.Column="0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="36" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+
+                    <Grid Grid.Row="0">
+                        <Border CornerRadius="4" ClipToBounds="True">
+                            <local:WeatherGraph x:Name="Graph" />
+                        </Border>
+                        <TextBlock Text="24h" FontFamily="Cascadia Mono, Consolas" FontSize="10"
+                                   Foreground="#E8B04B" HorizontalAlignment="Left" VerticalAlignment="Top" />
+                        <TextBlock x:Name="RangeText" FontFamily="Cascadia Mono, Consolas" FontSize="10"
+                                   Foreground="#4FC3D9" HorizontalAlignment="Right" VerticalAlignment="Top" />
+                    </Grid>
+
+                    <Grid Grid.Row="1" Margin="0,5,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock x:Name="LblNow" Grid.Column="0" FontFamily="Cascadia Mono, Consolas" FontSize="10.5"
+                                   Foreground="#CFD3C4" VerticalAlignment="Center"
+                                   TextTrimming="CharacterEllipsis" />
+                        <TextBlock x:Name="LblFeels" Grid.Column="1" Margin="10,0,0,0"
+                                   FontFamily="Cascadia Mono, Consolas" FontSize="10"
+                                   Foreground="#9AA088" HorizontalAlignment="Right" VerticalAlignment="Center"
+                                   TextTrimming="CharacterEllipsis" />
+                    </Grid>
+
+                    <UniformGrid x:Name="TilesHost" Grid.Row="2" Columns="5" Margin="0,5,0,0" />
+
+                    <Grid Grid.Row="3" Margin="0,5,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock x:Name="LblSun" Grid.Column="0" FontFamily="Cascadia Mono, Consolas" FontSize="10"
+                                   Foreground="#CFD3C4" VerticalAlignment="Center"
+                                   TextTrimming="CharacterEllipsis" />
+                        <TextBlock x:Name="LblUv" Grid.Column="1" Margin="10,0,0,0"
+                                   FontFamily="Cascadia Mono, Consolas" FontSize="10"
+                                   Foreground="#9AA088" HorizontalAlignment="Right" VerticalAlignment="Center"
+                                   TextTrimming="CharacterEllipsis" />
+                    </Grid>
+                </Grid>
+
+                <!-- place + current + stat bars -->
+                <StackPanel Grid.Column="1" Margin="13,0,0,0" VerticalAlignment="Top">
+                    <TextBlock x:Name="CityText" FontFamily="Cascadia Mono, Consolas" FontSize="10"
+                               Foreground="#E6E0A8" TextTrimming="CharacterEllipsis" />
+                    <TextBlock x:Name="TempText" FontFamily="Cascadia Mono, Consolas" FontSize="24"
+                               Foreground="#F2ECCF" Margin="0,1,0,0" />
+                    <TextBlock x:Name="CondText" FontFamily="Cascadia Mono, Consolas" FontSize="10.5"
+                               Foreground="#CFD3C4" TextTrimming="CharacterEllipsis" />
+                    <StackPanel x:Name="StatsHost" Margin="0,4,0,0" />
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- title tag:  ┤wx├┤Clear├┤21C├  -->
+        <Border x:Name="TitleTag" HorizontalAlignment="Left" VerticalAlignment="Top"
+                Margin="29,0,0,0" Background="#FF000000" Padding="6,0">
+            <TextBlock x:Name="TitleText"
+                       FontFamily="Cascadia Mono, Consolas, Courier New"
+                       FontSize="11.5" />
+        </Border>
+    </Grid>
+</UserControl>
