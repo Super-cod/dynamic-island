@@ -28,6 +28,7 @@ public partial class TelemetryIconRow : UserControl
             new Icon(CpuCell, CpuBorder, CpuRing, CpuPct, IslandMetric.Cpu),
             new Icon(GpuCell, GpuBorder, GpuRing, GpuPct, IslandMetric.Gpu),
             new Icon(RamCell, RamBorder, RamRing, RamPct, IslandMetric.Ram),
+            new Icon(MirrorCell, MirrorBorder, MirrorRing, MirrorPct, IslandMetric.Mirror),
             new Icon(NetCell, NetBorder, NetRing, NetPct, IslandMetric.Net),
         };
         foreach (var ic in _icons)
@@ -66,6 +67,15 @@ public partial class TelemetryIconRow : UserControl
         NetPct.Text = label;
     }
 
+    /// <summary>Mirror camera state: a full red ring reads "LIVE" while capturing, an empty ring
+    /// reads "off". The panel still opens when the camera is blocked/unavailable.</summary>
+    public void UpdateMirror(bool live, string label)
+    {
+        MirrorRing.Value = live ? 100 : -1;
+        MirrorRing.RingColor = Color.FromRgb(0xE5, 0x48, 0x4D);
+        MirrorPct.Text = label;
+    }
+
     public void SetAvailability(bool cpu, bool gpu, bool ram)
     {
         _cpuAvail = cpu;
@@ -74,6 +84,7 @@ public partial class TelemetryIconRow : UserControl
         ApplyAvail(CpuCell, CpuBorder, cpu);
         ApplyAvail(GpuCell, GpuBorder, gpu);
         ApplyAvail(RamCell, RamBorder, ram);
+        ApplyAvail(MirrorCell, MirrorBorder, true);
         ApplyAvail(NetCell, NetBorder, _netAvail);
     }
 
@@ -88,6 +99,7 @@ public partial class TelemetryIconRow : UserControl
         IslandMetric.Cpu => _cpuAvail,
         IslandMetric.Gpu => _gpuAvail,
         IslandMetric.Ram => _ramAvail,
+        IslandMetric.Mirror => true,
         IslandMetric.Net => _netAvail,
         _ => false,
     };

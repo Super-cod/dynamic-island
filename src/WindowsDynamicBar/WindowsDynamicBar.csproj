@@ -24,6 +24,7 @@
     <ApplicationIcon>Assets\app.ico</ApplicationIcon>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <InvariantGlobalization>false</InvariantGlobalization>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <DebugType>portable</DebugType>
     <NoWarn>$(NoWarn);CA1416;SYSLIB0014;WFAC010</NoWarn>
   </PropertyGroup>

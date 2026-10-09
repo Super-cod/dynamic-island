@@ -5,8 +5,8 @@
              Background="Transparent"
              UseLayoutRounding="True">
 
-    <!-- 3x2 grid of 46px circles: CPU/GPU/RAM/Net live gauges + Disk/Temp placeholders (disabled). -->
-    <WrapPanel Width="170" HorizontalAlignment="Center" VerticalAlignment="Center">
+    <!-- 3x2 grid of 46px circles: CPU/GPU/RAM/Mirror/Net live gauges + Temp placeholder (disabled). -->
+    <WrapPanel Width="175" HorizontalAlignment="Center" VerticalAlignment="Center">
 
         <Grid x:Name="CpuCell" Width="46" Height="46" Margin="0,0,10.5,10.5" Background="Transparent" Cursor="Hand">
             <local:RingGauge x:Name="CpuRing" Thickness="2.6" />
@@ -53,14 +53,20 @@
             </Border>
         </Grid>
 
-        <Border Width="46" Height="46" CornerRadius="23" Margin="0,0,10.5,10.5"
-                Background="{DynamicResource WdbDimBrush}"
-                BorderBrush="{DynamicResource WdbHairlineBrush}" BorderThickness="1"
-                Opacity="0.35" ToolTip="Not set up yet">
-            <TextBlock Text="Disk" FontFamily="Cascadia Mono, Consolas" FontSize="9"
-                       Foreground="{DynamicResource WdbTextMutedBrush}"
-                       HorizontalAlignment="Center" VerticalAlignment="Center" />
-        </Border>
+        <Grid x:Name="MirrorCell" Width="46" Height="46" Margin="0,0,10.5,10.5" Background="Transparent" Cursor="Hand">
+            <local:RingGauge x:Name="MirrorRing" Thickness="2.6" RingColor="#E5484D" />
+            <Border x:Name="MirrorBorder" Width="38" Height="38" CornerRadius="19"
+                    HorizontalAlignment="Center" VerticalAlignment="Center"
+                    Background="{DynamicResource WdbDimBrush}"
+                    BorderBrush="{DynamicResource WdbHairlineBrush}" BorderThickness="1">
+                <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
+                    <TextBlock Text="Mirror" FontFamily="Cascadia Mono, Consolas" FontSize="8.5"
+                               Foreground="{DynamicResource WdbTextMutedBrush}" HorizontalAlignment="Center" />
+                    <TextBlock x:Name="MirrorPct" Text="off" FontFamily="Cascadia Mono, Consolas"
+                               FontSize="8" Foreground="{DynamicResource WdbTextBrush}" HorizontalAlignment="Center" />
+                </StackPanel>
+            </Border>
+        </Grid>
 
         <Grid x:Name="NetCell" Width="46" Height="46" Margin="0,0,10.5,10.5" Background="Transparent" Cursor="Hand">
             <local:RingGauge x:Name="NetRing" Thickness="2.6" RingColor="#6FA8DC" />

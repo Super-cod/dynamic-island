@@ -770,3 +770,83 @@ public sealed class Sparkline : FrameworkElement
         return b;
     }
 }
+
+/// <summary>
+/// Faint horizontal scanline overlay for the mirror preview: 1px dark lines at ~7% opacity every
+/// 3px, matching the CRT-ish look of the reference. Static (repaints only on resize).
+/// </summary>
+public sealed class ScanlineOverlay : FrameworkElement
+{
+    private const double Step = 3.0;
+    private static readonly Brush LineBrush = Frozen(Color.FromArgb(18, 0, 0, 0));
+
+    protected override void OnRender(DrawingContext dc)
+    {
+        double w = ActualWidth, h = ActualHeight;
+        if (w < 1 || h < 1) return;
+        for (double y = 0; y < h; y += Step)
+            dc.DrawRectangle(LineBrush, null, new Rect(0, y, w, 1));
+    }
+
+    private static SolidColorBrush Frozen(Color c)
+    {
+        var b = new SolidColorBrush(c);
+        b.Freeze();
+        return b;
+    }
+}
+
+/// <summary>
+/// Warm "ring light" glow drawn inside the mirror preview. At <see cref="Level"/> 0 it is invisible;
+/// as it rises an inner border (up to 14px) and an inward radial glow (up to 44px) in warm white
+/// (255,246,222) fade in. Purely visual - it never affects the captured/saved frame.
+/// </summary>
+public sealed class RingLightOverlay : FrameworkElement
+{
+    private static readonly Color Warm = Color.FromRgb(0xFF, 0xF6, 0xDE);
+
+    public static readonly DependencyProperty LevelProperty =
+        DependencyProperty.Register(nameof(Level), typeof(double), typeof(RingLightOverlay),
+            new FrameworkPropertyMetadata(0.0, FrameworkPropertyMetadataOptions.AffectsRender));
+
+    /// <summary>0..1 ring-light intensity.</summary>
+    public double Level
+    {
+        get => (double)GetValue(LevelProperty);
+        set => SetValue(LevelProperty, value);
+    }
+
+    protected override void OnRender(DrawingContext dc)
+    {
+        double w = ActualWidth, h = ActualHeight;
+        if (w < 2 || h < 2) return;
+        double level = Math.Clamp(Level, 0, 1);
+        if (level <= 0.001) return;
+
+        const double radius = 10.0;
+
+        double border = level * 14.0;
+        if (border > 0.5)
+        {
+            var b = new SolidColorBrush(Color.FromArgb((byte)((0.10 + level * 0.85) * 255), Warm.R, Warm.G, Warm.B));
+            b.Freeze();
+            var pen = new Pen(b, border);
+            pen.Freeze();
+            double inset = border / 2;
+            double rad = Math.Max(0, radius - inset);
+            dc.DrawRoundedRectangle(null, pen,
+                new Rect(inset, inset, Math.Max(0, w - border), Math.Max(0, h - border)), rad, rad);
+        }
+
+        double glow = level * 44.0;
+        if (glow > 0.5)
+        {
+            var rg = new RadialGradientBrush { RadiusX = 0.5, RadiusY = 0.5 };
+            rg.GradientStops.Add(new GradientStop(Color.FromArgb(0, Warm.R, Warm.G, Warm.B), 0.55));
+            rg.GradientStops.Add(new GradientStop(
+                Color.FromArgb((byte)Math.Round(level * 0.90 * 255), Warm.R, Warm.G, Warm.B), 1.0));
+            rg.Freeze();
+            dc.DrawRoundedRectangle(rg, null, new Rect(0, 0, w, h), radius, radius);
+        }
+    }
+}

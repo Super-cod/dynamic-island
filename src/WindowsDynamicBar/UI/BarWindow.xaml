@@ -426,6 +426,12 @@
                                       VerticalAlignment="Center"
                                       Visibility="Collapsed" Opacity="0" IsHitTestVisible="False" />
 
+                <local:MirrorDetailPanel x:Name="MirrorPanelComponent"
+                                         Panel.ZIndex="1" HorizontalAlignment="Right"
+                                         Margin="0,0,16,0"
+                                         VerticalAlignment="Center"
+                                         Visibility="Collapsed" Opacity="0" IsHitTestVisible="False" />
+
             </Grid>
         </Border>
 

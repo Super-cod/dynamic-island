@@ -72,6 +72,7 @@ public sealed class SystemTelemetryService : IDisposable
     private bool _memoryAvailable;
 
     private readonly Dictionary<int, TimeSpan> _procCpu = new();
+    private readonly int[] _topProcPids = new int[3];
     private DateTime _lastProcSampleUtc;
     private IReadOnlyList<ProcessSample> _topProcesses = Array.Empty<ProcessSample>();
 
@@ -591,7 +592,7 @@ public sealed class SystemTelemetryService : IDisposable
 
         int ncpu = Math.Max(1, Environment.ProcessorCount);
         var next = new Dictionary<int, TimeSpan>(_procCpu.Count + 8);
-        var list = new List<ProcessSample>(_procCpu.Count);
+        var cand = new List<(int Id, string Name, double Pct)>(_procCpu.Count + 16);
 
         Process[] procs;
         try { procs = Process.GetProcesses(); }
@@ -611,7 +612,7 @@ public sealed class SystemTelemetryService : IDisposable
                 {
                     double dp = (t - prev).TotalSeconds;
                     double pct = Math.Clamp(dp / elapsed / ncpu * 100.0, 0, 100);
-                    if (pct > 0.1) list.Add(new ProcessSample(p.ProcessName, Math.Round(pct, 1)));
+                    cand.Add((id, p.ProcessName, pct));
                 }
             }
             catch { /* process exited mid-enumeration */ }
@@ -620,7 +621,21 @@ public sealed class SystemTelemetryService : IDisposable
 
         _procCpu.Clear();
         foreach (var kv in next) _procCpu[kv.Key] = kv.Value;
-        _topProcesses = list.OrderByDescending(x => x.CpuPercent).Take(3).ToList();
+
+        var prevSet = new HashSet<int>(_topProcPids.Where(pid => pid > 0));
+        var ranked = cand
+            .OrderByDescending(c => c.Pct)
+            .ThenBy(c => c.Pct < 0.05 && prevSet.Contains(c.Id) ? 0 : 1)
+            .ThenBy(c => c.Name, StringComparer.OrdinalIgnoreCase)
+            .Take(3)
+            .ToList();
+        var result = new List<ProcessSample>(ranked.Count);
+        for (int i = 0; i < ranked.Count; i++)
+        {
+            _topProcPids[i] = ranked[i].Id;
+            result.Add(new ProcessSample(ranked[i].Name, Math.Round(ranked[i].Pct, 1)));
+        }
+        _topProcesses = result;
     }
 
     private void PushHistories()

@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
@@ -37,6 +38,7 @@ public partial class BarWindow : Window, IDisposable
     // ---- island geometry (DIPs) : matches the reference demo ----
     private const double IslandExpandedW = 575;    // s2
     private const double IslandDetailW = 1082;     // s3 (wider than s2)
+    private const double IslandMirrorW = 879;      // s3 mirror: same left edge as the 494px cards, island ends at the camera
     private const double DiscCollapsed = 27;
     private const double DiscExpanded = 118;
     private const double IslandPadV = 13;          // symmetric top/bottom padding inside the island
@@ -141,12 +143,14 @@ public partial class BarWindow : Window, IDisposable
         OrbDisc.ReduceMotion = _cfg.ReduceMotion;
         DetailPanelComponent.ReduceMotion = _cfg.ReduceMotion;
         NetPanelComponent.ReduceMotion = _cfg.ReduceMotion;
+        MirrorPanelComponent.ReduceMotion = _cfg.ReduceMotion;
 
         IconRow.MetricHovered += OnIconMetricHovered;
         IconRow.MetricUnhovered += OnIconMetricUnhovered;
         IconRow.MetricClicked += OnIconMetricClicked;
         DetailPanelComponent.GpuCycleRequested += OnGpuCycleRequested;
         NetPanelComponent.TestToggleRequested += OnNetTestToggle;
+        MirrorPanelComponent.CameraStateChanged += OnMirrorCameraStateChanged;
         _collapseDelay.Tick += OnCollapseDelayTick;
 
         ProgressTrack.SizeChanged += (_, _) => SyncFills();
@@ -252,6 +256,7 @@ public partial class BarWindow : Window, IDisposable
         CancelDelays();
         _fadeCollapsed.Stop(); _fadeExpanded.Stop();
         try { if (_netMonitor is not null) { _netMonitor.Updated -= OnNetUpdated; _netMonitor.Dispose(); _netMonitor = null; } } catch { }
+        try { MirrorPanelComponent.Shutdown(); } catch { }
         _anim.Dispose();
         try
         {
@@ -574,6 +579,11 @@ public partial class BarWindow : Window, IDisposable
         _activeMetric = metric;
         _collapseDelay.Stop();
 
+        // Privacy: the mirror camera is released the moment it is no longer the active metric
+        // (hovering another icon, collapsing, switching panels). Starting it only ever happens
+        // from an explicit Mirror icon click or the panel's CAMERA ON button.
+        if (metric != IslandMetric.Mirror) MirrorPanelComponent.StopCamera();
+
         // Switching metric while a panel is already open: refresh content (height never changes
         // once enlarged - the panel rides inside the expanded island and only the width extends).
         if (sameState && state == IslandVisualState.Detail)
@@ -581,7 +591,7 @@ public partial class BarWindow : Window, IDisposable
             IconRow.SetActive(metric);
             SwitchPanel();
             UpdatePanelContent();
-            AnimateIsland(IslandDetailW, MeasureIslandHeight());
+            AnimateIsland(DetailWidth(), MeasureIslandHeight());
             return;
         }
 
@@ -606,7 +616,7 @@ public partial class BarWindow : Window, IDisposable
                 ShowIslandContent(withPanel: true);
                 IconRow.SetActive(metric);
                 UpdatePanelContent();
-                AnimateIsland(IslandDetailW, MeasureIslandHeight());
+                AnimateIsland(DetailWidth(), MeasureIslandHeight());
                 MorphDisc(DiscExpanded);
                 break;
         }
@@ -624,6 +634,8 @@ public partial class BarWindow : Window, IDisposable
         _anim.Animate("h", _currentH, h, ApplyH);
     }
 
+    private double DetailWidth() => _activeMetric == IslandMetric.Mirror ? IslandMirrorW : IslandDetailW;
+
     /// <summary>Height of the island derived from its hover content: the tallest of the media
     /// cluster or the disc, plus symmetric vertical padding, clamped to the allowed range. The
     /// detail panel never grows the island - it rides inside this height so opening a metric only
@@ -638,6 +650,12 @@ public partial class BarWindow : Window, IDisposable
             content = Math.Max(content, IslandExpandedHost.DesiredSize.Height);
         }
 
+        if (_islandState == IslandVisualState.Detail && ActivePanel is FrameworkElement panel && panel.Visibility == Visibility.Visible)
+        {
+            panel.Measure(new Size(panel.Width, double.PositiveInfinity));
+            content = Math.Max(content, panel.DesiredSize.Height);
+        }
+
         return Math.Clamp(content + IslandPadV * 2, MinIslandH, MaxPillH);
     }
 
@@ -647,7 +665,7 @@ public partial class BarWindow : Window, IDisposable
     {
         double target = MeasureIslandHeight();
         if (Math.Abs(target - _currentH) > 0.5)
-            AnimateIsland(IslandDetailW, target);
+            AnimateIsland(DetailWidth(), target);
     }
 
     private void MorphDisc(double size)
@@ -684,29 +702,38 @@ public partial class BarWindow : Window, IDisposable
         {
             DetailPanelComponent.IsHitTestVisible = false;
             NetPanelComponent.IsHitTestVisible = false;
+            MirrorPanelComponent.IsHitTestVisible = false;
             Fade(DetailPanelComponent, 0, 120,
                 () => { if (_islandState != IslandVisualState.Detail) DetailPanelComponent.Visibility = Visibility.Collapsed; });
             Fade(NetPanelComponent, 0, 120,
                 () => { if (_islandState != IslandVisualState.Detail) NetPanelComponent.Visibility = Visibility.Collapsed; });
+            Fade(MirrorPanelComponent, 0, 120,
+                () => { if (_islandState != IslandVisualState.Detail) MirrorPanelComponent.Visibility = Visibility.Collapsed; });
         }
         UpdateIslandContent();
     }
 
-    /// <summary>Shows the panel matching the active metric (telemetry card or net card) and fades
-    /// the other one out. Only meaningful while the island is in its Detail state.</summary>
-    private UIElement ActivePanel =>
-        _activeMetric == IslandMetric.Net ? NetPanelComponent : DetailPanelComponent;
+    /// <summary>Shows the panel matching the active metric (telemetry card, net card or mirror card)
+    /// and fades the others out. Only meaningful while the island is in its Detail state.</summary>
+    private UIElement ActivePanel => _activeMetric switch
+    {
+        IslandMetric.Net => NetPanelComponent,
+        IslandMetric.Mirror => MirrorPanelComponent,
+        _ => DetailPanelComponent,
+    };
 
     private void SwitchPanel()
     {
         var show = ActivePanel;
-        var hide = ReferenceEquals(show, NetPanelComponent) ? (UIElement)DetailPanelComponent : NetPanelComponent;
-
-        hide.IsHitTestVisible = false;
-        Fade(hide, 0, 120, () =>
+        foreach (UIElement panel in new UIElement[] { DetailPanelComponent, NetPanelComponent, MirrorPanelComponent })
         {
-            if (!ReferenceEquals(ActivePanel, hide)) hide.Visibility = Visibility.Collapsed;
-        });
+            if (ReferenceEquals(panel, show)) continue;
+            panel.IsHitTestVisible = false;
+            Fade(panel, 0, 120, () =>
+            {
+                if (!ReferenceEquals(ActivePanel, panel)) panel.Visibility = Visibility.Collapsed;
+            });
+        }
 
         show.Visibility = Visibility.Visible;
         show.IsHitTestVisible = true;
@@ -718,13 +745,17 @@ public partial class BarWindow : Window, IDisposable
         IconRow.SetActive(IslandMetric.None);
         DetailPanelComponent.IsHitTestVisible = false;
         NetPanelComponent.IsHitTestVisible = false;
+        MirrorPanelComponent.IsHitTestVisible = false;
         Fade(IslandExpandedHost, 0, 120,
             () => { if (_islandState == IslandVisualState.Collapsed) IslandExpandedHost.Visibility = Visibility.Collapsed; });
         Fade(DetailPanelComponent, 0, 100,
             () => { if (_islandState == IslandVisualState.Collapsed) DetailPanelComponent.Visibility = Visibility.Collapsed; });
         Fade(NetPanelComponent, 0, 100,
             () => { if (_islandState == IslandVisualState.Collapsed) NetPanelComponent.Visibility = Visibility.Collapsed; });
+        Fade(MirrorPanelComponent, 0, 100,
+            () => { if (_islandState == IslandVisualState.Collapsed) MirrorPanelComponent.Visibility = Visibility.Collapsed; });
         _netMonitor?.Stop();
+        MirrorPanelComponent.StopCamera();
         CollapsedPanel.Visibility = Visibility.Visible;
         Fade(CollapsedPanel, 1, 160);
         UpdateIslandContent();
@@ -809,6 +840,13 @@ public partial class BarWindow : Window, IDisposable
 
     private void UpdatePanelContent()
     {
+        if (_activeMetric == IslandMetric.Mirror)
+        {
+            // The mirror panel owns its own rendering (camera frames); nothing to push here.
+            UpdateIconRowValues();
+            return;
+        }
+
         if (_activeMetric == IslandMetric.Net)
         {
             EnsureNetMonitor();
@@ -924,6 +962,23 @@ public partial class BarWindow : Window, IDisposable
 
     private void OnIconMetricClicked(IslandMetric metric)
     {
+        // Mirror: a click toggles the camera (per privacy design). Click once to start and pin the
+        // panel; click again to stop the camera and shrink back to the collapsed island.
+        if (metric == IslandMetric.Mirror)
+        {
+            if (MirrorPanelComponent.IsCameraLive)
+            {
+                MirrorPanelComponent.StopCamera();
+                _pinned = false;
+                SetIslandState(IslandVisualState.Collapsed, IslandMetric.None, force: true);
+                return;
+            }
+            _pinned = true;
+            SetIslandState(IslandVisualState.Detail, metric, force: true);
+            MirrorPanelComponent.StartCamera();
+            return;
+        }
+
         // Click the active (pinned) icon again -> close the extended canvas.
         if (_pinned && _activeMetric == metric)
         {
@@ -934,6 +989,9 @@ public partial class BarWindow : Window, IDisposable
         _pinned = true;
         SetIslandState(IslandVisualState.Detail, metric, force: true);
     }
+
+    private void OnMirrorCameraStateChanged(bool live)
+        => IconRow.UpdateMirror(live, live ? "LIVE" : "off");
 
     private void OnGpuCycleRequested()
     {
@@ -1107,6 +1165,7 @@ public partial class BarWindow : Window, IDisposable
             OrbDisc.ReduceMotion = m.ReduceMotion;
             DetailPanelComponent.ReduceMotion = m.ReduceMotion;
             NetPanelComponent.ReduceMotion = m.ReduceMotion;
+            MirrorPanelComponent.ReduceMotion = m.ReduceMotion;
             _cfg.CollapseDelayMs = m.CollapseDelayMs;
             _cfg.HoverPreview = m.HoverPreview;
             _cfg.SystemMonitorInBar = m.SystemMonitorInBar;
@@ -1168,6 +1227,9 @@ public partial class BarWindow : Window, IDisposable
     private void OnPillMouseDown(object sender, MouseButtonEventArgs e)
     {
         if (e.ChangedButton != MouseButton.Left) return;
+        // Pressing a control (slider, button) is that control's gesture - never start a pill drag,
+        // otherwise dragging the mirror zoom/light sliders would slide the whole island sideways.
+        if (IsInteractiveSource(e.OriginalSource)) { _dragPressing = false; return; }
         NativeMethods.GetCursorPos(out var pt);
         _dragStartX = pt.X;
         _dragStartOffset = _cfg.CustomOffsetX;
@@ -1176,6 +1238,21 @@ public partial class BarWindow : Window, IDisposable
         // Do NOT capture yet: capturing here routes the following MouseLeftButtonUp to the
         // Pill, so clicks on child controls (metric icons, canvas) would never reach them.
         // Capture only once a real drag begins.
+    }
+
+    /// <summary>True when the event originated inside an interactive control (slider/button/thumb)
+    /// that owns its own pointer gesture.</summary>
+    private static bool IsInteractiveSource(object? source)
+    {
+        var d = source as DependencyObject;
+        while (d is not null and not Window)
+        {
+            if (d is Slider or ButtonBase or Thumb) return true;
+            d = d is Visual or System.Windows.Media.Media3D.Visual3D
+                ? VisualTreeHelper.GetParent(d)
+                : LogicalTreeHelper.GetParent(d);
+        }
+        return false;
     }
 
     private void OnPillMouseMove(object sender, MouseEventArgs e)
@@ -1207,6 +1284,8 @@ public partial class BarWindow : Window, IDisposable
             try { App.Settings?.Update(s => s.CustomOffsetX = saved); } catch { }
             return;
         }
+        // A press that started on a control (slider/button) belongs to it, not the pill.
+        if (IsInteractiveSource(e.OriginalSource)) return;
         // Clicking the open (pinned) canvas closes it.
         if (_pinned)
         {

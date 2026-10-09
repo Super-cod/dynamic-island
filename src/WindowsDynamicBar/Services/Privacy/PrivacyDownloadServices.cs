@@ -92,11 +92,41 @@ public sealed class PrivacyService : IDisposable
                 using var subKey = np.OpenSubKey(sub);
                 if (subKey is null) continue;
                 if (!IsActive(subKey, now)) continue;
+                // The mirror panel owns a camera/mic; never report the bar's own capture back to the
+                // user as a privacy alert (that would immediately collapse the mirror it describes).
+                if (IsOwnProcess(sub)) continue;
                 active = true;
                 app ??= FriendlyName(sub);
                 break;
             }
         }
+    }
+
+    private static string? _ownPath;
+
+    /// <summary>True when a consent-store subkey refers to this process' executable.</summary>
+    private static bool IsOwnProcess(string keyName)
+    {
+        try
+        {
+            _ownPath ??= Environment.ProcessPath
+                         ?? Process.GetCurrentProcess().MainModule?.FileName;
+            if (string.IsNullOrEmpty(_ownPath)) return false;
+            return string.Equals(DecodePath(keyName), Path.GetFullPath(_ownPath),
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
+    }
+
+    /// <summary>Decodes a ConsentStore subkey (e.g. "#C:\app\a.exe:-1001" or "C:#app#a.exe") to a path.</summary>
+    private static string DecodePath(string keyName)
+    {
+        string s = keyName;
+        if (s.StartsWith("#", StringComparison.Ordinal)) s = s[1..];
+        int last = s.LastIndexOf(':');
+        if (last > 2 && int.TryParse(s[(last + 1)..], out _)) s = s[..last];
+        s = s.Replace('#', Path.DirectorySeparatorChar);
+        try { return Path.GetFullPath(s); } catch { return s; }
     }
 
     private static bool IsActive(RegistryKey key, long now)
