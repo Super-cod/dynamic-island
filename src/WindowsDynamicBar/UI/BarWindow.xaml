@@ -420,6 +420,12 @@
                                             VerticalAlignment="Center"
                                             Visibility="Collapsed" Opacity="0" IsHitTestVisible="False" />
 
+                <local:NetDetailPanel x:Name="NetPanelComponent"
+                                      Panel.ZIndex="1" HorizontalAlignment="Right" Width="494"
+                                      Margin="0,0,16,0"
+                                      VerticalAlignment="Center"
+                                      Visibility="Collapsed" Opacity="0" IsHitTestVisible="False" />
+
             </Grid>
         </Border>
 

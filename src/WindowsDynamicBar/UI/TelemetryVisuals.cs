@@ -562,3 +562,211 @@ public sealed class DetailGraphCanvas : FrameworkElement
         return p;
     }
 }
+
+/// <summary>
+/// Mirrored dot-matrix network graph: download grows up from the centre line, upload grows down.
+/// One column per sample (newest at the right), rendered in a single <see cref="OnRender"/> pass.
+/// Values are 0..100 where 100 == full scale (the caller normalises against a fixed maximum).
+/// </summary>
+public sealed class NetMirrorGraph : FrameworkElement
+{
+    private const double Cell = 4.0;
+    private const double Dot = 3.0;
+
+    private static readonly Brush GhostBrush = Frozen(Color.FromArgb(13, 255, 255, 255));
+    private static readonly Pen AxisPen = FrozenPen(Color.FromArgb(40, 255, 255, 255), 1);
+
+    private Brush[] _downBrushes = Array.Empty<Brush>();
+    private Brush[] _upBrushes = Array.Empty<Brush>();
+    private int _rows = -1;
+
+    public static readonly DependencyProperty DownValuesProperty =
+        DependencyProperty.Register(nameof(DownValues), typeof(double[]), typeof(NetMirrorGraph),
+            new FrameworkPropertyMetadata(null, FrameworkPropertyMetadataOptions.AffectsRender));
+
+    public static readonly DependencyProperty UpValuesProperty =
+        DependencyProperty.Register(nameof(UpValues), typeof(double[]), typeof(NetMirrorGraph),
+            new FrameworkPropertyMetadata(null, FrameworkPropertyMetadataOptions.AffectsRender));
+
+    public static readonly DependencyProperty ScrollProperty =
+        DependencyProperty.Register(nameof(Scroll), typeof(double), typeof(NetMirrorGraph),
+            new FrameworkPropertyMetadata(0.0, FrameworkPropertyMetadataOptions.AffectsRender));
+
+    public double[]? DownValues
+    {
+        get => (double[]?)GetValue(DownValuesProperty);
+        set => SetValue(DownValuesProperty, value);
+    }
+
+    public double[]? UpValues
+    {
+        get => (double[]?)GetValue(UpValuesProperty);
+        set => SetValue(UpValuesProperty, value);
+    }
+
+    /// <summary>Fraction (0..1) of a cell the graph has scrolled since the newest sample.</summary>
+    public double Scroll
+    {
+        get => (double)GetValue(ScrollProperty);
+        set => SetValue(ScrollProperty, value);
+    }
+
+    protected override void OnRender(DrawingContext dc)
+    {
+        double w = ActualWidth, h = ActualHeight;
+        if (w < 2 || h < 2) return;
+
+        int rows = (int)Math.Floor(h / Cell / 2);
+        if (rows < 1) return;
+        EnsureBrushes(rows);
+
+        int cols = (int)Math.Floor(w / Cell) + 2;
+        var down = DownValues;
+        var up = UpValues;
+        int n = Math.Max(down?.Length ?? 0, up?.Length ?? 0);
+        double shift = Math.Clamp(Scroll, 0, 1) * Cell;
+        double mid = rows * Cell;
+
+        dc.DrawRectangle(null, AxisPen, new Rect(0, mid + 0.5, w, 0.5));
+
+        for (int c = 0; c < cols; c++)
+        {
+            int idx = n - cols + c;
+            double x = w - (cols - c) * Cell + Cell - shift;
+
+            int df = Fill(down, idx, rows);
+            for (int r = 0; r < rows; r++)
+            {
+                double y = mid - (r + 1) * Cell;
+                dc.DrawRectangle(r < df ? _downBrushes[r] : GhostBrush, null, new Rect(x, y, Dot, Dot));
+            }
+
+            int uf = Fill(up, idx, rows);
+            for (int r = 0; r < rows; r++)
+            {
+                double y = mid + 1 + r * Cell;
+                dc.DrawRectangle(r < uf ? _upBrushes[r] : GhostBrush, null, new Rect(x, y, Dot, Dot));
+            }
+        }
+    }
+
+    private static int Fill(double[]? values, int idx, int rows)
+    {
+        if (values is null || idx < 0 || idx >= values.Length) return 0;
+        double v = values[idx];
+        if (double.IsNaN(v)) return 0;
+        return Math.Min(rows, (int)Math.Round(Math.Sqrt(Math.Clamp(v, 0, 100) / 100.0) * rows));
+    }
+
+    private void EnsureBrushes(int rows)
+    {
+        if (rows == _rows) return;
+        _rows = rows;
+        var down = new Brush[rows];
+        var up = new Brush[rows];
+        for (int r = 0; r < rows; r++)
+        {
+            double q = rows <= 1 ? 0 : (double)r / (rows - 1);
+            down[r] = Frozen(Hsl(175 + q * 40, 0.70, 0.52 + q * 0.14));   // teal -> blue
+            up[r] = Frozen(Hsl(290 - q * 20, 0.60, 0.60 + q * 0.08));     // violet
+        }
+        _downBrushes = down;
+        _upBrushes = up;
+    }
+
+    internal static Color Hsl(double h, double s, double l)
+    {
+        h = (h % 360 + 360) % 360;
+        double c = (1 - Math.Abs(2 * l - 1)) * s;
+        double x = c * (1 - Math.Abs((h / 60.0) % 2 - 1));
+        double m = l - c / 2;
+        (double r, double g, double b) = h switch
+        {
+            < 60 => (c, x, 0.0),
+            < 120 => (x, c, 0.0),
+            < 180 => (0.0, c, x),
+            < 240 => (0.0, x, c),
+            < 300 => (x, 0.0, c),
+            _ => (c, 0.0, x),
+        };
+        return Color.FromRgb(
+            (byte)Math.Round((r + m) * 255),
+            (byte)Math.Round((g + m) * 255),
+            (byte)Math.Round((b + m) * 255));
+    }
+
+    private static SolidColorBrush Frozen(Color c)
+    {
+        var b = new SolidColorBrush(c);
+        b.Freeze();
+        return b;
+    }
+
+    private static Pen FrozenPen(Color c, double thickness)
+    {
+        var b = new SolidColorBrush(c);
+        b.Freeze();
+        var p = new Pen(b, thickness);
+        p.Freeze();
+        return p;
+    }
+}
+
+/// <summary>
+/// Tiny latency sparkline: one bar per sample, height scaled against max(40ms, observed max).
+/// A <see cref="double.NaN"/> sample renders a full-height red bar (failed probe).
+/// </summary>
+public sealed class Sparkline : FrameworkElement
+{
+    private static readonly Brush FailBrush = Frozen(Color.FromRgb(0xC9, 0x60, 0x4A));
+
+    public static readonly DependencyProperty ValuesProperty =
+        DependencyProperty.Register(nameof(Values), typeof(double[]), typeof(Sparkline),
+            new FrameworkPropertyMetadata(null, FrameworkPropertyMetadataOptions.AffectsRender));
+
+    public double[]? Values
+    {
+        get => (double[]?)GetValue(ValuesProperty);
+        set => SetValue(ValuesProperty, value);
+    }
+
+    protected override void OnRender(DrawingContext dc)
+    {
+        double w = ActualWidth, h = ActualHeight;
+        if (w < 2 || h < 2) return;
+
+        var values = Values;
+        if (values is null || values.Length == 0) return;
+
+        int n = Math.Min(values.Length, 14);
+        double max = 40;
+        for (int i = 0; i < n; i++)
+            if (!double.IsNaN(values[i])) max = Math.Max(max, values[i]);
+
+        double step = w / n;
+        double barW = Math.Max(1, step - 1);
+
+        for (int i = 0; i < n; i++)
+        {
+            double v = values[values.Length - n + i];
+            double x = i * step;
+
+            if (double.IsNaN(v))
+            {
+                dc.DrawRectangle(FailBrush, null, new Rect(x, 0, barW, h));
+                continue;
+            }
+
+            double frac = Math.Max(0.10, Math.Min(1.0, v / max));
+            var brush = Frozen(NetMirrorGraph.Hsl(110 - Math.Min(1.0, v / 100.0) * 110, 0.55, 0.58));
+            dc.DrawRectangle(brush, null, new Rect(x, h - frac * h, barW, frac * h));
+        }
+    }
+
+    private static SolidColorBrush Frozen(Color c)
+    {
+        var b = new SolidColorBrush(c);
+        b.Freeze();
+        return b;
+    }
+}

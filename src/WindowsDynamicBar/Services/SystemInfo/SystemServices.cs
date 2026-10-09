@@ -242,7 +242,7 @@ public sealed class NetworkService : IDisposable
         }
     }
 
-    private static int? QueryWifiRssi()
+    internal static int? QueryWifiRssi()
     {
         // Real RSSI via wlanapi.dll (wlan_intf_opcode_rssi, dBm). null = unknown —
         // never fabricate a signal level.

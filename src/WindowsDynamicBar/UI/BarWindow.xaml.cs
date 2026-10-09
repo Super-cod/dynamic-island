@@ -114,6 +114,7 @@ public partial class BarWindow : Window, IDisposable
     private double _winW = 520;
     private int _gpuIndex;
     private TelemetrySnapshot? _telemetry;
+    private NetworkMonitor? _netMonitor;
 
     // ---- clock ----
     private readonly DispatcherTimer _clockTimer = new() { Interval = TimeSpan.FromSeconds(1) };
@@ -139,11 +140,13 @@ public partial class BarWindow : Window, IDisposable
         HeaderArt.Clip = new RectangleGeometry(new Rect(0, 0, 34, 34), 17, 17);
         OrbDisc.ReduceMotion = _cfg.ReduceMotion;
         DetailPanelComponent.ReduceMotion = _cfg.ReduceMotion;
+        NetPanelComponent.ReduceMotion = _cfg.ReduceMotion;
 
         IconRow.MetricHovered += OnIconMetricHovered;
         IconRow.MetricUnhovered += OnIconMetricUnhovered;
         IconRow.MetricClicked += OnIconMetricClicked;
         DetailPanelComponent.GpuCycleRequested += OnGpuCycleRequested;
+        NetPanelComponent.TestToggleRequested += OnNetTestToggle;
         _collapseDelay.Tick += OnCollapseDelayTick;
 
         ProgressTrack.SizeChanged += (_, _) => SyncFills();
@@ -248,6 +251,7 @@ public partial class BarWindow : Window, IDisposable
         try { _idleCollapse.Stop(); } catch { }
         CancelDelays();
         _fadeCollapsed.Stop(); _fadeExpanded.Stop();
+        try { if (_netMonitor is not null) { _netMonitor.Updated -= OnNetUpdated; _netMonitor.Dispose(); _netMonitor = null; } } catch { }
         _anim.Dispose();
         try
         {
@@ -575,6 +579,7 @@ public partial class BarWindow : Window, IDisposable
         if (sameState && state == IslandVisualState.Detail)
         {
             IconRow.SetActive(metric);
+            SwitchPanel();
             UpdatePanelContent();
             AnimateIsland(IslandDetailW, MeasureIslandHeight());
             return;
@@ -671,27 +676,55 @@ public partial class BarWindow : Window, IDisposable
         Fade(IslandExpandedHost, 1, 160);
         if (withPanel)
         {
-            DetailPanelComponent.Visibility = Visibility.Visible;
-            DetailPanelComponent.IsHitTestVisible = true;
-            Fade(DetailPanelComponent, 1, 160);
+            EnsureNetMonitor();
+            _netMonitor?.Start();
+            SwitchPanel();
         }
         else
         {
             DetailPanelComponent.IsHitTestVisible = false;
+            NetPanelComponent.IsHitTestVisible = false;
             Fade(DetailPanelComponent, 0, 120,
                 () => { if (_islandState != IslandVisualState.Detail) DetailPanelComponent.Visibility = Visibility.Collapsed; });
+            Fade(NetPanelComponent, 0, 120,
+                () => { if (_islandState != IslandVisualState.Detail) NetPanelComponent.Visibility = Visibility.Collapsed; });
         }
         UpdateIslandContent();
+    }
+
+    /// <summary>Shows the panel matching the active metric (telemetry card or net card) and fades
+    /// the other one out. Only meaningful while the island is in its Detail state.</summary>
+    private UIElement ActivePanel =>
+        _activeMetric == IslandMetric.Net ? NetPanelComponent : DetailPanelComponent;
+
+    private void SwitchPanel()
+    {
+        var show = ActivePanel;
+        var hide = ReferenceEquals(show, NetPanelComponent) ? (UIElement)DetailPanelComponent : NetPanelComponent;
+
+        hide.IsHitTestVisible = false;
+        Fade(hide, 0, 120, () =>
+        {
+            if (!ReferenceEquals(ActivePanel, hide)) hide.Visibility = Visibility.Collapsed;
+        });
+
+        show.Visibility = Visibility.Visible;
+        show.IsHitTestVisible = true;
+        Fade(show, 1, 160);
     }
 
     private void HideIslandContent()
     {
         IconRow.SetActive(IslandMetric.None);
         DetailPanelComponent.IsHitTestVisible = false;
+        NetPanelComponent.IsHitTestVisible = false;
         Fade(IslandExpandedHost, 0, 120,
             () => { if (_islandState == IslandVisualState.Collapsed) IslandExpandedHost.Visibility = Visibility.Collapsed; });
         Fade(DetailPanelComponent, 0, 100,
             () => { if (_islandState == IslandVisualState.Collapsed) DetailPanelComponent.Visibility = Visibility.Collapsed; });
+        Fade(NetPanelComponent, 0, 100,
+            () => { if (_islandState == IslandVisualState.Collapsed) NetPanelComponent.Visibility = Visibility.Collapsed; });
+        _netMonitor?.Stop();
         CollapsedPanel.Visibility = Visibility.Visible;
         Fade(CollapsedPanel, 1, 160);
         UpdateIslandContent();
@@ -721,10 +754,69 @@ public partial class BarWindow : Window, IDisposable
         double ram = snap is not null && snap.Memory.Available ? snap.Memory.UsedPercent : -1;
         IconRow.UpdateValues(cpu, gpu, ram);
         IconRow.SetAvailability(cpu >= 0, gpu >= 0, ram >= 0);
+        UpdateNetIcon();
+    }
+
+    private void UpdateNetIcon()
+    {
+        var monitor = _netMonitor;
+        if (monitor is null) { IconRow.UpdateNet(-1, "\u2014"); return; }
+
+        var test = monitor.TestState;
+        bool running = test.Phase is NetTestPhase.Ping or NetTestPhase.Download or NetTestPhase.Upload;
+
+        if (running)
+            IconRow.UpdateNet(test.ProgressPercent, $"{Math.Round(test.ProgressPercent):F0}%");
+        else if (test.DownMbps is double down)
+            IconRow.UpdateNet(Math.Clamp(down / NetworkMonitor.GraphMaxMbps * 100, 0, 100), ShortRate(down));
+        else
+            IconRow.UpdateNet(-1, "\u2014");
+    }
+
+    private static string ShortRate(double mbps)
+        => mbps >= 1000 ? $"{mbps / 1000.0:F1}G" : $"{Math.Round(mbps):F0}M";
+
+    private void EnsureNetMonitor()
+    {
+        if (_netMonitor is not null) return;
+        _netMonitor = new NetworkMonitor(App.Settings);
+        _netMonitor.Updated += OnNetUpdated;
+        NetPanelComponent.ReduceMotion = _cfg.ReduceMotion;
+        _netMonitor.Start();
+    }
+
+    private void OnNetUpdated()
+    {
+        try
+        {
+            Dispatcher.BeginInvoke(() =>
+            {
+                if (IslandExpandedHost.Visibility != Visibility.Visible) return;
+                UpdateNetIcon();
+                if (_islandState == IslandVisualState.Detail && _activeMetric == IslandMetric.Net && _netMonitor is not null)
+                    NetPanelComponent.Render(_netMonitor);
+            });
+        }
+        catch { }
+    }
+
+    private void OnNetTestToggle()
+    {
+        if (_netMonitor is null) return;
+        if (_netMonitor.TestRunning) _netMonitor.CancelSpeedTest();
+        else _netMonitor.StartSpeedTest();
     }
 
     private void UpdatePanelContent()
     {
+        if (_activeMetric == IslandMetric.Net)
+        {
+            EnsureNetMonitor();
+            if (_netMonitor is not null) NetPanelComponent.Render(_netMonitor);
+            UpdateIconRowValues();
+            return;
+        }
+
         var snap = _telemetry;
         var tel = App.Telemetry;
         if (snap is null || tel is null)
@@ -1014,6 +1106,7 @@ public partial class BarWindow : Window, IDisposable
             _cfg.ReduceMotion = m.ReduceMotion;
             OrbDisc.ReduceMotion = m.ReduceMotion;
             DetailPanelComponent.ReduceMotion = m.ReduceMotion;
+            NetPanelComponent.ReduceMotion = m.ReduceMotion;
             _cfg.CollapseDelayMs = m.CollapseDelayMs;
             _cfg.HoverPreview = m.HoverPreview;
             _cfg.SystemMonitorInBar = m.SystemMonitorInBar;

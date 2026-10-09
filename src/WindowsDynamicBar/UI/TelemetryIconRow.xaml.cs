@@ -18,6 +18,7 @@ public partial class TelemetryIconRow : UserControl
     private bool _cpuAvail = true;
     private bool _gpuAvail = true;
     private bool _ramAvail = true;
+    private bool _netAvail = true;
 
     public TelemetryIconRow()
     {
@@ -27,6 +28,7 @@ public partial class TelemetryIconRow : UserControl
             new Icon(CpuCell, CpuBorder, CpuRing, CpuPct, IslandMetric.Cpu),
             new Icon(GpuCell, GpuBorder, GpuRing, GpuPct, IslandMetric.Gpu),
             new Icon(RamCell, RamBorder, RamRing, RamPct, IslandMetric.Ram),
+            new Icon(NetCell, NetBorder, NetRing, NetPct, IslandMetric.Net),
         };
         foreach (var ic in _icons)
         {
@@ -56,6 +58,14 @@ public partial class TelemetryIconRow : UserControl
         Apply(RamRing, RamPct, ram);
     }
 
+    /// <summary>Updates the Net gauge ring (0..100) and its small label (e.g. "42%", "187M", "—").</summary>
+    public void UpdateNet(double ringPercent, string label)
+    {
+        NetRing.Value = ringPercent < 0 ? -1 : Math.Clamp(ringPercent, 0, 100);
+        NetRing.RingColor = Color.FromRgb(0x6F, 0xA8, 0xDC);
+        NetPct.Text = label;
+    }
+
     public void SetAvailability(bool cpu, bool gpu, bool ram)
     {
         _cpuAvail = cpu;
@@ -64,6 +74,7 @@ public partial class TelemetryIconRow : UserControl
         ApplyAvail(CpuCell, CpuBorder, cpu);
         ApplyAvail(GpuCell, GpuBorder, gpu);
         ApplyAvail(RamCell, RamBorder, ram);
+        ApplyAvail(NetCell, NetBorder, _netAvail);
     }
 
     public void SetActive(IslandMetric metric)
@@ -77,6 +88,7 @@ public partial class TelemetryIconRow : UserControl
         IslandMetric.Cpu => _cpuAvail,
         IslandMetric.Gpu => _gpuAvail,
         IslandMetric.Ram => _ramAvail,
+        IslandMetric.Net => _netAvail,
         _ => false,
     };
 

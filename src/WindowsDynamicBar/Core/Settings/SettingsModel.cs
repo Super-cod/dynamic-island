@@ -59,7 +59,12 @@ public sealed class SettingsModel
     public bool FeatureUsb { get; set; } = true;
     public bool FeatureScreenshots { get; set; } = true;
     public bool CollapsedMediaArt { get; set; } = true;
-    public bool SystemMonitorInBar { get; set; } = false;  // show CPU/RAM in collapsed bar
+    public bool SystemMonitorInBar { get; set; } = false;
+
+    // ---- Net panel daily transfer totals (persisted so "today" survives restarts) ----
+    public string NetDailyDate { get; set; } = "";
+    public long NetDailyRxBytes { get; set; }
+    public long NetDailyTxBytes { get; set; }  // show CPU/RAM in collapsed bar
 
     // ---- Privacy ----
     public bool ClipboardMonitoring { get; set; } = false;
