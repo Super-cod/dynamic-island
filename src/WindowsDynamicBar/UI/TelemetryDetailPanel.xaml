@@ -11,27 +11,35 @@
                 Margin="0"
                 BorderBrush="#8AB478" BorderThickness="1" CornerRadius="12"
                 Background="#FF000000">
-            <Grid Margin="16">
+            <Grid Margin="10">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="190" />
+                    <ColumnDefinition Width="240" />
                 </Grid.ColumnDefinitions>
 
-                <!-- graph column: reduced-height graph (~60% of the former full height) with the process list below -->
+                <!-- graph column: compact graph with the process list below -->
                 <Grid Grid.Column="0">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
                     </Grid.RowDefinitions>
 
-                    <Border Grid.Row="0" Height="85" CornerRadius="4" ClipToBounds="True">
+                    <Border Grid.Row="0" Height="40" CornerRadius="4" ClipToBounds="True">
                         <local:DotMatrixGraph x:Name="Graph" />
                     </Border>
 
-                    <StackPanel x:Name="ProcsHost" Grid.Row="1" Margin="0,5,0,0" />
+                    <StackPanel x:Name="ProcsHost" Grid.Row="1" Margin="0,4,0,0" />
                 </Grid>
 
-                <StackPanel x:Name="StatsCol" Grid.Column="1" Margin="14,0,0,0" VerticalAlignment="Top" />
+                <!-- stats: two balanced sub-columns so the panel stays short like the island -->
+                <Grid Grid.Column="1" Margin="12,0,0,0" VerticalAlignment="Top">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel x:Name="StatsCol0" />
+                    <StackPanel x:Name="StatsCol1" Grid.Column="1" Margin="10,0,0,0" />
+                </Grid>
             </Grid>
         </Border>
 

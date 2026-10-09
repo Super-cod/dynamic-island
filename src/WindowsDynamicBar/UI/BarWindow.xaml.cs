@@ -570,12 +570,13 @@ public partial class BarWindow : Window, IDisposable
         _activeMetric = metric;
         _collapseDelay.Stop();
 
-        // Switching metric while a panel is already open: refresh content and re-fit the height.
+        // Switching metric while a panel is already open: refresh content (height never changes
+        // once enlarged - the panel rides inside the expanded island and only the width extends).
         if (sameState && state == IslandVisualState.Detail)
         {
             IconRow.SetActive(metric);
             UpdatePanelContent();
-            AnimateIsland(IslandDetailW, MeasureIslandHeight(withPanel: true));
+            AnimateIsland(IslandDetailW, MeasureIslandHeight());
             return;
         }
 
@@ -591,7 +592,7 @@ public partial class BarWindow : Window, IDisposable
             case IslandVisualState.Expanded:
                 EnsureTelemetry();
                 ShowIslandContent(withPanel: false);
-                AnimateIsland(IslandExpandedW, MeasureIslandHeight(withPanel: false));
+                AnimateIsland(IslandExpandedW, MeasureIslandHeight());
                 MorphDisc(DiscExpanded);
                 break;
 
@@ -600,7 +601,7 @@ public partial class BarWindow : Window, IDisposable
                 ShowIslandContent(withPanel: true);
                 IconRow.SetActive(metric);
                 UpdatePanelContent();
-                AnimateIsland(IslandDetailW, MeasureIslandHeight(withPanel: true));
+                AnimateIsland(IslandDetailW, MeasureIslandHeight());
                 MorphDisc(DiscExpanded);
                 break;
         }
@@ -618,10 +619,11 @@ public partial class BarWindow : Window, IDisposable
         _anim.Animate("h", _currentH, h, ApplyH);
     }
 
-    /// <summary>Height of the island derived from its actual content: the tallest visible block
-    /// (media cluster, disc, or detail panel) plus symmetric vertical padding, clamped to the
-    /// allowed range. This keeps the pill hug its content instead of a hardcoded height.</summary>
-    private double MeasureIslandHeight(bool withPanel)
+    /// <summary>Height of the island derived from its hover content: the tallest of the media
+    /// cluster or the disc, plus symmetric vertical padding, clamped to the allowed range. The
+    /// detail panel never grows the island - it rides inside this height so opening a metric only
+    /// extends the island's right border.</summary>
+    private double MeasureIslandHeight()
     {
         double content = DiscExpanded;
 
@@ -631,20 +633,14 @@ public partial class BarWindow : Window, IDisposable
             content = Math.Max(content, IslandExpandedHost.DesiredSize.Height);
         }
 
-        if (withPanel && DetailPanelComponent.Visibility == Visibility.Visible)
-        {
-            DetailPanelComponent.Measure(new Size(IslandDetailW, double.PositiveInfinity));
-            content = Math.Max(content, DetailPanelComponent.DesiredSize.Height);
-        }
-
         return Math.Clamp(content + IslandPadV * 2, MinIslandH, MaxPillH);
     }
 
-    /// <summary>Re-fit the island height after telemetry updated the panel, animating only when
-    /// the content-driven target actually changed (avoids per-tick churn).</summary>
+    /// <summary>Re-fit the island height after content changes, animating only when the
+    /// content-driven target actually changed (avoids per-tick churn).</summary>
     private void FitIslandHeight()
     {
-        double target = MeasureIslandHeight(withPanel: true);
+        double target = MeasureIslandHeight();
         if (Math.Abs(target - _currentH) > 0.5)
             AnimateIsland(IslandDetailW, target);
     }

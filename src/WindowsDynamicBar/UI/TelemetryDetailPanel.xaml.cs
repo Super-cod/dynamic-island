@@ -155,7 +155,7 @@ public partial class TelemetryDetailPanel : UserControl
 
     private static FrameworkElement ProcRow(string name, double percent, string value)
     {
-        var grid = new Grid { Height = 14, Margin = new Thickness(0, 0, 0, 1) };
+        var grid = new Grid { Height = 13, Margin = new Thickness(0, 0, 0, 1) };
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(92) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(46) });
@@ -164,7 +164,7 @@ public partial class TelemetryDetailPanel : UserControl
         {
             Text = name,
             FontFamily = new FontFamily(Mono),
-            FontSize = 10.5,
+            FontSize = 10,
             Foreground = ValueBrush,
             VerticalAlignment = VerticalAlignment.Center,
             TextTrimming = TextTrimming.CharacterEllipsis,
@@ -187,7 +187,7 @@ public partial class TelemetryDetailPanel : UserControl
         {
             Text = value,
             FontFamily = new FontFamily(Mono),
-            FontSize = 10.5,
+            FontSize = 10,
             Foreground = ValueBrush,
             HorizontalAlignment = HorizontalAlignment.Right,
             VerticalAlignment = VerticalAlignment.Center,
@@ -207,41 +207,57 @@ public partial class TelemetryDetailPanel : UserControl
 
     // ------------------------------------------------------------------ stats column
 
+    private const double StatRowHeight = 13;
+    private const double StatFontSize = 9.5;
+    private const double StatLabelWidth = 34;
+    private double _col0H, _col1H;
+
     private void Clear()
     {
-        StatsCol.Children.Clear();
+        StatsCol0.Children.Clear();
+        StatsCol1.Children.Clear();
+        _col0H = 0;
+        _col1H = 0;
         ProcsHost.Children.Clear();
         TitleTag.MouseLeftButtonDown -= OnTitleTagClick;
         TitleTag.MouseLeftButtonDown += OnTitleTagClick;
     }
 
+    /// <summary>Append a stat to whichever sub-column is currently shorter, keeping the panel
+    /// as short as possible while showing the same rows.</summary>
+    private void Push(FrameworkElement el, double height)
+    {
+        if (_col0H <= _col1H) { StatsCol0.Children.Add(el); _col0H += height; }
+        else { StatsCol1.Children.Add(el); _col1H += height; }
+    }
+
     private void AddName(string name)
-        => StatsCol.Children.Add(new TextBlock
+        => Push(new TextBlock
         {
             Text = name,
             FontFamily = new FontFamily(Mono),
-            FontSize = 10.5,
+            FontSize = StatFontSize,
             Foreground = NameBrush,
             TextTrimming = TextTrimming.CharacterEllipsis,
             Margin = new Thickness(0, 0, 0, 3),
-        });
+        }, StatRowHeight + 3);
 
     private void AddCaption(string text)
-        => StatsCol.Children.Add(new TextBlock
+        => Push(new TextBlock
         {
             Text = text,
             FontFamily = new FontFamily(Mono),
-            FontSize = 10,
+            FontSize = StatFontSize,
             Foreground = LabelBrush,
             Margin = new Thickness(0, 2, 0, 0),
-        });
+        }, StatRowHeight + 2);
 
-    private void AddSeparator() => StatsCol.Children.Add(new Border { Height = 6 });
+    private void AddSeparator() => Push(new Border { Height = 4 }, 4);
 
     private void AddBar(string label, double percent, string value)
         => AddRow(label, new DotBar
         {
-            Height = 7,
+            Height = 6,
             VerticalAlignment = VerticalAlignment.Center,
             // DotBar.Value is a 0..1 fill fraction; -1 = no data (ghost ticks only).
             Value = percent >= 0 ? Math.Clamp(percent, 0, 100) / 100.0 : -1,
@@ -253,7 +269,7 @@ public partial class TelemetryDetailPanel : UserControl
         {
             Text = value,
             FontFamily = new FontFamily(Mono),
-            FontSize = 10.5,
+            FontSize = StatFontSize,
             Foreground = ValueBrush,
             VerticalAlignment = VerticalAlignment.Center,
             TextTrimming = TextTrimming.CharacterEllipsis,
@@ -261,26 +277,27 @@ public partial class TelemetryDetailPanel : UserControl
 
     private void AddHeatmap(IReadOnlyList<double> cores)
     {
-        var grid = new UniformGrid { Columns = 8, Margin = new Thickness(0, 4, 0, 0) };
+        const int columns = 8;
+        var grid = new UniformGrid { Columns = columns, Margin = new Thickness(0, 3, 0, 0) };
         for (int i = 0; i < cores.Count; i++)
         {
             double v = Math.Clamp(cores[i], 0, 100);
             grid.Children.Add(new Border
             {
-                Height = 10,
+                Height = 8,
                 Margin = new Thickness(1),
                 CornerRadius = new CornerRadius(1),
                 Background = new SolidColorBrush(DotBar.ValueColor(v)),
                 ToolTip = $"core {i}: {Math.Round(v)}%",
             });
         }
-        StatsCol.Children.Add(grid);
+        Push(grid, Math.Ceiling(cores.Count / (double)columns) * 10 + 3);
     }
 
     private void AddRow(string label, FrameworkElement middle, string? value)
     {
-        var grid = new Grid { Height = 15, Margin = new Thickness(0, 0, 0, 1) };
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(42) });
+        var grid = new Grid { Height = StatRowHeight, Margin = new Thickness(0, 0, 0, 1) };
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(StatLabelWidth) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
@@ -288,7 +305,7 @@ public partial class TelemetryDetailPanel : UserControl
         {
             Text = label,
             FontFamily = new FontFamily(Mono),
-            FontSize = 10.5,
+            FontSize = StatFontSize,
             Foreground = LabelBrush,
             VerticalAlignment = VerticalAlignment.Center,
         };
@@ -296,7 +313,7 @@ public partial class TelemetryDetailPanel : UserControl
         grid.Children.Add(lbl);
 
         Grid.SetColumn(middle, 1);
-        middle.Margin = new Thickness(0, 0, 6, 0);
+        middle.Margin = new Thickness(0, 0, 5, 0);
         grid.Children.Add(middle);
 
         if (value is not null)
@@ -305,7 +322,7 @@ public partial class TelemetryDetailPanel : UserControl
             {
                 Text = value,
                 FontFamily = new FontFamily(Mono),
-                FontSize = 10.5,
+                FontSize = StatFontSize,
                 Foreground = ValueBrush,
                 VerticalAlignment = VerticalAlignment.Center,
             };
@@ -313,7 +330,7 @@ public partial class TelemetryDetailPanel : UserControl
             grid.Children.Add(val);
         }
 
-        StatsCol.Children.Add(grid);
+        Push(grid, StatRowHeight + 1);
     }
 
     private static SolidColorBrush Frozen(Color c)
