@@ -7,14 +7,14 @@
     <!-- btop / Hyprland style boxed panel: thin green rounded border with a title tag on the
          top edge; a main graph column (single graph + process list) and a stats column. -->
     <Grid>
-        <Border x:Name="Frame" Width="470" HorizontalAlignment="Right" VerticalAlignment="Top"
+        <Border x:Name="Frame" Width="494" HorizontalAlignment="Right" VerticalAlignment="Top"
                 Margin="0"
                 BorderBrush="#8AB478" BorderThickness="1" CornerRadius="12"
                 Background="#FF000000">
-            <Grid Margin="10">
+            <Grid Margin="11">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="240" />
+                    <ColumnDefinition Width="252" />
                 </Grid.ColumnDefinitions>
 
                 <!-- graph column: compact graph with the process list below -->
@@ -24,7 +24,7 @@
                         <RowDefinition Height="Auto" />
                     </Grid.RowDefinitions>
 
-                    <Border Grid.Row="0" Height="40" CornerRadius="4" ClipToBounds="True">
+                    <Border Grid.Row="0" Height="42" CornerRadius="4" ClipToBounds="True">
                         <local:DotMatrixGraph x:Name="Graph" />
                     </Border>
 
@@ -32,23 +32,23 @@
                 </Grid>
 
                 <!-- stats: two balanced sub-columns so the panel stays short like the island -->
-                <Grid Grid.Column="1" Margin="12,0,0,0" VerticalAlignment="Top">
+                <Grid Grid.Column="1" Margin="13,0,0,0" VerticalAlignment="Top">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="*" />
                     </Grid.ColumnDefinitions>
                     <StackPanel x:Name="StatsCol0" />
-                    <StackPanel x:Name="StatsCol1" Grid.Column="1" Margin="10,0,0,0" />
+                    <StackPanel x:Name="StatsCol1" Grid.Column="1" Margin="11,0,0,0" />
                 </Grid>
             </Grid>
         </Border>
 
         <!-- title tag:  ┤cpu├┤42%├┤peak 71%├  -->
-        <Border x:Name="TitleTag" HorizontalAlignment="Right" VerticalAlignment="Top"
-                Margin="0,0,28,0" Background="#FF000000" Padding="6,0">
+        <Border x:Name="TitleTag" HorizontalAlignment="Left" VerticalAlignment="Top"
+                Margin="29,0,0,0" Background="#FF000000" Padding="6,0">
             <TextBlock x:Name="TitleText"
                        FontFamily="Cascadia Mono, Consolas, Courier New"
-                       FontSize="11" />
+                       FontSize="11.5" />
         </Border>
     </Grid>
 </UserControl>

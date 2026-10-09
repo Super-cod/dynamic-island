@@ -35,12 +35,12 @@ public partial class BarWindow : Window, IDisposable
     private const double MaxPillH = 280;
 
     // ---- island geometry (DIPs) : matches the reference demo ----
-    private const double IslandExpandedW = 548;    // s2
-    private const double IslandDetailW = 1030;     // s3 (wider than s2)
-    private const double DiscCollapsed = 26;
-    private const double DiscExpanded = 112;
-    private const double IslandPadV = 12;          // symmetric top/bottom padding inside the island
-    private const double MinIslandH = 60;          // smallest island height (empty/placeholder content)
+    private const double IslandExpandedW = 575;    // s2
+    private const double IslandDetailW = 1082;     // s3 (wider than s2)
+    private const double DiscCollapsed = 27;
+    private const double DiscExpanded = 118;
+    private const double IslandPadV = 13;          // symmetric top/bottom padding inside the island
+    private const double MinIslandH = 63;          // smallest island height (empty/placeholder content)
 
     // ---- icon glyphs (Segoe Fluent Icons; verified against font render) ----
     private const string IcDot = "\u25CF";

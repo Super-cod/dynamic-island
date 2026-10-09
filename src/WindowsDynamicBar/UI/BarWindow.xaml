@@ -361,49 +361,49 @@
 
                 <!-- ============ ISLAND EXPANDED (.full: music + icon grid, left:150, centred) ============ -->
                 <Grid x:Name="IslandExpandedHost" Panel.ZIndex="10" HorizontalAlignment="Left" VerticalAlignment="Center"
-                      Margin="150,0,0,0" Visibility="Collapsed" Opacity="0">
+                      Margin="158,0,0,0" Visibility="Collapsed" Opacity="0">
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="200" />
+                        <ColumnDefinition Width="210" />
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
 
-                    <StackPanel x:Name="MediaInfoStack" Grid.Column="0" Width="200" VerticalAlignment="Center">
-                        <TextBlock x:Name="HoverTitle" Style="{StaticResource WdbTitleText}" FontSize="16" Text="" />
-                        <TextBlock x:Name="HoverArtist" Style="{StaticResource WdbSubText}" Text="" Margin="0,2,0,14" />
+                    <StackPanel x:Name="MediaInfoStack" Grid.Column="0" Width="210" VerticalAlignment="Center">
+                        <TextBlock x:Name="HoverTitle" Style="{StaticResource WdbTitleText}" FontSize="17" Text="" />
+                        <TextBlock x:Name="HoverArtist" Style="{StaticResource WdbSubText}" Text="" Margin="0,2,0,15" />
                         <Grid x:Name="HoverProgressTrack" Height="4" VerticalAlignment="Center">
                             <Border Height="4" CornerRadius="2" Background="{DynamicResource WdbTrackBrush}" />
                             <Border x:Name="HoverProgressFill" Height="4" CornerRadius="2"
                                     HorizontalAlignment="Left" Width="0" Background="{DynamicResource WdbTextBrush}" />
                         </Grid>
-                        <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
-                            <Button Style="{StaticResource WdbIconButton}" Width="28" Height="28"
+                        <StackPanel Orientation="Horizontal" Margin="0,13,0,0">
+                            <Button Style="{StaticResource WdbIconButton}" Width="30" Height="30"
                                     Click="OnPrevClick" ToolTip="Previous">
-                                <TextBlock Style="{StaticResource WdbGlyph}" FontSize="12" Text="&#xE892;" />
+                                <TextBlock Style="{StaticResource WdbGlyph}" FontSize="12.5" Text="&#xE892;" />
                             </Button>
                             <Button x:Name="HoverPlayButton" Style="{StaticResource WdbIconButton}"
-                                    Width="28" Height="28" Margin="6,0,0,0"
+                                    Width="30" Height="30" Margin="6,0,0,0"
                                     Click="OnPlayPauseClick" ToolTip="Play / Pause">
                                 <TextBlock x:Name="HoverPlayGlyph" Style="{StaticResource WdbGlyph}"
-                                           FontSize="12" Text="&#xE769;" />
+                                           FontSize="12.5" Text="&#xE769;" />
                             </Button>
-                            <Button Style="{StaticResource WdbIconButton}" Width="28" Height="28"
+                            <Button Style="{StaticResource WdbIconButton}" Width="30" Height="30"
                                     Margin="6,0,0,0" Click="OnNextClick" ToolTip="Next">
-                                <TextBlock Style="{StaticResource WdbGlyph}" FontSize="12" Text="&#xE893;" />
+                                <TextBlock Style="{StaticResource WdbGlyph}" FontSize="12.5" Text="&#xE893;" />
                             </Button>
-                            <local:Equalizer x:Name="HoverEq" Width="150" Height="26"
+                            <local:Equalizer x:Name="HoverEq" Width="158" Height="27"
                                              VerticalAlignment="Center" Margin="6,0,0,0" />
                         </StackPanel>
                     </StackPanel>
 
                     <local:TelemetryIconRow x:Name="IconRow" Grid.Column="1"
                                             HorizontalAlignment="Left" VerticalAlignment="Center"
-                                            Margin="22,0,0,0" />
+                                            Margin="23,0,0,0" />
                 </Grid>
 
                 <!-- ============ THE (single) MORPHING DISC ============ -->
-                <Border x:Name="OrbHost" Panel.ZIndex="10" Width="26" Height="26" CornerRadius="13"
+                <Border x:Name="OrbHost" Panel.ZIndex="10" Width="27" Height="27" CornerRadius="13.5"
                         Background="{DynamicResource WdbDimBrush}"
-                        HorizontalAlignment="Left" VerticalAlignment="Center" Margin="10,0,0,0">
+                        HorizontalAlignment="Left" VerticalAlignment="Center" Margin="10.5,0,0,0">
                     <Grid>
                         <media:MediaDisc x:Name="OrbDisc" Diameter="{Binding ActualWidth, ElementName=OrbHost}"
                                          Visibility="Collapsed" />
@@ -415,7 +415,8 @@
 
                 <!-- ============ RIGHT DETAIL PANEL (boxed card, inset 16px) ============ -->
                 <local:TelemetryDetailPanel x:Name="DetailPanelComponent"
-                                            Panel.ZIndex="1" HorizontalAlignment="Right" Width="486"
+                                            Panel.ZIndex="1" HorizontalAlignment="Right" Width="494"
+                                            Margin="0,0,16,0"
                                             VerticalAlignment="Center"
                                             Visibility="Collapsed" Opacity="0" IsHitTestVisible="False" />
 

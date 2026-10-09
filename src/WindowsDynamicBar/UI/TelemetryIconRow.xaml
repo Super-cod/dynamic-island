@@ -5,77 +5,77 @@
              Background="Transparent"
              UseLayoutRounding="True">
 
-    <!-- 3x2 grid of 44px circles: CPU/GPU/RAM live gauges + Disk/Net/Temp placeholders (disabled). -->
-    <WrapPanel Width="162" HorizontalAlignment="Center" VerticalAlignment="Center">
+    <!-- 3x2 grid of 46px circles: CPU/GPU/RAM live gauges + Disk/Net/Temp placeholders (disabled). -->
+    <WrapPanel Width="170" HorizontalAlignment="Center" VerticalAlignment="Center">
 
-        <Grid x:Name="CpuCell" Width="44" Height="44" Margin="0,0,10,10" Background="Transparent" Cursor="Hand">
-            <local:RingGauge x:Name="CpuRing" Thickness="2.5" />
-            <Border x:Name="CpuBorder" Width="36" Height="36" CornerRadius="18"
+        <Grid x:Name="CpuCell" Width="46" Height="46" Margin="0,0,10.5,10.5" Background="Transparent" Cursor="Hand">
+            <local:RingGauge x:Name="CpuRing" Thickness="2.6" />
+            <Border x:Name="CpuBorder" Width="38" Height="38" CornerRadius="19"
                     HorizontalAlignment="Center" VerticalAlignment="Center"
                     Background="{DynamicResource WdbDimBrush}"
                     BorderBrush="{DynamicResource WdbHairlineBrush}" BorderThickness="1">
                 <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
-                    <TextBlock Text="CPU" FontFamily="Cascadia Mono, Consolas" FontSize="8.5"
+                    <TextBlock Text="CPU" FontFamily="Cascadia Mono, Consolas" FontSize="9"
                                Foreground="{DynamicResource WdbTextMutedBrush}" HorizontalAlignment="Center" />
                     <TextBlock x:Name="CpuPct" Text="…" FontFamily="Cascadia Mono, Consolas"
-                               FontSize="8" Foreground="{DynamicResource WdbTextBrush}" HorizontalAlignment="Center" />
+                               FontSize="8.5" Foreground="{DynamicResource WdbTextBrush}" HorizontalAlignment="Center" />
                 </StackPanel>
             </Border>
         </Grid>
 
-        <Grid x:Name="GpuCell" Width="44" Height="44" Margin="0,0,10,10" Background="Transparent" Cursor="Hand">
-            <local:RingGauge x:Name="GpuRing" Thickness="2.5" />
-            <Border x:Name="GpuBorder" Width="36" Height="36" CornerRadius="18"
+        <Grid x:Name="GpuCell" Width="46" Height="46" Margin="0,0,10.5,10.5" Background="Transparent" Cursor="Hand">
+            <local:RingGauge x:Name="GpuRing" Thickness="2.6" />
+            <Border x:Name="GpuBorder" Width="38" Height="38" CornerRadius="19"
                     HorizontalAlignment="Center" VerticalAlignment="Center"
                     Background="{DynamicResource WdbDimBrush}"
                     BorderBrush="{DynamicResource WdbHairlineBrush}" BorderThickness="1">
                 <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
-                    <TextBlock Text="GPU" FontFamily="Cascadia Mono, Consolas" FontSize="8.5"
+                    <TextBlock Text="GPU" FontFamily="Cascadia Mono, Consolas" FontSize="9"
                                Foreground="{DynamicResource WdbTextMutedBrush}" HorizontalAlignment="Center" />
                     <TextBlock x:Name="GpuPct" Text="…" FontFamily="Cascadia Mono, Consolas"
-                               FontSize="8" Foreground="{DynamicResource WdbTextBrush}" HorizontalAlignment="Center" />
+                               FontSize="8.5" Foreground="{DynamicResource WdbTextBrush}" HorizontalAlignment="Center" />
                 </StackPanel>
             </Border>
         </Grid>
 
-        <Grid x:Name="RamCell" Width="44" Height="44" Margin="0,0,10,10" Background="Transparent" Cursor="Hand">
-            <local:RingGauge x:Name="RamRing" Thickness="2.5" />
-            <Border x:Name="RamBorder" Width="36" Height="36" CornerRadius="18"
+        <Grid x:Name="RamCell" Width="46" Height="46" Margin="0,0,10.5,10.5" Background="Transparent" Cursor="Hand">
+            <local:RingGauge x:Name="RamRing" Thickness="2.6" />
+            <Border x:Name="RamBorder" Width="38" Height="38" CornerRadius="19"
                     HorizontalAlignment="Center" VerticalAlignment="Center"
                     Background="{DynamicResource WdbDimBrush}"
                     BorderBrush="{DynamicResource WdbHairlineBrush}" BorderThickness="1">
                 <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
-                    <TextBlock Text="RAM" FontFamily="Cascadia Mono, Consolas" FontSize="8.5"
+                    <TextBlock Text="RAM" FontFamily="Cascadia Mono, Consolas" FontSize="9"
                                Foreground="{DynamicResource WdbTextMutedBrush}" HorizontalAlignment="Center" />
                     <TextBlock x:Name="RamPct" Text="…" FontFamily="Cascadia Mono, Consolas"
-                               FontSize="8" Foreground="{DynamicResource WdbTextBrush}" HorizontalAlignment="Center" />
+                               FontSize="8.5" Foreground="{DynamicResource WdbTextBrush}" HorizontalAlignment="Center" />
                 </StackPanel>
             </Border>
         </Grid>
 
-        <Border Width="44" Height="44" CornerRadius="22" Margin="0,0,10,10"
+        <Border Width="46" Height="46" CornerRadius="23" Margin="0,0,10.5,10.5"
                 Background="{DynamicResource WdbDimBrush}"
                 BorderBrush="{DynamicResource WdbHairlineBrush}" BorderThickness="1"
                 Opacity="0.35" ToolTip="Not set up yet">
-            <TextBlock Text="Disk" FontFamily="Cascadia Mono, Consolas" FontSize="8.5"
+            <TextBlock Text="Disk" FontFamily="Cascadia Mono, Consolas" FontSize="9"
                        Foreground="{DynamicResource WdbTextMutedBrush}"
                        HorizontalAlignment="Center" VerticalAlignment="Center" />
         </Border>
 
-        <Border Width="44" Height="44" CornerRadius="22" Margin="0,0,10,10"
+        <Border Width="46" Height="46" CornerRadius="23" Margin="0,0,10.5,10.5"
                 Background="{DynamicResource WdbDimBrush}"
                 BorderBrush="{DynamicResource WdbHairlineBrush}" BorderThickness="1"
                 Opacity="0.35" ToolTip="Not set up yet">
-            <TextBlock Text="Net" FontFamily="Cascadia Mono, Consolas" FontSize="8.5"
+            <TextBlock Text="Net" FontFamily="Cascadia Mono, Consolas" FontSize="9"
                        Foreground="{DynamicResource WdbTextMutedBrush}"
                        HorizontalAlignment="Center" VerticalAlignment="Center" />
         </Border>
 
-        <Border Width="44" Height="44" CornerRadius="22" Margin="0,0,10,0"
+        <Border Width="46" Height="46" CornerRadius="23" Margin="0,0,10.5,0"
                 Background="{DynamicResource WdbDimBrush}"
                 BorderBrush="{DynamicResource WdbHairlineBrush}" BorderThickness="1"
                 Opacity="0.35" ToolTip="Not set up yet">
-            <TextBlock Text="Temp" FontFamily="Cascadia Mono, Consolas" FontSize="8.5"
+            <TextBlock Text="Temp" FontFamily="Cascadia Mono, Consolas" FontSize="9"
                        Foreground="{DynamicResource WdbTextMutedBrush}"
                        HorizontalAlignment="Center" VerticalAlignment="Center" />
         </Border>

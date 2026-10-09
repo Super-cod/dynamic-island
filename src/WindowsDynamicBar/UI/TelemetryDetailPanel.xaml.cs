@@ -155,16 +155,16 @@ public partial class TelemetryDetailPanel : UserControl
 
     private static FrameworkElement ProcRow(string name, double percent, string value)
     {
-        var grid = new Grid { Height = 13, Margin = new Thickness(0, 0, 0, 1) };
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(92) });
+        var grid = new Grid { Height = 14, Margin = new Thickness(0, 0, 0, 1) };
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(97) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(46) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(48) });
 
         var lbl = new TextBlock
         {
             Text = name,
             FontFamily = new FontFamily(Mono),
-            FontSize = 10,
+            FontSize = 10.5,
             Foreground = ValueBrush,
             VerticalAlignment = VerticalAlignment.Center,
             TextTrimming = TextTrimming.CharacterEllipsis,
@@ -187,7 +187,7 @@ public partial class TelemetryDetailPanel : UserControl
         {
             Text = value,
             FontFamily = new FontFamily(Mono),
-            FontSize = 10,
+            FontSize = 10.5,
             Foreground = ValueBrush,
             HorizontalAlignment = HorizontalAlignment.Right,
             VerticalAlignment = VerticalAlignment.Center,
@@ -207,9 +207,9 @@ public partial class TelemetryDetailPanel : UserControl
 
     // ------------------------------------------------------------------ stats column
 
-    private const double StatRowHeight = 13;
-    private const double StatFontSize = 9.5;
-    private const double StatLabelWidth = 34;
+    private const double StatRowHeight = 14;
+    private const double StatFontSize = 10;
+    private const double StatLabelWidth = 36;
     private double _col0H, _col1H;
 
     private void Clear()
