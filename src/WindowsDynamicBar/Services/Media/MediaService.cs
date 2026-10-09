@@ -128,14 +128,21 @@ public sealed class MediaService : IDisposable
             var timeline = _current.GetTimelineProperties();
             bool playing = playback.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing;
 
-            // Artwork: re-fetch only when title/app changes (cheap on repeat).
+            // Artwork: fetch when title/app changes, and keep retrying while it is still
+            // missing so a late-arriving thumbnail is picked up (many apps publish metadata
+            // before the artwork is ready). Once we have art for a key we don't re-fetch.
             byte[]? art = _lastArtwork;
             string artKey = $"{props.Title}|{_current.SourceAppUserModelId}";
-            if (artKey != _lastArtworkKey)
+            bool keyChanged = artKey != _lastArtworkKey;
+            if (keyChanged || art is null)
             {
-                art = await TryGetArtworkAsync();
-                _lastArtwork = art;
-                _lastArtworkKey = artKey;
+                var fetched = await TryGetArtworkAsync();
+                if (fetched is not null || keyChanged)
+                {
+                    _lastArtwork = fetched;
+                    _lastArtworkKey = artKey;
+                }
+                art = _lastArtwork;
             }
 
             var duration = timeline.EndTime - timeline.StartTime;
