@@ -5,12 +5,15 @@ using WindowsDynamicBar.Core.Events;
 using WindowsDynamicBar.Core.Logging;
 using WindowsDynamicBar.Core.Settings;
 using WindowsDynamicBar.Services.Audio;
+using WindowsDynamicBar.Services.Clipboard;
 using WindowsDynamicBar.Services.Media;
 using WindowsDynamicBar.Services.Notifications;
 using WindowsDynamicBar.Services.Privacy;
 using WindowsDynamicBar.Services.SystemInfo;
 using WindowsDynamicBar.Services.SystemMonitor;
 using WindowsDynamicBar.Services.Timers;
+using WindowsDynamicBar.Services.Toggles;
+using WindowsDynamicBar.Services.Updates;
 using WindowsDynamicBar.UI;
 
 namespace WindowsDynamicBar;
@@ -42,6 +45,8 @@ public partial class App : System.Windows.Application
     public static SystemMonitorService SysMon { get; private set; } = null!;
     public static SystemTelemetryService Telemetry { get; private set; } = null!;
     public static NotificationListenerService Notifications { get; private set; } = null!;
+    public static QuickToggleService? Toggles { get; private set; }
+    public static ClipboardHistoryService? ClipHistory { get; private set; }
 
     public static BarWindow? Bar { get; set; }
     public static SettingsWindow? SettingsWnd { get; set; }
@@ -94,6 +99,13 @@ public partial class App : System.Windows.Application
         try { SysMon = new SystemMonitorService(Settings); } catch (Exception ex) { Log.Error("SysMon ctor", ex); }
         try { Telemetry = new SystemTelemetryService(Settings); } catch (Exception ex) { Log.Error("Telemetry ctor", ex); }
         try { Notifications = new NotificationListenerService(Bus, Settings); } catch (Exception ex) { Log.Error("Notifications ctor", ex); }
+        if (cfg.FeatureToggles)
+        {
+            try { Toggles = new QuickToggleService(Settings); } catch (Exception ex) { Log.Error("Toggles ctor", ex); }
+        }
+        try { ClipHistory = new ClipboardHistoryService(Settings, Dispatcher); } catch (Exception ex) { Log.Error("Clipboard history ctor", ex); }
+        if (cfg.FeatureClipboardHistory) StartServiceSafely(() => ClipHistory?.Start(), "clipboard history");
+        Settings.SettingsChanged += OnSettingsChangedForServices;
 
         // Bar window
         Bar = new BarWindow();
@@ -103,30 +115,79 @@ public partial class App : System.Windows.Application
 
         // Deferred starts (each isolated)
         StartServiceSafely(() => Volume?.Start(), "volume");
-        StartServiceSafely(() => Brightness?.Start(), "brightness");
-        StartServiceSafelyAsync(async () => await Media.StartAsync(), "media");
+        if (cfg.FeatureVolumeHud) StartServiceSafely(() => Brightness?.Start(), "brightness");
+        if (cfg.FeatureMedia) StartServiceSafelyAsync(async () => await Media.StartAsync(), "media");
         StartServiceSafely(() => Battery?.Start(), "battery");
         StartServiceSafely(() => Network?.Start(), "network");
         StartServiceSafely(() => Bluetooth?.Start(), "bluetooth");
         StartServiceSafely(() => Privacy?.Start(), "privacy");
         StartServiceSafely(() => Screenshots?.Start(), "screenshots");
         StartServiceSafely(() => Downloads?.Start(), "downloads");
-        StartServiceSafelyAsync(async () => await Notifications.StartAsync(), "notifications");
+        if (cfg.FeatureNotifications) StartServiceSafelyAsync(async () => await Notifications.StartAsync(), "notifications");
+        if (Toggles is not null) StartServiceSafelyAsync(() => Toggles.StartAsync(), "toggles");
+        StartServiceSafely(() => Timer?.RestoreFromState(), "timer restore");
 
         if (cfg.FeatureSystemMonitor)
             StartServiceSafely(() => SysMon?.Activate(), "sysmon");
 
         // First-run experience
-        if (!cfg.FirstRunCompleted)
+        if (!cfg.FirstRunCompleted) FirstRunWindow.ShowSingleton();
+
+        // A damaged settings file was moved aside: say so once.
+        if (Settings.LoadProblem is { } problem)
         {
-            var wizard = new FirstRunWindow();
-            wizard.Closed += (_, _) => Settings.Update(s => s.FirstRunCompleted = true);
-            wizard.Show();
+            Bus.Raise(BarEvent.Create(BarEventKind.Toast, "Settings were reset", problem,
+                priority: 95, displayDuration: TimeSpan.FromSeconds(10)));
+            Settings.ClearLoadProblem();
         }
 
         sw.Stop();
         Log.Info("Startup complete", ("ms", sw.ElapsedMilliseconds));
     }
+
+    /// <summary>Feature switches that start/stop whole services (an off feature loads nothing).</summary>
+    private static void OnSettingsChangedForServices(SettingsModel m)
+    {
+        var clip = ClipHistory;
+        if (clip is not null)
+        {
+            if (m.FeatureClipboardHistory && !clip.Enabled) clip.Start();
+            else if (!m.FeatureClipboardHistory && clip.Enabled) clip.Stop();
+            else if (clip.Enabled) clip.ApplySettings(m);
+        }
+
+        if (Media is not null)
+        {
+            if (m.FeatureMedia && !Media.IsRunning) StartServiceSafelyAsync(() => Media.StartAsync(), "media");
+            else if (!m.FeatureMedia && Media.IsRunning) Media.Stop();
+        }
+
+        if (Notifications is not null)
+        {
+            if (m.FeatureNotifications && !Notifications.IsRunning) StartServiceSafelyAsync(() => Notifications.StartAsync(), "notifications");
+            else if (!m.FeatureNotifications && Notifications.IsRunning) Notifications.Stop();
+        }
+
+        if (m.FeatureToggles && Toggles is null)
+        {
+            Toggles = new QuickToggleService(Settings);
+            StartServiceSafelyAsync(() => Toggles.StartAsync(), "toggles");
+            ServiceToggled?.Invoke();
+        }
+        else if (!m.FeatureToggles && Toggles is not null)
+        {
+            var t = Toggles;
+            Toggles = null;
+            ServiceToggled?.Invoke();
+            t.Dispose();
+        }
+    }
+
+    /// <summary>A service object was created or released (the bar re-hooks its events).</summary>
+    public static event Action? ServiceToggled;
+
+    /// <summary>"Check for updates" (About tab, tray). Returns a status line for the UI.</summary>
+    public static Task<string> CheckForUpdatesAsync(bool interactive) => Updater.CheckAsync(Settings.Current, Bus, interactive);
 
     public const string InfoVersion = "1.1.0";
     public const string AppName = "Windows Dynamic Bar";
@@ -171,12 +232,14 @@ public partial class App : System.Windows.Application
         if (_logReady)
         {
             Log.Info("Shutting down");
+            if (Settings is not null) Settings.SettingsChanged -= OnSettingsChangedForServices;
             try { Tray?.Dispose(); } catch { }
             try { Bar?.Dispose(); } catch { }
             foreach (IDisposable? svc in new IDisposable?[]
                      {
                          Media, Volume, Brightness, Battery, Network, Bluetooth, Privacy,
-                         Clipboard, Downloads, Screenshots, Timer, Stopwatch, Focus, SysMon, Telemetry, Notifications
+                         Clipboard, Downloads, Screenshots, Timer, Stopwatch, Focus, SysMon, Telemetry, Notifications,
+                         Toggles, ClipHistory
                      })
             {
                 try { svc?.Dispose(); } catch { }

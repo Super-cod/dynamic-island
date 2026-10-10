@@ -1,74 +1,184 @@
 <Window x:Class="WindowsDynamicBar.UI.SettingsWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Windows Dynamic Bar — Settings"
-        Width="720" Height="640"
-        MinWidth="620" MinHeight="480"
+        Title="Windows Dynamic Bar Settings"
+        Width="760" Height="520" MinWidth="680" MinHeight="420"
         WindowStartupLocation="CenterScreen"
-        Background="#FF101013"
+        Background="{DynamicResource S.Bg}"
+        FontFamily="Segoe UI Variable Text, Segoe UI"
         SourceInitialized="OnSourceInitialized"
         Closing="OnClosing">
 
+    <!-- Colours come from S.* resources set in code (light or dark, following Windows). -->
+    <Window.Resources>
+        <Style x:Key="NavButton" TargetType="RadioButton">
+            <Setter Property="Foreground" Value="{DynamicResource S.Text}" />
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="Height" Value="36" />
+            <Setter Property="Margin" Value="0,1" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Focusable" Value="True" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="RadioButton">
+                        <Grid>
+                            <Border x:Name="Bg" CornerRadius="5" Background="Transparent" />
+                            <Border x:Name="Pip" Width="3" Height="16" CornerRadius="1.5" HorizontalAlignment="Left"
+                                    Background="{DynamicResource S.Accent}" Visibility="Collapsed" />
+                            <ContentPresenter Margin="14,0,8,0" VerticalAlignment="Center" />
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bg" Property="Background" Value="{DynamicResource S.Hover}" />
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Bg" Property="Background" Value="{DynamicResource S.Selected}" />
+                                <Setter TargetName="Pip" Property="Visibility" Value="Visible" />
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="Bg" Property="BorderBrush" Value="{DynamicResource S.Text}" />
+                                <Setter TargetName="Bg" Property="BorderThickness" Value="1" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Windows 11 style on/off switch -->
+        <Style x:Key="Switch" TargetType="CheckBox">
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="CheckBox">
+                        <StackPanel Orientation="Horizontal" Background="Transparent">
+                            <TextBlock x:Name="State" Text="Off" Margin="0,0,10,0" VerticalAlignment="Center"
+                                       FontSize="12.5" Foreground="{DynamicResource S.Muted}" />
+                            <Grid Width="40" Height="20">
+                                <Border x:Name="Track" CornerRadius="10" BorderThickness="1"
+                                        BorderBrush="{DynamicResource S.Muted}" Background="Transparent" />
+                                <Ellipse x:Name="Knob" Width="12" Height="12" HorizontalAlignment="Left" Margin="4,0,0,0"
+                                         Fill="{DynamicResource S.Muted}" />
+                            </Grid>
+                        </StackPanel>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Track" Property="Background" Value="{DynamicResource S.Accent}" />
+                                <Setter TargetName="Track" Property="BorderBrush" Value="{DynamicResource S.Accent}" />
+                                <Setter TargetName="Knob" Property="Fill" Value="{DynamicResource S.OnAccent}" />
+                                <Setter TargetName="Knob" Property="HorizontalAlignment" Value="Right" />
+                                <Setter TargetName="Knob" Property="Margin" Value="0,0,4,0" />
+                                <Setter TargetName="State" Property="Text" Value="On" />
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="Track" Property="BorderThickness" Value="2" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.4" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- segmented choice (used instead of combo boxes) -->
+        <Style x:Key="Segment" TargetType="RadioButton">
+            <Setter Property="Foreground" Value="{DynamicResource S.Text}" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="RadioButton">
+                        <Border x:Name="Bg" CornerRadius="4" Padding="10,4" Margin="2,0" Background="{DynamicResource S.Control}"
+                                BorderThickness="1" BorderBrush="{DynamicResource S.Hairline}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bg" Property="Background" Value="{DynamicResource S.Hover}" />
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Bg" Property="Background" Value="{DynamicResource S.Accent}" />
+                                <Setter TargetName="Bg" Property="BorderBrush" Value="{DynamicResource S.Accent}" />
+                                <Setter Property="Foreground" Value="{DynamicResource S.OnAccent}" />
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="Bg" Property="BorderBrush" Value="{DynamicResource S.Text}" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="Action" TargetType="Button">
+            <Setter Property="Foreground" Value="{DynamicResource S.Text}" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bg" CornerRadius="4" Padding="12,5" Background="{DynamicResource S.Control}"
+                                BorderThickness="1" BorderBrush="{DynamicResource S.Hairline}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bg" Property="Background" Value="{DynamicResource S.Hover}" />
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="Bg" Property="BorderBrush" Value="{DynamicResource S.Text}" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.45" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="Field" TargetType="TextBox">
+            <Setter Property="Foreground" Value="{DynamicResource S.Text}" />
+            <Setter Property="CaretBrush" Value="{DynamicResource S.Text}" />
+            <Setter Property="Background" Value="{DynamicResource S.Control}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource S.Hairline}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="6,4" />
+            <Setter Property="FontSize" Value="12.5" />
+        </Style>
+    </Window.Resources>
+
     <Grid>
         <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="186" />
+            <ColumnDefinition Width="200" />
             <ColumnDefinition Width="*" />
         </Grid.ColumnDefinitions>
 
-        <!-- ============ sidebar ============ -->
-        <Border Grid.Column="0" Background="#FF141417">
-            <DockPanel LastChildFill="True">
-                <StackPanel DockPanel.Dock="Top" Margin="16,18,16,10">
-                    <TextBlock Text="Dynamic Bar" FontFamily="Segoe UI Variable Display, Segoe UI"
-                               FontSize="14" FontWeight="SemiBold" Foreground="White" />
-                    <TextBlock Text="Settings" FontSize="10.5" Foreground="#70FFFFFF"
-                               FontFamily="Segoe UI Variable Text, Segoe UI" Margin="0,1,0,0" />
-                </StackPanel>
-                <StackPanel x:Name="NavPanel" Margin="8,6,8,12" />
-            </DockPanel>
-        </Border>
+        <!-- left tab list -->
+        <DockPanel Grid.Column="0" Margin="10,14,8,12">
+            <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="8,0,0,14">
+                <Image x:Name="AppIcon" Width="20" Height="20" Margin="0,0,10,0" />
+                <TextBlock Text="Dynamic Bar" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center"
+                           Foreground="{DynamicResource S.Text}" />
+            </StackPanel>
+            <TextBlock x:Name="StatusText" DockPanel.Dock="Bottom" Margin="8,0,0,0" FontSize="11"
+                       Foreground="{DynamicResource S.Muted}" TextWrapping="Wrap" />
+            <StackPanel x:Name="NavPanel" />
+        </DockPanel>
 
-        <!-- ============ main column ============ -->
+        <!-- page -->
         <Grid Grid.Column="1">
             <Grid.RowDefinitions>
-                <RowDefinition Height="52" />
+                <RowDefinition Height="Auto" />
                 <RowDefinition Height="*" />
-                <RowDefinition Height="32" />
             </Grid.RowDefinitions>
-
-            <!-- page header -->
-            <Grid Grid.Row="0" Background="#FF141417">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
-                <StackPanel VerticalAlignment="Center" Margin="20,0,0,0">
-                    <TextBlock x:Name="PageTitle" Text="General" FontFamily="Segoe UI Variable Display, Segoe UI"
-                               FontSize="15" FontWeight="SemiBold" Foreground="White" />
-                    <TextBlock x:Name="PageSub" Text="" FontSize="10.5" Foreground="#70FFFFFF"
-                               FontFamily="Segoe UI Variable Text, Segoe UI" />
-                </StackPanel>
-                <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="0,0,16,0" VerticalAlignment="Center">
-                    <Button Content="Reset defaults" Click="OnResetDefaults" Margin="0,0,8,0"
-                            Padding="12,6" FontSize="11.5" Foreground="#CCFFFFFF" Background="#18FFFFFF"
-                            BorderThickness="0" Cursor="Hand" />
-                    <Button Content="Done" Click="OnDone" Padding="18,6" FontSize="12"
-                            FontWeight="SemiBold" Foreground="White" Background="#FF0A84FF"
-                            BorderThickness="0" Cursor="Hand" />
-                </StackPanel>
-            </Grid>
-
-            <!-- page content -->
-            <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Padding="0,8,0,16">
-                <StackPanel x:Name="Root" Margin="20,0,20,0" />
+            <TextBlock x:Name="PageTitle" Margin="24,18,24,8" FontSize="22" FontWeight="SemiBold"
+                       FontFamily="Segoe UI Variable Display, Segoe UI" Foreground="{DynamicResource S.Text}" />
+            <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Focusable="False">
+                <StackPanel x:Name="Root" Margin="24,0,24,20" />
             </ScrollViewer>
-
-            <!-- footer -->
-            <Grid Grid.Row="2" Background="#FF141417">
-                <TextBlock x:Name="StatusText" Text="Settings save automatically"
-                           VerticalAlignment="Center" Margin="20,0,0,0"
-                           FontSize="10.5" Foreground="#66FFFFFF" />
-            </Grid>
         </Grid>
     </Grid>
 </Window>

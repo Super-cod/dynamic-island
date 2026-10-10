@@ -6,6 +6,24 @@ namespace WindowsDynamicBar.UI;
 
 public partial class FirstRunWindow : Window
 {
+    private static FirstRunWindow? _open;
+
+    /// <summary>Open the guide (or bring the open one forward).</summary>
+    public static void ShowSingleton()
+    {
+        if (_open is null)
+        {
+            _open = new FirstRunWindow();
+            _open.Closed += (_, _) =>
+            {
+                _open = null;
+                App.Settings?.Update(s => s.FirstRunCompleted = true);
+            };
+            _open.Show();
+        }
+        _open.Activate();
+    }
+
     private int _step = 1;
 
     public FirstRunWindow()

@@ -11,7 +11,8 @@ namespace WindowsDynamicBar.UI;
 
 /// <summary>
 /// Live network panel: mirrored throughput graph, current rates, latency probes and an on-demand
-/// speed test. Everything shown is measured; unavailable values render as "—". Owns no timers -
+/// speed test. Everything shown is measured; a value that is not known yet hides its row (the row
+/// keeps its space, so nothing jumps when the value arrives). Owns no timers -
 /// the host pushes fresh samples into <see cref="Render"/>.
 /// </summary>
 public partial class NetDetailPanel : UserControl
@@ -57,6 +58,15 @@ public partial class NetDetailPanel : UserControl
 
     public bool ReduceMotion { get; set; }
 
+    private bool _speedTestEnabled = true;
+
+    /// <summary>Speed test feature switch: off hides the START button (no test can run).</summary>
+    public bool SpeedTestEnabled
+    {
+        get => _speedTestEnabled;
+        set { _speedTestEnabled = value; TestButton.Visibility = value ? Visibility.Visible : Visibility.Collapsed; }
+    }
+
     /// <summary>Raised when the user clicks START / STOP / RUN AGAIN.</summary>
     public event Action? TestToggleRequested;
 
@@ -87,7 +97,7 @@ public partial class NetDetailPanel : UserControl
 
             var val = new TextBlock
             {
-                Text = "\u2014",
+                Text = "",
                 FontFamily = new FontFamily(Mono),
                 FontSize = 9.5,
                 Foreground = ValueBrush,
@@ -103,6 +113,7 @@ public partial class NetDetailPanel : UserControl
             Grid.SetRow(spark, 1);
             grid.Children.Add(spark);
 
+            grid.Visibility = Visibility.Hidden;   // shown once this target has answered
             TilesHost.Children.Add(grid);
             _tileValue[t] = val;
             _tileSpark[t] = spark;
@@ -138,7 +149,7 @@ public partial class NetDetailPanel : UserControl
 
         var val = new TextBlock
         {
-            Text = "\u2014",
+            Text = "",
             FontFamily = new FontFamily(Mono),
             FontSize = 10,
             Foreground = ValueBrush,
@@ -148,6 +159,7 @@ public partial class NetDetailPanel : UserControl
         Grid.SetColumn(val, 1);
         grid.Children.Add(val);
 
+        grid.Visibility = Visibility.Hidden;
         StatsRows.Children.Add(grid);
         return val;
     }
@@ -183,7 +195,7 @@ public partial class NetDetailPanel : UserControl
 
         var val = new TextBlock
         {
-            Text = "\u2014",
+            Text = "",
             FontFamily = new FontFamily(Mono),
             FontSize = 10,
             Foreground = ValueBrush,
@@ -193,6 +205,7 @@ public partial class NetDetailPanel : UserControl
         Grid.SetColumn(val, 2);
         grid.Children.Add(val);
 
+        grid.Visibility = Visibility.Hidden;
         StatsRows.Children.Add(grid);
         return (bar, val);
     }
@@ -213,13 +226,13 @@ public partial class NetDetailPanel : UserControl
 
         LblSpeed.Text = snap.HasAdapterData
             ? $"\u2193 {FormatRate(snap.DownMbps)}  \u2191 {FormatRate(snap.UpMbps)}"
-            : "\u2193 \u2014  \u2191 \u2014";
+            : "";
         SetLink(snap);
 
         foreach (NetTarget t in Enum.GetValues<NetTarget>())
         {
             double? ms = net.LastPing(t);
-            _tileValue[t].Text = ms is null ? "\u2014" : $"{Math.Round(ms.Value):F0} ms";
+            ShowValue(_tileValue[t], ms is null ? null : $"{Math.Round(ms.Value):F0} ms", tileLevel: true);
             _tileSpark[t].Values = net.PingSeries(t);
         }
 
@@ -233,14 +246,14 @@ public partial class NetDetailPanel : UserControl
             : "\u25B6 START";
         TestButton.Foreground = running ? WarnBrush : MetricBrush;
 
-        _pingVal.Text = Fmt(test.PingMs, "F0", " ms");
-        _jitterVal.Text = Fmt(test.JitterMs, "F0", " ms");
-        _lossVal.Text = Fmt(test.LossPercent, "F0", "%");
+        ShowValue(_pingVal, Fmt(test.PingMs, "F0", " ms"));
+        ShowValue(_jitterVal, Fmt(test.JitterMs, "F0", " ms"));
+        ShowValue(_lossVal, Fmt(test.LossPercent, "F0", "%"));
         SetBar(_downBar, test.DownMbps);
         SetBar(_upBar, test.UpMbps);
-        _downVal.Text = Fmt(test.DownMbps, "F1", " Mb/s");
-        _upVal.Text = Fmt(test.UpMbps, "F1", " Mb/s");
-        _statusVal.Text = StatusLabel(test);
+        ShowValue(_downVal, Fmt(test.DownMbps, "F1", " Mb/s"));
+        ShowValue(_upVal, Fmt(test.UpMbps, "F1", " Mb/s"));
+        ShowValue(_statusVal, StatusLabel(test));
     }
 
     // ------------------------------------------------------------------ small helpers
@@ -306,6 +319,7 @@ public partial class NetDetailPanel : UserControl
 
         QualityText.Inlines.Clear();
         foreach (var inline in sb) QualityText.Inlines.Add(inline);
+        QualityText.Visibility = hasTest ? Visibility.Visible : Visibility.Hidden;
     }
 
     private static void SetBar(DotBar bar, double? mbps)
@@ -315,8 +329,18 @@ public partial class NetDetailPanel : UserControl
             : -1;
     }
 
-    private static string Fmt(double? value, string format, string suffix)
-        => value is double v ? v.ToString(format, System.Globalization.CultureInfo.InvariantCulture) + suffix : "\u2014";
+    private static string? Fmt(double? value, string format, string suffix)
+        => value is double v ? v.ToString(format, System.Globalization.CultureInfo.InvariantCulture) + suffix : null;
+
+    /// <summary>Unknown value: hide its row (space kept, so nothing jumps). Known: show it.</summary>
+    private static void ShowValue(TextBlock value, string? text, bool tileLevel = false)
+    {
+        // A tile's value sits in a header grid inside the tile grid; a stat row's value sits directly in the row.
+        var row = (FrameworkElement)value.Parent;
+        if (tileLevel && row.Parent is FrameworkElement tile) row = tile;
+        row.Visibility = text is null ? Visibility.Hidden : Visibility.Visible;
+        value.Text = text ?? "";
+    }
 
     private static string StatusLabel(NetSpeedState test) => test.Phase switch
     {
@@ -372,6 +396,6 @@ public partial class NetDetailPanel : UserControl
     private void OnRendering(object? sender, EventArgs e)
     {
         double scroll = Math.Clamp((DateTime.UtcNow - _lastSampleUtc).TotalSeconds / SampleSeconds, 0, 1);
-        NetGraph.Scroll = scroll;
+        NetGraph.Scroll = GraphScroll.Quantize(scroll, NetGraph);
     }
 }

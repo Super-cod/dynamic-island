@@ -11,7 +11,9 @@ public sealed record TimerInfo(string Label, TimeSpan Remaining, TimerState Stat
 public sealed record StopwatchInfo(TimeSpan Elapsed, bool Running, IReadOnlyList<TimeSpan> Laps);
 public sealed record FocusInfo(TimeSpan Remaining, bool Running, string Phase);
 
-/// <summary>Integrated countdown timer with presets, pause/resume/cancel, and completion event.</summary>
+/// <summary>The one countdown timer (timer panel, search "timer 10 min", idle Focus button).
+/// Pause/resume/cancel and a completion event. Its end time is kept in state.json so a running
+/// timer survives an app restart.</summary>
 public sealed class TimerService : IDisposable
 {
     private readonly EventBus _bus;
@@ -53,19 +55,24 @@ public sealed class TimerService : IDisposable
         }
     }
 
-    public void Start(TimeSpan duration, string label = "Timer")
+    public void Start(TimeSpan duration, string label = "Timer") => Start(duration, duration, label, announce: true);
+
+    private void Start(TimeSpan remaining, TimeSpan total, string label, bool announce)
     {
         lock (_sync)
         {
-            _total = duration;
-            _remaining = duration;
+            _total = total;
+            _remaining = remaining;
             _state = TimerState.Running;
             _resumeAtUtc = DateTime.UtcNow;
             _label = label;
             _notified = false;
         }
+        Persist();
         _tick.Change(TimeSpan.Zero, TimeSpan.FromMilliseconds(250));
         Emit();
+        if (!announce) return;
+        var duration = remaining;
         // One card on start; after it expires the collapsed pill carries the countdown.
         _bus.Raise(BarEvent.Create(BarEventKind.Timer, label,
             Format(duration), value: 0, valueText: Format(duration),
@@ -81,6 +88,7 @@ public sealed class TimerService : IDisposable
             _state = TimerState.Paused;
         }
         _tick.Change(Timeout.Infinite, Timeout.Infinite);
+        Persist();
         Emit();
     }
 
@@ -92,6 +100,7 @@ public sealed class TimerService : IDisposable
             _resumeAtUtc = DateTime.UtcNow;
             _state = TimerState.Running;
         }
+        Persist();
         _tick.Change(TimeSpan.Zero, TimeSpan.FromMilliseconds(250));
         Emit();
     }
@@ -105,6 +114,7 @@ public sealed class TimerService : IDisposable
             _total = TimeSpan.Zero;
         }
         _tick.Change(Timeout.Infinite, Timeout.Infinite);
+        Persist();
         Emit();
     }
 
@@ -115,19 +125,22 @@ public sealed class TimerService : IDisposable
         lock (_sync)
         {
             if (_state != TimerState.Running) return;
+            // _remaining is the time left at _resumeAtUtc; it only changes on pause/finish.
+            // (Writing the live value back every tick subtracted the elapsed time again and again,
+            // so timers ended far too early.)
             var remaining = _remaining - (DateTime.UtcNow - _resumeAtUtc);
             if (remaining <= TimeSpan.Zero)
             {
+                remaining = TimeSpan.Zero;
                 _remaining = TimeSpan.Zero;
                 _state = TimerState.Finished;
                 finished = !_notified;
                 _notified = true;
             }
-            else _remaining = remaining;
             double prog = _total > TimeSpan.Zero
-                ? Math.Clamp(1.0 - (_remaining.Ticks / (double)_total.Ticks), 0, 1)
+                ? Math.Clamp(1.0 - (remaining.Ticks / (double)_total.Ticks), 0, 1)
                 : 0;
-            info = new TimerInfo(_label, _remaining, _state, prog);
+            info = new TimerInfo(_label, remaining, _state, prog);
         }
         TimerChanged?.Invoke(info);
 
@@ -135,6 +148,8 @@ public sealed class TimerService : IDisposable
         // TimerChanged; only the completion is worth popping the bar for.
         if (finished)
         {
+            _tick.Change(Timeout.Infinite, Timeout.Infinite);
+            Persist();
             _bus.Raise(BarEvent.Create(BarEventKind.Toast, "Timer finished", _label,
                 payload: _label, priority: 99, displayDuration: TimeSpan.FromSeconds(8)));
             try { System.Media.SystemSounds.Exclamation.Play(); } catch { }
@@ -148,6 +163,55 @@ public sealed class TimerService : IDisposable
     }
 
     private void Emit() => TimerChanged?.Invoke(Current);
+
+    /// <summary>Write the end time (running), the remaining time (paused) or nothing (idle/finished).</summary>
+    private void Persist()
+    {
+        TimerState state; TimeSpan remaining; TimeSpan total; string label; DateTime resumeAt;
+        lock (_sync) { state = _state; remaining = _remaining; total = _total; label = _label; resumeAt = _resumeAtUtc; }
+        RuntimeState.Instance.Update(s =>
+        {
+            s.TimerLabel = label;
+            s.TimerTotalSeconds = total.TotalSeconds;
+            s.TimerEndUtc = state == TimerState.Running ? resumeAt + remaining : null;
+            s.TimerPausedSeconds = state == TimerState.Paused ? Math.Max(0, remaining.TotalSeconds) : 0;
+        });
+    }
+
+    /// <summary>App start: continue a timer that was running (or paused) when the app last closed.
+    /// One that ran out while the app was closed raises its "Timer finished" card once.</summary>
+    public void RestoreFromState()
+    {
+        var s = RuntimeState.Instance.Current;
+        var total = TimeSpan.FromSeconds(Math.Max(0, s.TimerTotalSeconds));
+        string label = string.IsNullOrWhiteSpace(s.TimerLabel) ? "Timer" : s.TimerLabel;
+        if (s.TimerEndUtc is DateTime end)
+        {
+            var left = end - DateTime.UtcNow;
+            if (left > TimeSpan.FromSeconds(1))
+            {
+                Start(left, total > left ? total : left, label, announce: false);
+                Log.Info("Timer restored", ("remainingSec", (int)left.TotalSeconds));
+                return;
+            }
+            RuntimeState.Instance.Update(x => { x.TimerEndUtc = null; x.TimerPausedSeconds = 0; });
+            if (left > TimeSpan.FromHours(-12))
+                _bus.Raise(BarEvent.Create(BarEventKind.Toast, "Timer finished", label,
+                    payload: label, priority: 99, displayDuration: TimeSpan.FromSeconds(8)));
+            return;
+        }
+        if (s.TimerPausedSeconds > 0)
+        {
+            lock (_sync)
+            {
+                _total = total > TimeSpan.Zero ? total : TimeSpan.FromSeconds(s.TimerPausedSeconds);
+                _remaining = TimeSpan.FromSeconds(s.TimerPausedSeconds);
+                _state = TimerState.Paused;
+                _label = label;
+            }
+            Emit();
+        }
+    }
 
     public void Dispose() => _tick.Dispose();
 }
@@ -349,7 +413,7 @@ public sealed class FocusService : IDisposable
         Emit();
         if (done)
         {
-            _bus.Raise(BarEvent.Create(BarEventKind.Toast, "Focus session complete",
+            _bus.Raise(BarEvent.Create(BarEventKind.Toast, "Focus session finished",
                 "Take a break", priority: 99, displayDuration: TimeSpan.FromSeconds(8)));
             try { System.Media.SystemSounds.Exclamation.Play(); } catch { }
         }

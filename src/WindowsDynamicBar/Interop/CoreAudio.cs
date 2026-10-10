@@ -15,8 +15,24 @@ internal static class CoreAudio
     private const int ROLE_MULTIMEDIA = 1; // eMultimedia
     private const int STGM_READ = 0;
 
-    [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
-    private class MMDeviceEnumeratorCom { }
+    // MMDeviceEnumerator hands every caller the same COM object. A normal (cached) runtime wrapper
+    // for it - from a [ComImport] coclass or Activator - would be reused when NAudio creates its
+    // own typed wrapper, and NAudio's cast then fails (WasapiLoopbackCapture, mic toggle). So this
+    // class takes a private, uncached wrapper.
+    private static readonly Guid CLSID_MMDeviceEnumerator = new("BCDE0395-E52F-467C-8E3D-C4579291692E");
+    private static readonly Guid IID_IUnknown = new("00000000-0000-0000-C000-000000000046");
+    private const int CLSCTX_ALL = 0x17;
+
+    [DllImport("ole32.dll")]
+    private static extern int CoCreateInstance(ref Guid clsid, IntPtr outer, int context, ref Guid iid, out IntPtr ppv);
+
+    internal static object CreateEnumerator()
+    {
+        Guid clsid = CLSID_MMDeviceEnumerator, iid = IID_IUnknown;
+        Marshal.ThrowExceptionForHR(CoCreateInstance(ref clsid, IntPtr.Zero, CLSCTX_ALL, ref iid, out IntPtr unk));
+        try { return Marshal.GetUniqueObjectForIUnknown(unk); }
+        finally { Marshal.Release(unk); }
+    }
 
     [ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"),
      InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
@@ -154,7 +170,7 @@ internal static class CoreAudio
         error = null;
         try
         {
-            _enumerator = (IMMDeviceEnumerator)new MMDeviceEnumeratorCom();
+            _enumerator = (IMMDeviceEnumerator)CreateEnumerator();
             _sink = new VolumeChangeSink(onVolumeChanged, () =>
             {
                 AttachDefaultEndpoint();

@@ -25,6 +25,11 @@ public sealed class GpuTrack
     public double EngineEncode;
     public double EngineDecode;
     public bool EnginesAvailable;
+    public uint VendorId;
+    // NVML sensors (NVIDIA only, read while this GPU's panel is open); null = not readable.
+    public double? TempC;
+    public double? PowerW;
+    public double? ClockMhz;
     public TelemetryHistory History { get; } = new(240);
 }
 
@@ -58,6 +63,14 @@ public sealed class SystemTelemetryService : IDisposable
     private IntPtr _cacheCounter = IntPtr.Zero;
     private bool _cacheAvailable;
     private long _ramCache;
+
+    // ACPI thermal zones (Thermal Zone Information\Temperature, Kelvin): readable without admin.
+    private IntPtr _thermalQuery = IntPtr.Zero;
+    private readonly List<IntPtr> _thermalCounters = new();
+    private double? _cpuTempC;
+
+    private readonly Nvml _nvml = new();
+    private readonly CpuLoadAverager _load = new();
 
     private System.Threading.Timer? _timer;
     private bool _active;
@@ -96,6 +109,15 @@ public sealed class SystemTelemetryService : IDisposable
     public long DiskReadBytesPerSec { get { lock (_sync) return _diskAvailable ? _diskRead : -1; } }
     public long DiskWriteBytesPerSec { get { lock (_sync) return _diskAvailable ? _diskWrite : -1; } }
 
+    /// <summary>Hottest ACPI thermal zone in degrees C, or null when no zone is readable.</summary>
+    public double? CpuTemperatureC { get { lock (_sync) return _cpuTempC; } }
+
+    /// <summary>Average CPU % over the last 1/5/15 minutes (null until that much data exists).</summary>
+    public (double? M1, double? M5, double? M15) CpuLoad => _load.Averages();
+
+    /// <summary>LUID of the GPU whose detail panel is open (NVML is only queried for it); 0 = none.</summary>
+    public long SensorLuid { get; set; }
+
     /// <summary>Live history buffer for the GPU adapter at <paramref name="index"/> (creation order).</summary>
     public TelemetryHistory? GetGpuHistory(int index)
     {
@@ -125,6 +147,10 @@ public sealed class SystemTelemetryService : IDisposable
                 EngineEncode = t.EngineEncode,
                 EngineDecode = t.EngineDecode,
                 EnginesAvailable = t.EnginesAvailable,
+                VendorId = t.VendorId,
+                TempC = t.TempC,
+                PowerW = t.PowerW,
+                ClockMhz = t.ClockMhz,
             }).ToList();
         }
     }
@@ -148,6 +174,7 @@ public sealed class SystemTelemetryService : IDisposable
             if (_active) return;
             _active = true;
         }
+        _load.Start();   // cheap (one GetSystemTimes call every 5 s); keeps running for 5/15-min averages
         StartCounters();
         RefreshAdapters();
         int intervalMs = _settings.Current.PerformanceMode switch
@@ -303,6 +330,19 @@ public sealed class SystemTelemetryService : IDisposable
                 else _diskAvailable = false;
             }
 
+            if (_thermalQuery == IntPtr.Zero)
+            {
+                var zones = ExpandInstances(@"\Thermal Zone Information(*)\Temperature");
+                if (zones.Count > 0 && PdhOpenQueryW(null, IntPtr.Zero, out _thermalQuery) == 0)
+                {
+                    foreach (string z in zones)
+                        if (PdhAddEnglishCounterW(_thermalQuery, $@"\Thermal Zone Information({z})\Temperature",
+                                IntPtr.Zero, out IntPtr tc) == 0)
+                            _thermalCounters.Add(tc);
+                    if (_thermalCounters.Count > 0) PdhCollectQueryData(_thermalQuery);
+                }
+            }
+
             if (_sysMemQuery == IntPtr.Zero)
             {
                 if (PdhOpenQueryW(null, IntPtr.Zero, out _sysMemQuery) == 0 &&
@@ -343,11 +383,15 @@ public sealed class SystemTelemetryService : IDisposable
                             Luid = a.Luid,
                             AdapterIndex = i,
                             Name = a.Name,
+                            VendorId = a.VendorId,
                             VramTotal = a.DedicatedVideoMemoryBytes,
                             VramAvailable = a.DedicatedVideoMemoryBytes > 0
                         });
                     }
                 }
+                // When DXGI answered it is the source of truth: drop tracks that only exist in PDH
+                // (software rasterizer, stale LUIDs) so no nameless "GPU 221" entry is shown.
+                if (dxgi.Count > 0) _gpuTracks.RemoveAll(t => !_dxgiIndexByLuid.ContainsKey(t.Luid));
                 foreach (var track in _gpuTracks)
                 {
                     if (_dxgiIndexByLuid.TryGetValue(track.Luid, out int idx))
@@ -360,10 +404,7 @@ public sealed class SystemTelemetryService : IDisposable
                             track.VramTotal = meta.DedicatedVideoMemoryBytes;
                         }
                     }
-                    else if (string.IsNullOrEmpty(track.Name))
-                    {
-                        track.Name = $"GPU {track.Luid & 0xFF}";
-                    }
+
                 }
             }
         }
@@ -499,17 +540,30 @@ public sealed class SystemTelemetryService : IDisposable
             if (track.VramTotal > 0 && !track.VramAvailable) track.VramAvailable = true;
         }
 
-        foreach (var luid in sums.Keys.ToList())
+        // Without DXGI (rare) fall back to the adapters PDH reports; they have no name.
+        if (_dxgiIndexByLuid.Count == 0)
         {
-            if (!_gpuTracks.Any(t => t.Luid == luid))
+            foreach (var luid in sums.Keys.ToList())
             {
-                _gpuTracks.Add(new GpuTrack
-                {
-                    Luid = luid,
-                    AdapterIndex = _dxgiIndexByLuid.TryGetValue(luid, out int ai) ? ai : -1,
-                    Name = _dxgiNameByLuid.TryGetValue(luid, out string? n) ? n : $"GPU {luid & 0xFF}",
-                    Utilization = Math.Round(sums[luid], 1)
-                });
+                if (!_gpuTracks.Any(t => t.Luid == luid))
+                    _gpuTracks.Add(new GpuTrack { Luid = luid, Utilization = Math.Round(sums[luid], 1) });
+            }
+        }
+
+        // NVML sensors only for the GPU whose panel is open (reading can wake a laptop dGPU).
+        long sensorLuid = SensorLuid;
+        foreach (var track in _gpuTracks)
+        {
+            NvmlReading? r = track.Luid == sensorLuid && track.VendorId == DxgiAdapterInfo.VendorNvidia
+                ? _nvml.Read(track.Name) : null;
+            track.TempC = r?.TempC;
+            track.PowerW = r?.PowerW;
+            track.ClockMhz = r?.ClockMhz;
+            if (r is { MemUsedBytes: long used, MemTotalBytes: long total })
+            {
+                track.VramUsed = used;
+                track.VramTotal = total;
+                track.VramAvailable = true;
             }
         }
 
@@ -573,6 +627,19 @@ public sealed class SystemTelemetryService : IDisposable
             var wb = new PDH_FMT_COUNTERVALUE_DOUBLE[1];
             if (PdhGetFormattedCounterValue(_diskWriteCounter, 0x00000200, out _, wb) == 0)
                 _diskWrite = (long)Math.Max(0, wb[0].doubleValue);
+        }
+        if (_thermalCounters.Count > 0 && _thermalQuery != IntPtr.Zero)
+        {
+            PdhCollectQueryData(_thermalQuery);
+            double? hottest = null;
+            foreach (IntPtr tc in _thermalCounters)
+            {
+                var tb = new PDH_FMT_COUNTERVALUE_DOUBLE[1];
+                if (PdhGetFormattedCounterValue(tc, 0x00000200, out _, tb) != 0) continue;
+                double c = tb[0].doubleValue - 273.15;              // Kelvin -> Celsius
+                if (c is > -40 and < 150) hottest = Math.Max(hottest ?? double.MinValue, c);
+            }
+            _cpuTempC = hottest is null ? null : Math.Round(hottest.Value, 1);
         }
         if (_cacheAvailable && _sysMemQuery != IntPtr.Zero)
         {
@@ -705,7 +772,11 @@ public sealed class SystemTelemetryService : IDisposable
         if (_memQuery != IntPtr.Zero) { PdhCloseQuery(_memQuery); _memQuery = IntPtr.Zero; }
         if (_diskQuery != IntPtr.Zero) { PdhCloseQuery(_diskQuery); _diskQuery = IntPtr.Zero; }
         if (_sysMemQuery != IntPtr.Zero) { PdhCloseQuery(_sysMemQuery); _sysMemQuery = IntPtr.Zero; }
+        if (_thermalQuery != IntPtr.Zero) { PdhCloseQuery(_thermalQuery); _thermalQuery = IntPtr.Zero; }
+        _thermalCounters.Clear();
         _vramCounters.Clear();
+        _load.Dispose();
+        lock (_sync) _nvml.Dispose();
     }
 
     [StructLayout(LayoutKind.Sequential)]

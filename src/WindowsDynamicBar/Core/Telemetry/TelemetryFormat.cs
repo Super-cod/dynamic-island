@@ -26,4 +26,20 @@ public static class TelemetryFormat
         $"{Math.Clamp(value, 0, 100):F0}%";
 
     public static double ClampPercent(double value) => Math.Clamp(value, 0, 100);
+
+    public static string Temperature(double celsius, bool fahrenheit) => fahrenheit
+        ? $"{celsius * 9 / 5 + 32:F0}°F"
+        : $"{celsius:F0}°C";
+
+    /// <summary>"NVIDIA GeForce RTX 3050 Laptop GPU" -> "RTX 3050 Laptop GPU",
+    /// "Intel(R) UHD Graphics" -> "UHD Graphics" (vendor words dropped for the title tag).</summary>
+    public static string ShortGpuName(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return "";
+        string s = name.Replace("(R)", "", StringComparison.OrdinalIgnoreCase)
+                       .Replace("(TM)", "", StringComparison.OrdinalIgnoreCase);
+        foreach (string prefix in new[] { "NVIDIA ", "GeForce ", "AMD ", "Radeon ", "Intel ", "Qualcomm " })
+            if (s.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) s = s[prefix.Length..];
+        return string.Join(' ', s.Split(' ', StringSplitOptions.RemoveEmptyEntries));
+    }
 }

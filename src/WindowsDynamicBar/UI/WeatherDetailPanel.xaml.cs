@@ -58,7 +58,7 @@ public partial class WeatherDetailPanel : UserControl
             var sp = new StackPanel { HorizontalAlignment = HorizontalAlignment.Center };
             var hour = new TextBlock
             {
-                Text = "\u2014", FontFamily = new FontFamily(Mono), FontSize = 9,
+                Text = "", FontFamily = new FontFamily(Mono), FontSize = 9,
                 Foreground = LabelBrush, HorizontalAlignment = HorizontalAlignment.Center,
             };
             var glyph = new TextBlock
@@ -69,7 +69,7 @@ public partial class WeatherDetailPanel : UserControl
             };
             var temp = new TextBlock
             {
-                Text = "\u2014", FontFamily = new FontFamily(Mono), FontSize = 10,
+                Text = "", FontFamily = new FontFamily(Mono), FontSize = 10,
                 Foreground = ValueBrush, HorizontalAlignment = HorizontalAlignment.Center,
             };
             sp.Children.Add(hour);
@@ -137,7 +137,7 @@ public partial class WeatherDetailPanel : UserControl
 
     private static TextBlock ValueText() => new()
     {
-        Text = "\u2014", FontFamily = new FontFamily(Mono), FontSize = 10, Foreground = ValueBrush,
+        Text = "", FontFamily = new FontFamily(Mono), FontSize = 10, Foreground = ValueBrush,
         HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Center,
     };
 
@@ -153,21 +153,17 @@ public partial class WeatherDetailPanel : UserControl
             RangeText.Text = "";
             LblNow.Text = "offline";
             LblFeels.Text = "";
-            CityText.Text = string.IsNullOrWhiteSpace(s.LocationName) ? "\u2014" : s.LocationName;
-            TempText.Text = "\u2014";
+            CityText.Text = s.LocationName ?? "";
+            TempText.Text = "";
             CondText.Text = "offline";
             LblSun.Text = "";
             LblUv.Text = "";
-            foreach (var t in _tiles) { t.Hour.Text = "\u2014"; t.Glyph.Text = ""; t.Temp.Text = "\u2014"; }
-            SetBar(_humBar, _humVal, -1, "\u2014");
-            SetBar(_rainBar, _rainVal, -1, "\u2014");
-            SetBar(_uvBar, _uvVal, -1, "\u2014");
-            _windVal.Text = "\u2014";
-            SetBar(_aqiBar, _aqiVal, -1, "\u2014");
+            foreach (var t in _tiles) ShowTile(t, false);
+            HideRow(_humVal); HideRow(_rainVal); HideRow(_uvVal); HideRow(_windVal); HideRow(_aqiVal);
             return;
         }
 
-        CityText.Text = string.IsNullOrWhiteSpace(s.LocationName) ? "\u2014" : s.LocationName;
+        CityText.Text = s.LocationName ?? "";
         TempText.Text = $"{Math.Round(s.TempC):F0}\u00b0";
         CondText.Text = s.Condition;
 
@@ -196,11 +192,10 @@ public partial class WeatherDetailPanel : UserControl
             int idx = now + i;
             if (idx < 0 || idx >= s.Hours.Length)
             {
-                _tiles[i].Hour.Text = "\u2014";
-                _tiles[i].Glyph.Text = "";
-                _tiles[i].Temp.Text = "\u2014";
+                ShowTile(_tiles[i], false);
                 continue;
             }
+            ShowTile(_tiles[i], true);
             var h = s.Hours[idx];
             var kind = WeatherSnapshot.KindOf(h.WeatherCode, IsDay(s, h.Time));
             _tiles[i].Hour.Text = i == 0 ? "Now" : HourLabel(h.Time);
@@ -215,6 +210,7 @@ public partial class WeatherDetailPanel : UserControl
             : $"{GlyphOf(s.Kind)} {s.Condition.ToLowerInvariant()}";
         LblUv.Text = $"upd {s.UpdatedAt:HH:mm}";
 
+        ShowRow(_humVal); ShowRow(_rainVal); ShowRow(_uvVal); ShowRow(_windVal);
         SetBar(_humBar, _humVal, s.Humidity / 100.0, $"{Math.Round(s.Humidity):F0}%");
         SetBar(_rainBar, _rainVal, s.CurrentPrecipProb / 100.0, $"{Math.Round(s.CurrentPrecipProb)}%");
 
@@ -226,22 +222,32 @@ public partial class WeatherDetailPanel : UserControl
 
         if (s.UsAqi is double aqi)
         {
+            ShowRow(_aqiVal);
             _aqiBar.FillColor = ((SolidColorBrush)AqiBrush(aqi)).Color;
             SetBar(_aqiBar, _aqiVal, Math.Clamp(aqi / 300.0, 0, 1), $"{Math.Round(aqi)}");
         }
-        else SetBar(_aqiBar, _aqiVal, -1, "\u2014");
+        else HideRow(_aqiVal);
     }
 
     // ---------------------------------------------------------------- helpers
 
     private void SetTitle(WeatherSnapshot s)
     {
-        string temp = s.Available ? $"{Math.Round(s.TempC):F0}\u00b0" : "\u2014";
         string cond = s.Available ? s.Condition.ToLowerInvariant() : "offline";
         TitleText.Inlines.Clear();
         TitleText.Inlines.Add(Run("\u2524", NameBrush));
         TitleText.Inlines.Add(Run("wx", MetricBrush));
-        TitleText.Inlines.Add(Run($"\u251C\u2524{cond}\u251C\u2524{temp}\u251C", NameBrush));
+        TitleText.Inlines.Add(Run($"\u251C\u2524{cond}\u251C", NameBrush));
+        if (s.Available) TitleText.Inlines.Add(Run($"\u2524{Math.Round(s.TempC):F0}\u00b0\u251C", NameBrush));
+    }
+
+    // Rows/tiles without data are hidden but keep their space (no layout jump when data arrives).
+    private static void HideRow(FrameworkElement value) => ((FrameworkElement)value.Parent).Visibility = Visibility.Hidden;
+    private static void ShowRow(FrameworkElement value) => ((FrameworkElement)value.Parent).Visibility = Visibility.Visible;
+
+    private static void ShowTile(Tile t, bool show)
+    {
+        if (t.Hour.Parent is FrameworkElement host) host.Visibility = show ? Visibility.Visible : Visibility.Hidden;
     }
 
     private static bool IsDay(WeatherSnapshot s, DateTime time)

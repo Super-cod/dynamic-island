@@ -134,10 +134,22 @@ public sealed class TrayController : IDisposable
                         PipeName, PipeDirection.In, 1,
                         PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
                     await server.WaitForConnectionAsync();
-                    var buf = new byte[64];
-                    _ = await server.ReadAsync(buf, 0, buf.Length);
+                    var buf = new byte[512];
+                    int n = await server.ReadAsync(buf, 0, buf.Length);
+                    string msg = Encoding.UTF8.GetString(buf, 0, Math.Max(0, n));
                     if (System.Windows.Application.Current?.Dispatcher is { } dsp)
+                    {
+#if DEBUG
+                        // Debug builds only: scripted UI tests drive the island without moving the mouse.
+                        if (msg.StartsWith("cmd:", StringComparison.Ordinal))
+                        {
+                            string cmd = msg[4..].Trim();
+                            _ = dsp.BeginInvoke(() => App.Bar?.RunDebugCommand(cmd));
+                            continue;
+                        }
+#endif
                         _ = dsp.BeginInvoke(() => App.Bar?.Toggle());
+                    }
                 }
                 catch (ObjectDisposedException) { return; }
                 catch (Exception ex)

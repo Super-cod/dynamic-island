@@ -20,7 +20,7 @@ namespace WindowsDynamicBar.Tests;
 /// Run: dotnet run --project tests\WindowsDynamicBar.Tests -c Release
 /// Exit code 0 = all green.
 /// </summary>
-internal static class Program
+internal static partial class Program
 {
     private static int _pass;
     private static int _fail;
@@ -70,6 +70,11 @@ internal static class Program
         Run("Weather settings default to Chennai", TestWeatherSettingsDefaults);
         Run("Weather settings round-trip", TestWeatherSettingsRoundTrip);
         Run("WeatherService defaults to Chennai coordinates", TestWeatherServiceDefaults);
+        Run("Idle time-of-day periods, hues and greetings", TestIdlePeriods);
+        Run("Idle hue delta takes the short way round", TestIdleHueDelta);
+        Run("Idle countdown / until strings", TestIdleStrings);
+        Run("DotFont renders HH:mm on a 27x7 grid", TestDotFont);
+        RunFeatureTests();
 
         Console.WriteLine(new string('-', 46));
         Console.WriteLine($"passed: {_pass}   failed: {_fail}");
@@ -304,6 +309,56 @@ internal static class Program
             if (original is not null) SettingsService.Instance.Save(original);
             else if (File.Exists(path)) File.Delete(path);
         }
+    }
+
+    private static void TestIdlePeriods()
+    {
+        AssertEq("night", WindowsDynamicBar.Core.Idle.IdleClock.PeriodFor(4).Name, "4h");
+        AssertEq(22.0, WindowsDynamicBar.Core.Idle.IdleClock.PeriodFor(5).Hue, "5h dawn");
+        AssertEq(200.0, WindowsDynamicBar.Core.Idle.IdleClock.PeriodFor(8).Hue, "8h day");
+        AssertEq(285.0, WindowsDynamicBar.Core.Idle.IdleClock.PeriodFor(17).Hue, "17h dusk");
+        AssertEq(238.0, WindowsDynamicBar.Core.Idle.IdleClock.PeriodFor(20).Hue, "20h night");
+        AssertEq("Still up?", WindowsDynamicBar.Core.Idle.IdleClock.Greeting(0), "0h");
+        AssertEq("Good morning", WindowsDynamicBar.Core.Idle.IdleClock.Greeting(5), "5h");
+        AssertEq("Good afternoon", WindowsDynamicBar.Core.Idle.IdleClock.Greeting(12), "12h");
+        AssertEq("Good evening", WindowsDynamicBar.Core.Idle.IdleClock.Greeting(17), "17h");
+        AssertEq("Good night", WindowsDynamicBar.Core.Idle.IdleClock.Greeting(21), "21h");
+        AssertEq(0.5, WindowsDynamicBar.Core.Idle.IdleClock.DayFraction(new DateTime(2026, 10, 10, 12, 0, 0)), "noon");
+    }
+
+    private static void TestIdleHueDelta()
+    {
+        AssertEq(144.0, WindowsDynamicBar.Core.Idle.IdleClock.HueDelta(238, 22), "night->dawn wraps");
+        AssertEq(178.0, WindowsDynamicBar.Core.Idle.IdleClock.HueDelta(22, 200), "dawn->day");
+        AssertEq(-47.0, WindowsDynamicBar.Core.Idle.IdleClock.HueDelta(285, 238), "dusk->night");
+        var c = WindowsDynamicBar.Core.Idle.IdleClock.Hsl(0, 1, 0.5);
+        Assert(c.R == 255 && c.G == 0 && c.B == 0, "hsl red");
+    }
+
+    private static void TestIdleStrings()
+    {
+        AssertEq("25 min", WindowsDynamicBar.Core.Idle.IdleClock.FormatUntil(TimeSpan.FromMinutes(25)), "25m");
+        AssertEq("1h 5m", WindowsDynamicBar.Core.Idle.IdleClock.FormatUntil(TimeSpan.FromMinutes(65)), "65m");
+        AssertEq("2h", WindowsDynamicBar.Core.Idle.IdleClock.FormatUntil(TimeSpan.FromMinutes(120)), "120m");
+        AssertEq("in 25 min", WindowsDynamicBar.Core.Idle.IdleClock.FormatIn(TimeSpan.FromMinutes(24.5)), "ceil");
+        AssertEq("now", WindowsDynamicBar.Core.Idle.IdleClock.FormatIn(TimeSpan.FromSeconds(20)), "now");
+        AssertEq("24:31", WindowsDynamicBar.Core.Idle.IdleClock.FormatCountdown(TimeSpan.FromSeconds(1471)), "countdown");
+        AssertEq("09:05", WindowsDynamicBar.Core.Idle.IdleClock.FormatTime(new DateTime(2026, 1, 1, 9, 5, 0), false), "24h");
+        AssertEq("9:05", WindowsDynamicBar.Core.Idle.IdleClock.FormatTime(new DateTime(2026, 1, 1, 21, 5, 0), true), "12h");
+    }
+
+    private static void TestDotFont()
+    {
+        var map = WindowsDynamicBar.Core.Idle.DotFont.Render("10:08", colonOn: true);
+        AssertEq(7, map.GetLength(0), "rows");
+        AssertEq(27, map.GetLength(1), "cols (27 * 7px = 189px)");
+        Assert(map[2, 12] && map[4, 12] && !map[3, 12], "colon dots at rows 2 and 4");
+        Assert(map[0, 2] && !map[0, 0], "digit 1 top stem");
+        for (int r = 0; r < 7; r++) Assert(!map[r, 5] && !map[r, 13] && !map[r, 14], "spacing columns unlit");
+        var off = WindowsDynamicBar.Core.Idle.DotFont.Render("9:05", colonOn: false);
+        for (int r = 0; r < 7; r++)
+            for (int c = 0; c < 5; c++) Assert(!off[r, c], "missing leading digit stays unlit");
+        Assert(!off[2, 12], "colon off");
     }
 
     private static void TestTimerFormat()

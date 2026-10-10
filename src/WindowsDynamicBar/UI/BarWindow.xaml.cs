@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Windows;
@@ -14,23 +15,29 @@ using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using WindowsDynamicBar.Core.Animation;
 using WindowsDynamicBar.Core.Events;
+using WindowsDynamicBar.Core.Idle;
 using WindowsDynamicBar.Core.Logging;
 using WindowsDynamicBar.Core.Media;
 using WindowsDynamicBar.Core.Settings;
 using WindowsDynamicBar.Core.Telemetry;
+using WindowsDynamicBar.Core.Timers;
 using WindowsDynamicBar.Interop;
 using WindowsDynamicBar.Services.Audio;
+using WindowsDynamicBar.Services.Calendar;
 using WindowsDynamicBar.Services.Media;
 using WindowsDynamicBar.Services.Privacy;
+using WindowsDynamicBar.Services.Search;
 using WindowsDynamicBar.Services.SystemInfo;
 using WindowsDynamicBar.Services.SystemMonitor;
 using WindowsDynamicBar.Services.Timers;
+using WindowsDynamicBar.Services.Toggles;
 using WindowsDynamicBar.Services.Weather;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Documents;
 using System.Windows.Media.Animation;
 using WindowsDynamicBar.Core.Search;
+using System.Runtime.InteropServices;
 using KeyEventArgs = System.Windows.Input.KeyEventArgs;
 using MouseEventArgs = System.Windows.Input.MouseEventArgs;
 
@@ -45,7 +52,14 @@ public partial class BarWindow : Window, IDisposable
     private const double MaxPillH = 280;
 
     // ---- island geometry (DIPs) : dynamic based on screen size ----
-    private const double IslandExpandedW = 600;    // s2 (hover hub)
+    private const double IslandExpandedW = 600;    // s2 (hover hub, music layout)
+    private const double IdleIslandW = 640;        // s2 in the idle layout (no media session)
+    private const double IdleCollapsedW = 420;     // collapsed idle pill
+    private const double IdleCollapsedH = 44;
+    private const double IdleCollapsedR = 22;
+    private const double MusicLeftW = 400;         // 158 disc gutter + 242 media stack
+    private const double IdleLeftW = 438;          // 24 pad + 190 clock + 20 gap + 204 greeting column
+    private const int LayoutFadeMs = 280;          // music <-> idle crossfade
     private const double BaseIslandH = 152;        // target height in music mode
     private const double BaseDetailW = 1082;       // s3 baseline on >= 1650px desktop displays
     private const double BaseMirrorW = 843;        // s3 mirror baseline (600 + 13 + 230)
@@ -72,8 +86,15 @@ public partial class BarWindow : Window, IDisposable
     private double DynamicDetailCardW => Math.Round(BaseDetailCardW * GetDynamicOpenScale());
     private double DynamicMirrorCardW => Math.Round(BaseMirrorCardW * GetDynamicOpenScale());
 
-    private double DynamicDetailW => Math.Round(IslandExpandedW + 13 + DynamicDetailCardW);
-    private double DynamicMirrorW => Math.Round(IslandExpandedW + 13 + DynamicMirrorCardW);
+    private double DynamicDetailW => Math.Round(IslandOpenW + 13 + DynamicDetailCardW);
+    private double DynamicMirrorW => Math.Round(IslandOpenW + 13 + DynamicMirrorCardW);
+
+    // Layout-dependent geometry: the idle layout (no media session) has its own open/collapsed sizes.
+    private double IslandOpenW => _idleMode ? IdleIslandW : IslandExpandedW;
+    private double CollapsedW => _idleMode ? IdleCollapsedW : Math.Max(80, _cfg.BarWidth);
+    // The warning strip (40 px) adds to the collapsed pill too, so a low-battery warning is seen.
+    private double CollapsedH => (_idleMode ? IdleCollapsedH : Math.Max(24, _cfg.BarHeight)) + (_warningStripActive ? 40 : 0);
+    private double CollapsedRadius => _idleMode ? IdleCollapsedR : _cfg.CornerRadius;
 
     private double DetailWidth() => _activeMetric == IslandMetric.Mirror ? DynamicMirrorW : DynamicDetailW;
 
@@ -85,6 +106,9 @@ public partial class BarWindow : Window, IDisposable
         NetPanelComponent.LayoutTransform = st;
         WeatherPanelComponent.LayoutTransform = st;
         MirrorPanelComponent.LayoutTransform = st;
+        TogglesPanelComponent.LayoutTransform = st;
+        ClipboardPanelComponent.LayoutTransform = st;
+        TimerPanelComponent.LayoutTransform = st;
     }
 
     // ---- icon glyphs (Segoe Fluent Icons; verified against font render) ----
@@ -208,8 +232,24 @@ public partial class BarWindow : Window, IDisposable
     private bool _warningStripActive;
     private string _warningKind = "";
 
-    // ---- clock ----
+    // ---- clock: the ONE 1 s tick (collapsed clocks, idle ring/clock, calendar, focus button) ----
     private readonly DispatcherTimer _clockTimer = new() { Interval = TimeSpan.FromSeconds(1) };
+
+    // ---- idle layout (no media session) ----
+    private bool _idleMode = true;                 // no media session -> idle layout
+    private bool _layoutApplied;
+    private double _layoutP = 1;                   // 0 = music layout, 1 = idle layout
+    private readonly TweenAnimation _layoutTween = new();
+    private readonly TweenAnimation _hueTween = new();
+    private readonly TweenAnimation _pulseTween = new();
+    private readonly CalendarService _calendar = new();
+    private DayPeriod _todPeriod;
+    private double _todHue;
+    private bool _todInit;
+    private bool _twelveHour;
+    private string _eventLineKey = "";
+    private bool _focusWasRunning;
+    private TimeSpan _focusLastRemaining;
 
     public BarWindow()
     {
@@ -219,8 +259,10 @@ public partial class BarWindow : Window, IDisposable
         Height = WinH;
 
         _cfg = App.Settings.Load();
-        _currentW = Math.Max(80, _cfg.BarWidth);
-        _currentH = Math.Max(24, _cfg.BarHeight);
+        _twelveHour = ResolveTwelveHour();
+        _currentW = CollapsedW;
+        _currentH = CollapsedH;
+        _currentCornerRadius = CollapsedRadius;
         Pill.Width = _currentW;
         Pill.Height = _currentH;
         ApplyDynamicCardScale();
@@ -236,10 +278,21 @@ public partial class BarWindow : Window, IDisposable
         NetPanelComponent.ReduceMotion = _cfg.ReduceMotion;
         MirrorPanelComponent.ReduceMotion = _cfg.ReduceMotion;
 
+        var (page1, page2) = IslandLayout.FromSettings(_cfg.IslandPage1, _cfg.IslandPage2);
+        IconRow.SetLayout(page1, page2);
         IconRow.MetricHovered += OnIconMetricHovered;
         IconRow.MetricUnhovered += OnIconMetricUnhovered;
         IconRow.MetricClicked += OnIconMetricClicked;
+        IconRow.PageChanged += OnIconPageChanged;
         DetailPanelComponent.GpuCycleRequested += OnGpuCycleRequested;
+        TogglesPanelComponent.ToggleRequested += OnToggleRequested;
+        if (App.Toggles is not null) App.Toggles.Changed += OnTogglesChanged;
+        _hookedToggles = App.Toggles;
+        App.ServiceToggled += OnServiceToggled;
+        HookClipboardPanel(true);
+        WindowSwitcherService.Instance.Refreshed += OnWindowListRefreshed;
+        TimerPanelComponent.StartRequested += OnTimerStartRequested;
+        TimerPanelComponent.StopRequested += OnTimerStopRequested;
         NetPanelComponent.TestToggleRequested += OnNetTestToggle;
         MirrorPanelComponent.CameraStateChanged += OnMirrorCameraStateChanged;
         _collapseDelay.Tick += OnCollapseDelayTick;
@@ -247,9 +300,24 @@ public partial class BarWindow : Window, IDisposable
         ProgressTrack.SizeChanged += (_, _) => SyncFills();
         VolumeHudBar.Scrub += OnVolumeHudScrub;
 
-        _clockTimer.Tick += (_, _) => UpdateClock();
-        _clockTimer.Start();
-        UpdateClock();
+        _layoutTween.Completed += FinishLayoutFade;
+        _pulseTween.Completed += () => { PillPulse.ScaleX = 1; PillPulse.ScaleY = 1; };
+        _calendar.Changed += () =>
+        {
+            try { Dispatcher.BeginInvoke(() => RefreshIdle(DateTime.Now)); } catch { }
+        };
+        IdleDotClock.ReduceMotion = _cfg.ReduceMotion;
+        ApplyLayoutMode(instant: true);
+
+        // One 1 s timer; it only runs while the bar is visible (stopped when hidden for fullscreen).
+        _clockTimer.Tick += (_, _) => OnSecondTick();
+        IsVisibleChanged += (_, _) =>
+        {
+            if (IsVisible) { _clockTimer.Start(); OnSecondTick(); }
+            else _clockTimer.Stop();
+            SyncTimelineTimer();
+        };
+        OnSecondTick();
 
         _idleCollapse.Tick += (_, _) =>
         {
@@ -259,8 +327,8 @@ public partial class BarWindow : Window, IDisposable
 
         _fullscreenTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1500) };
         PreviewKeyDown += OnBarPreviewKeyDown;
+        // Progress/lyrics interpolation: runs only while the island is open (see SyncTimelineTimer).
         _timelineTimer.Tick += (_, _) => OnTimelineTick();
-        _timelineTimer.Start();
 
         _spectrum.SpectrumChanged += bands =>
         {
@@ -282,12 +350,16 @@ public partial class BarWindow : Window, IDisposable
         Log.Debug("BarWindow constructed");
     }
 
-    private static SpringAnimator CreateAnimator(SettingsModel cfg) => new(
-        cfg.ReduceMotion ? 0.35 : Math.Max(0.2, cfg.AnimationSpeed))
+    private SpringAnimator CreateAnimator(SettingsModel cfg)
     {
-        Stiffness = Math.Max(40, cfg.SpringStiffness),
-        Damping = Math.Max(4, cfg.SpringDamping),
-    };
+        var a = new SpringAnimator(cfg.ReduceMotion ? 0.35 : Math.Max(0.2, cfg.AnimationSpeed))
+        {
+            Stiffness = Math.Max(40, cfg.SpringStiffness),
+            Damping = Math.Max(4, cfg.SpringDamping),
+        };
+        a.AnimationCompleted += OnAnimationsSettled;
+        return a;
+    }
 
     // ---------------------------------------------------------------- lifecycle
 
@@ -346,6 +418,7 @@ public partial class BarWindow : Window, IDisposable
 
         RegisterHotkeys();
         try { App.Clipboard?.Attach(_hwnd); } catch { }
+        StartBatteryNotifications();
 
         Reposition();
         _blurL = int.MinValue;
@@ -366,8 +439,20 @@ public partial class BarWindow : Window, IDisposable
         if (_disposed) return;
         _disposed = true;
         Unsubscribe();
+        IconRow.MetricHovered -= OnIconMetricHovered;
+        IconRow.MetricUnhovered -= OnIconMetricUnhovered;
+        IconRow.MetricClicked -= OnIconMetricClicked;
+        IconRow.PageChanged -= OnIconPageChanged;
+        TogglesPanelComponent.ToggleRequested -= OnToggleRequested;
+        if (_hookedToggles is not null) _hookedToggles.Changed -= OnTogglesChanged;
+        App.ServiceToggled -= OnServiceToggled;
+        HookClipboardPanel(false);
+        WindowSwitcherService.Instance.Refreshed -= OnWindowListRefreshed;
+        TimerPanelComponent.StartRequested -= OnTimerStartRequested;
+        TimerPanelComponent.StopRequested -= OnTimerStopRequested;
         try { _collapseDelay.Stop(); } catch { }
         try { _clockTimer.Stop(); } catch { }
+        try { _layoutTween.Dispose(); _hueTween.Dispose(); _pulseTween.Dispose(); } catch { }
         try { _timelineTimer.Stop(); } catch { }
         try { _volumeToastTimer?.Stop(); } catch { }
         try { _lrcCts?.Cancel(); _lrcClient.Dispose(); } catch { }
@@ -381,12 +466,14 @@ public partial class BarWindow : Window, IDisposable
         try { _searchCts?.Cancel(); } catch { }
         try { _actionSuccessTimer?.Stop(); } catch { }
         try { MirrorPanelComponent.Shutdown(); } catch { }
+        _anim.AnimationCompleted -= OnAnimationsSettled;
         _anim.Dispose();
         try
         {
-            for (int id = 1; id <= 4; id++) NativeMethods.UnregisterHotKey(_hwnd, id);
+            for (int id = 1; id <= 5; id++) NativeMethods.UnregisterHotKey(_hwnd, id);
         }
         catch { }
+        StopBatteryNotifications();
         try { _src?.RemoveHook(WndProc); } catch { }
         try { BlurHelper.Detach(); } catch { }
     }
@@ -412,11 +499,13 @@ public partial class BarWindow : Window, IDisposable
                         case 2: try { _ = App.Media?.RefreshAsync(showEvent: true, force: true); } catch { } break;
                         case 3: ShowOrStartTimer(); break;
                         case 4: ToggleSearch(); break;
+                        case 5: OpenClipboardPanel(byHotkey: true); break;
                     }
                 });
                 break;
 
             case NativeMethods.WM_CLIPBOARDUPDATE:
+                App.ClipHistory?.OnClipboardUpdate(hwnd);
                 try { App.Clipboard?.OnClipboardUpdate(); } catch { }
                 break;
 
@@ -424,8 +513,26 @@ public partial class BarWindow : Window, IDisposable
                 try { App.Usb?.OnDeviceChange(wParam.ToInt32(), lParam); } catch { }
                 break;
 
-            case NativeMethods.WM_DISPLAYCHANGE:
             case NativeMethods.WM_SETTINGCHANGE:
+                // Light/dark switched (here or in Settings): the dark-mode toggle re-reads the registry.
+                if (lParam != IntPtr.Zero && Marshal.PtrToStringUni(lParam) == "ImmersiveColorSet")
+                    App.Toggles?.RefreshDarkMode();
+                // Regional settings may have switched the clock between 12 and 24 h.
+                Dispatcher.BeginInvoke(() =>
+                {
+                    _twelveHour = ResolveTwelveHour();
+                    // Windows "Animation effects" changed: re-derive Reduce Motion when following it.
+                    if (_cfg.ReduceMotionMode == ReduceMotionMode.FollowSystem && App.Settings is { } st) ApplySettingsUi(st.Current);
+                    OnSecondTick();
+                    Reposition();
+                });
+                break;
+
+            case NativeMethods.WM_POWERBROADCAST when IsBatteryBroadcast(wParam):
+                Dispatcher.BeginInvoke(OnBatteryChanged);
+                break;
+
+            case NativeMethods.WM_DISPLAYCHANGE:
             case NativeMethods.WM_POWERBROADCAST:
                 Dispatcher.BeginInvoke(Reposition);
                 break;
@@ -481,37 +588,59 @@ public partial class BarWindow : Window, IDisposable
                     : monitors.FirstOrDefault(m => m.Bounds.Left == 0 && m.Bounds.Top == 0)
                       ?? monitors[0];
 
-            double scale = 1.0;
-            try
-            {
-                if (NativeMethods.GetDpiForMonitor(mon.Handle, NativeMethods.MDT_EFFECTIVE_DPI,
-                        out uint dpiX, out _) == 0)
-                    scale = dpiX / 96.0;
-            }
-            catch { }
-
-            int workW = mon.WorkArea.Right - mon.WorkArea.Left;
-            int workH = mon.WorkArea.Bottom - mon.WorkArea.Top;
-            _winW = workW / scale;
-            _winH = workH / scale;
-            _maxOffsetDip = Math.Max(0, (_winW - Math.Max(80, _cfg.BarWidth)) / 2 - 8);
+            PlaceWindow(mon);
+            _maxOffsetDip = Math.Max(0, (_winW - CollapsedW) / 2 - 8);
 
             // Clamp a previously saved offset in case the target monitor shrank.
             _cfg.CustomOffsetX = Math.Clamp(offsetDip, -_maxOffsetDip, _maxOffsetDip);
-
-            // One fixed full-work-area window; the island morphs inside it (no per-frame resize).
-            Width = _winW;
-            Height = _winH;
-            NativeMethods.SetWindowPos(_hwnd, NativeMethods.HWND_TOPMOST,
-                mon.WorkArea.Left, mon.WorkArea.Top,
-                workW, workH,
-                NativeMethods.SWP_NOACTIVATE);
 
             ApplyDynamicCardScale();
             UpdatePillMargin();
             RefreshBlur();
         }
         catch (Exception ex) { Log.Debug("Reposition failed", ("error", ex.Message)); }
+    }
+
+    // The window is layered (per-pixel alpha): every changed frame pushes the whole surface, so it
+    // is kept only as tall as the island can get. Search (which sits lower on screen) gets the full
+    // work area while it is open and until its closing animation has settled.
+    private const double CompactWinH = 340;   // 6 top + 280 max card + shadow
+    private NativeMethods.MonitorInfoEx? _placedOn;
+    private bool _tallWindow;
+
+    /// <summary>Size the one overlay window to the work area of <paramref name="mon"/> (full width;
+    /// compact height unless the search bar needs the full height).</summary>
+    private void PlaceWindow(NativeMethods.MonitorInfoEx mon)
+    {
+        double scale = 1.0;
+        if (NativeMethods.GetDpiForMonitor(mon.Handle, NativeMethods.MDT_EFFECTIVE_DPI, out uint dpiX, out _) == 0)
+            scale = dpiX / 96.0;
+
+        int workW = mon.WorkArea.Right - mon.WorkArea.Left;
+        int workH = mon.WorkArea.Bottom - mon.WorkArea.Top;
+        _placedOn = mon;
+        _winW = workW / scale;
+        _winH = workH / scale;   // full work-area height (search position is relative to it)
+
+        double hDip = _tallWindow ? _winH : Math.Min(_winH, CompactWinH);
+        int hPx = (int)Math.Ceiling(hDip * scale);
+        Width = _winW;
+        Height = hDip;
+        NativeMethods.SetWindowPos(_hwnd, NativeMethods.HWND_TOPMOST,
+            mon.WorkArea.Left, mon.WorkArea.Top, workW, hPx, NativeMethods.SWP_NOACTIVATE);
+    }
+
+    private void SetTallWindow(bool tall)
+    {
+        if (tall == _tallWindow || _hwnd == IntPtr.Zero) return;
+        _tallWindow = tall;
+        if (_placedOn is { } mon) PlaceWindow(mon);
+    }
+
+    /// <summary>Animations settled: once search is fully closed, give back the tall window.</summary>
+    private void OnAnimationsSettled()
+    {
+        if (_islandState != IslandVisualState.Search && _tallWindow) SetTallWindow(false);
     }
 
     private double CurrentDpi() =>
@@ -591,7 +720,7 @@ public partial class BarWindow : Window, IDisposable
         {
             left = (_winW - _currentW) / 2;
         }
-        else if (_currentW <= IslandExpandedW)
+        else if (_currentW <= IslandOpenW)
         {
             // Collapsed and hover: stay centred so the pill grows evenly on both sides.
             left = (_winW - _currentW) / 2 + offset;
@@ -602,7 +731,7 @@ public partial class BarWindow : Window, IDisposable
             // On desktop: keep left edge fixed at the hover center so disc/icons don't shift.
             // On laptop: if extending to targetDetailW would exceed screen bounds (safe right margin 24 DIPs),
             // smoothly and proportionally adjust left so it never touches the right edge or jerks.
-            double hoverLeft = (_winW - IslandExpandedW) / 2 + offset;
+            double hoverLeft = (_winW - IslandOpenW) / 2 + offset;
             double targetW = DetailWidth();
             const double safeMargin = 24.0;
             double maxAllowedLeft = _winW - targetW - safeMargin;
@@ -616,7 +745,7 @@ public partial class BarWindow : Window, IDisposable
             {
                 // Smaller screen (laptop) - interpolate left smoothly as _currentW expands
                 // so the movement is gentle, fluid and proportional throughout the spring animation.
-                double progress = Math.Clamp((_currentW - IslandExpandedW) / Math.Max(1.0, targetW - IslandExpandedW), 0.0, 1.0);
+                double progress = Math.Clamp((_currentW - IslandOpenW) / Math.Max(1.0, targetW - IslandOpenW), 0.0, 1.0);
                 left = hoverLeft + (maxAllowedLeft - hoverLeft) * progress;
             }
         }
@@ -695,8 +824,8 @@ public partial class BarWindow : Window, IDisposable
             Fade(OrbHost, 1, 140);
         }));
 
-        double w = Math.Max(80, _cfg.BarWidth);
-        double h = Math.Max(24, _cfg.BarHeight);
+        double w = CollapsedW;
+        double h = CollapsedH;
         _anim.Animate("w", _currentW, w, ApplyW);
         _anim.Animate("h", _currentH, h, ApplyH);
         UpdateCollapsed();
@@ -788,15 +917,17 @@ public partial class BarWindow : Window, IDisposable
         {
             case IslandVisualState.Collapsed:
                 _pinned = false;
+                IconRow.SetPage(0, instant: true);
+                IconRow.SuspendPulse();
                 HideIslandContent();
-                AnimateIsland(Math.Max(80, _cfg.BarWidth), Math.Max(24, _cfg.BarHeight));
+                AnimateIsland(CollapsedW, CollapsedH);
                 MorphDisc(DiscCollapsed);
                 break;
 
             case IslandVisualState.Expanded:
                 EnsureTelemetry();
                 ShowIslandContent(withPanel: false);
-                AnimateIsland(IslandExpandedW, MeasureIslandHeight());
+                AnimateIsland(IslandOpenW, MeasureIslandHeight());
                 MorphDisc(DiscExpanded);
                 break;
 
@@ -804,6 +935,7 @@ public partial class BarWindow : Window, IDisposable
                 EnsureTelemetry();
                 ShowIslandContent(withPanel: true);
                 IconRow.SetActive(metric);
+                SwitchPanel();   // entering Detail from Expanded must show the metric's panel too
                 UpdatePanelContent();
                 AnimateIsland(DetailWidth(), MeasureIslandHeight());
                 MorphDisc(DiscExpanded);
@@ -827,6 +959,9 @@ public partial class BarWindow : Window, IDisposable
                 SearchHost.Opacity = 1;
                 break;
         }
+        SyncTimelineTimer();
+        // Reduce Motion applies geometry instantly, so no "settled" event will follow.
+        if (state != IslandVisualState.Search && (_cfg.ReduceMotion || !_anim.IsAnimating)) SetTallWindow(false);
     }
 
     private void RenderTelemetry(TelemetryDetailPanel panel, IslandMetric metric)
@@ -835,10 +970,11 @@ public partial class BarWindow : Window, IDisposable
         var tel = App.Telemetry;
         if (snap is null || tel is null)
         {
+            // No sample yet: show an empty canvas (rows appear once real values arrive).
             switch (metric)
             {
                 case IslandMetric.Cpu: panel.ShowCpu(new CpuStats(0, "", 0, 0, 0, false), null, null); break;
-                case IslandMetric.Gpu: panel.ShowGpu(new GpuTrack { Name = "" }, 0, 1, null); break;
+                case IslandMetric.Gpu: panel.ShowGpu(new GpuTrack(), 0, Array.Empty<string>(), null); break;
                 case IslandMetric.Ram: panel.ShowRam(new MemoryStats(0, 0, 0, false), 0, 0, 0, -1, -1, null); break;
             }
             return;
@@ -846,19 +982,24 @@ public partial class BarWindow : Window, IDisposable
 
         var gpus = tel.SnapshotGpuTracks();
         var procs = snap.TopProcesses;
+        bool fahrenheit = _cfg.TemperatureFahrenheit;
         switch (metric)
         {
             case IslandMetric.Cpu:
-                panel.ShowCpu(snap.Cpu, tel.CpuCoreUsage, tel.CpuHistory, procs);
+                tel.SensorLuid = 0;
+                panel.ShowCpu(snap.Cpu, tel.CpuCoreUsage, tel.CpuHistory, procs,
+                    tel.CpuTemperatureC, tel.CpuLoad, fahrenheit);
                 break;
 
             case IslandMetric.Gpu:
-                if (gpus.Count == 0) { panel.ShowGpu(new GpuTrack { Name = "" }, 0, 1, null, procs); break; }
+                if (gpus.Count == 0) { tel.SensorLuid = 0; panel.ShowGpu(new GpuTrack(), 0, Array.Empty<string>(), null, procs); break; }
                 int idx = Math.Clamp(_gpuIndex, 0, gpus.Count - 1);
-                panel.ShowGpu(gpus[idx], idx, gpus.Count, tel.GetGpuHistory(idx), procs);
+                tel.SensorLuid = gpus[idx].Luid;   // NVML is read only for the GPU on screen
+                panel.ShowGpu(gpus[idx], idx, gpus.Select(g => g.Name).ToList(), tel.GetGpuHistory(idx), procs, fahrenheit);
                 break;
 
             case IslandMetric.Ram:
+                tel.SensorLuid = 0;
                 panel.ShowRam(snap.Memory, tel.RamSwapUsedBytes, tel.RamSwapTotalBytes,
                     tel.RamCacheBytes, tel.DiskReadBytesPerSec, tel.DiskWriteBytesPerSec,
                     tel.RamHistory, procs);
@@ -869,7 +1010,7 @@ public partial class BarWindow : Window, IDisposable
     private void AnimateIsland(double w, double h)
     {
         double targetTop = _islandState == IslandVisualState.Search ? Math.Round(_winH * 0.22) : PillTop;
-        double targetR = _islandState == IslandVisualState.Search ? 29 : (_islandState != IslandVisualState.Collapsed ? 36 : _cfg.CornerRadius);
+        double targetR = _islandState == IslandVisualState.Search ? 29 : (_islandState != IslandVisualState.Collapsed ? 36 : CollapsedRadius);
 
         if (_cfg.ReduceMotion)
         {
@@ -966,7 +1107,8 @@ public partial class BarWindow : Window, IDisposable
     }
 
     private UIElement[] AllPanels => new UIElement[]
-        { DetailPanelComponent, NetPanelComponent, MirrorPanelComponent, WeatherPanelComponent };
+        { DetailPanelComponent, NetPanelComponent, MirrorPanelComponent, WeatherPanelComponent, TogglesPanelComponent,
+          ClipboardPanelComponent, TimerPanelComponent };
 
     /// <summary>Shows the panel matching the active metric (telemetry card, net card, mirror card
     /// or weather card) and fades the others out. Only meaningful in the island's Detail state.</summary>
@@ -975,6 +1117,9 @@ public partial class BarWindow : Window, IDisposable
         IslandMetric.Net => NetPanelComponent,
         IslandMetric.Mirror => MirrorPanelComponent,
         IslandMetric.Weather => WeatherPanelComponent,
+        IslandMetric.Toggles => TogglesPanelComponent,
+        IslandMetric.Clipboard => ClipboardPanelComponent,
+        IslandMetric.Timer => TimerPanelComponent,
         _ => DetailPanelComponent,
     };
 
@@ -1025,20 +1170,24 @@ public partial class BarWindow : Window, IDisposable
     }
 
     private string _currentTitle = "";
+    private bool _settingsApplied;
+    private bool _titleMarqueeOpen;
 
     private void UpdateIslandContent()
     {
         UpdateCollapsed();
         var m = _lastMedia;
-        string title = m is not null && !string.IsNullOrWhiteSpace(m.Title) ? m.Title : "Dynamic";
+        // No placeholder text: without a media session the idle layout is shown instead.
+        string title = m is not null && !string.IsNullOrWhiteSpace(m.Title) ? m.Title : (m?.SourceAppName ?? "");
         UpdateTitleScroll(title);
 
-        HoverArtist.Text = m is not null && !string.IsNullOrWhiteSpace(m.Artist) ? m.Artist : (m is not null ? m.Album : "Windows Dynamic Bar");
+        HoverArtist.Text = m is not null && !string.IsNullOrWhiteSpace(m.Artist) ? m.Artist : (m?.Album ?? "");
 
         var sessions = App.Media?.GetSessions();
-        string appName = !string.IsNullOrWhiteSpace(m?.SourceAppName) ? m.SourceAppName : "Music";
+        string appName = m?.SourceAppName ?? "";
         SourceChipText.Text = sessions is not null && sessions.Count > 1 ? $"{appName} ▾" : appName;
         SourceChip.Cursor = sessions is not null && sessions.Count > 1 ? Cursors.Hand : Cursors.Arrow;
+        SourceChip.Visibility = string.IsNullOrWhiteSpace(appName) ? Visibility.Collapsed : Visibility.Visible;
 
         bool hasMedia = m is not null && !string.IsNullOrWhiteSpace(m.Title);
         bool playing = m?.IsPlaying == true;
@@ -1064,21 +1213,49 @@ public partial class BarWindow : Window, IDisposable
             (byte)(dominant.G * 0.45 + 255 * 0.55),
             (byte)(dominant.B * 0.45 + 255 * 0.55)));
 
-        AlbumRadialGlowStop.Color = Color.FromArgb(38, dominant.R, dominant.G, dominant.B);
+        // Glow / radial tint: Auto = album colour with music, time-of-day accent when idle;
+        // Time of day = always the time-of-day colour; Fixed = the chosen colour.
+        Color glow = _cfg.AccentMode switch
+        {
+            AccentMode.Fixed => FixedAccent(),
+            AccentMode.TimeOfDay => IdleClock.Accent(_todHue),
+            _ => _idleMode ? IdleClock.Accent(_todHue) : dominant,
+        };
+        AlbumRadialGlowStop.Color = Color.FromArgb(38, glow.R, glow.G, glow.B);
         AlbumRadialGlow.Opacity = _islandState != IslandVisualState.Collapsed ? 1.0 : 0.0;
-        PillShadow.Color = _islandState != IslandVisualState.Collapsed ? dominant : Colors.Black;
+        PillShadow.Color = _islandState != IslandVisualState.Collapsed ? glow : Colors.Black;
 
         ShowDisc(m);
         IconRow.ReduceMotion = _cfg.ReduceMotion;
         UpdateIconRowValues();
+        if (_idleMode && _islandState != IslandVisualState.Collapsed) UpdateIdleOpen(DateTime.Now);
     }
 
     private void UpdateTitleScroll(string title)
     {
-        if (_currentTitle == title && HoverTitle.Text == title) return;
+        bool open = _islandState is IslandVisualState.Expanded or IslandVisualState.Detail;
+        if (_currentTitle == title && HoverTitle.Text == title && open == _titleMarqueeOpen) return;
         _currentTitle = title;
+        _titleMarqueeOpen = open;
         HoverTitle.Text = title;
+        // Measure after the layout pass: when the island is just opening the box width is stale.
+        if (!_titleMarqueeQueued)
+        {
+            _titleMarqueeQueued = true;
+            Dispatcher.BeginInvoke(DispatcherPriority.Loaded, ApplyTitleMarquee);
+        }
+    }
 
+    private bool _titleMarqueeQueued;
+
+    /// <summary>Static title when it fits; otherwise a slow back-and-forth marquee while the island
+    /// is open, or an ellipsis (collapsed / Reduce Motion).</summary>
+    private void ApplyTitleMarquee()
+    {
+        _titleMarqueeQueued = false;
+        bool open = _titleMarqueeOpen;
+        HoverTitle.MaxWidth = double.PositiveInfinity;
+        HoverTitle.TextTrimming = TextTrimming.None;
         HoverTitle.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
         double textW = HoverTitle.DesiredSize.Width;
         double boxW = TitleContainer.ActualWidth > 0 ? TitleContainer.ActualWidth : 242;
@@ -1087,19 +1264,18 @@ public partial class BarWindow : Window, IDisposable
         {
             HoverTitleTransform.BeginAnimation(TranslateTransform.XProperty, null);
             HoverTitleTransform.X = 0;
-            HoverTitle.TextTrimming = TextTrimming.None;
         }
         else
         {
-            if (_cfg.ReduceMotion)
+            if (_cfg.ReduceMotion || !open)
             {
                 HoverTitleTransform.BeginAnimation(TranslateTransform.XProperty, null);
                 HoverTitleTransform.X = 0;
+                HoverTitle.MaxWidth = boxW;   // inside a Canvas the trimming needs an explicit width
                 HoverTitle.TextTrimming = TextTrimming.CharacterEllipsis;
             }
             else
             {
-                HoverTitle.TextTrimming = TextTrimming.None;
                 double delta = textW - boxW + 8;
                 var anim = new DoubleAnimationUsingKeyFrames
                 {
@@ -1230,12 +1406,17 @@ public partial class BarWindow : Window, IDisposable
 
     private void OnTimelineTick()
     {
-        if (_islandState != IslandVisualState.Collapsed)
-        {
-            UpdateTimeline();
-            UpdateLyricDisplay();
-        }
-        CheckWarningStrip();
+        UpdateTimeline();
+        UpdateLyricDisplay();
+    }
+
+    /// <summary>The 250 ms progress/lyrics timer is only useful while the open island shows a
+    /// media session; it never runs collapsed or idle.</summary>
+    private void SyncTimelineTimer()
+    {
+        bool want = IsVisible && !_idleMode && _islandState is IslandVisualState.Expanded or IslandVisualState.Detail;
+        if (want == _timelineTimer.IsEnabled) return;
+        if (want) _timelineTimer.Start(); else _timelineTimer.Stop();
     }
 
     private void UpdateVolumeControls()
@@ -1454,6 +1635,14 @@ public partial class BarWindow : Window, IDisposable
         if (!Pill.IsMouseOver && !IsKeyboardFocusWithin) return;
         if (Keyboard.FocusedElement is TextBox || Keyboard.FocusedElement is Slider) return;
 
+        if ((Keyboard.Modifiers & ModifierKeys.Control) != 0 && e.Key is Key.Left or Key.Right
+            && _islandState is IslandVisualState.Expanded or IslandVisualState.Detail)
+        {
+            if (e.Key == Key.Right) IconRow.SetPage(IconRow.Page + 1); else IconRow.SetPage(IconRow.Page - 1);
+            e.Handled = true;
+            return;
+        }
+
         switch (e.Key)
         {
             case Key.Space:
@@ -1505,21 +1694,27 @@ public partial class BarWindow : Window, IDisposable
 
     private void CheckWarningStrip()
     {
-        var snap = _telemetry;
+        // Telemetry only samples while the island is open; a stale snapshot must not keep
+        // counting towards a RAM/CPU warning.
+        var snap = _telemetry is { } t && DateTime.UtcNow - t.Timestamp < TimeSpan.FromSeconds(3) ? t : null;
         double ram = snap is not null && snap.Memory.Available ? snap.Memory.UsedPercent : -1;
         double cpu = snap is not null && snap.Cpu.Available ? snap.Cpu.Utilization : -1;
 
-        float batteryPct = -1;
-        bool isCharging = true;
-        try
-        {
-            var pwr = System.Windows.Forms.SystemInformation.PowerStatus;
-            batteryPct = pwr.BatteryLifePercent * 100f;
-            isCharging = (pwr.PowerLineStatus == System.Windows.Forms.PowerLineStatus.Online);
-        }
-        catch { }
+        // Battery values are cached from power notifications (no polling here).
+        float batteryPct = _hasBattery ? (float)_battPct : -1;
+        bool isCharging = _battOnAc;
 
         bool shouldShow = _warningLogic.Update(ram, cpu, batteryPct, isCharging, out string kind);
+        if (shouldShow == _warningStripActive && kind == _warningKind)
+        {
+            // No state change: only the battery percentage text can move while the strip is up.
+            if (shouldShow && kind == "Battery")
+            {
+                string live = $"Battery at {Math.Round(batteryPct):F0}%";
+                if (WarningStripText.Text != live) WarningStripText.Text = live;
+            }
+            return;
+        }
         string text = "";
 
         if (shouldShow)
@@ -1532,13 +1727,13 @@ public partial class BarWindow : Window, IDisposable
             }
             else if (kind == "CPU")
             {
-                var topProc = GetTopCpuProcess();
-                string procStr = topProc is not null ? $" · {topProc.Value.Item1} at {topProc.Value.Item2}%" : "";
+                var top = snap?.TopProcesses is { Count: > 0 } tp ? tp[0] : null;
+                string procStr = top is not null ? $" · {top.Name} at {top.CpuPercent:F0}%" : "";
                 text = $"CPU at {Math.Round(cpu):F0}%{procStr}";
             }
             else if (kind == "Battery")
             {
-                text = $"Battery low at {Math.Round(batteryPct):F0}% · Plug in soon";
+                text = $"Battery at {Math.Round(batteryPct):F0}%";
             }
         }
 
@@ -1558,38 +1753,26 @@ public partial class BarWindow : Window, IDisposable
                 Fade(WarningStrip, 0, 150, () => WarningStrip.Visibility = Visibility.Collapsed);
             }
 
-            if (_islandState != IslandVisualState.Collapsed)
-            {
-                AnimateIsland(_currentW, MeasureIslandHeight());
-            }
+            // The island grows by the strip's 40 px (collapsed pill included) and shrinks back.
+            CollapsedPanel.Margin = new Thickness(0, 0, 0, shouldShow ? 40 : 0);
+            if (_islandState != IslandVisualState.Collapsed) AnimateIsland(_currentW, MeasureIslandHeight());
+            else if (!_expanded) AnimateIsland(CollapsedW, CollapsedH);
         }
     }
 
     private static (string, string)? GetTopMemoryProcess()
     {
+        Process[] all;
+        try { all = Process.GetProcesses(); }
+        catch (InvalidOperationException) { return null; }
         try
         {
-            var p = Process.GetProcesses().OrderByDescending(x => x.WorkingSet64).FirstOrDefault();
-            if (p is not null)
-            {
-                string size = FormatBytes(p.WorkingSet64);
-                return (p.ProcessName + ".exe", size);
-            }
+            Process? top = null;
+            foreach (var p in all)
+                if (top is null || p.WorkingSet64 > top.WorkingSet64) top = p;
+            return top is null ? null : (top.ProcessName + ".exe", FormatBytes(top.WorkingSet64));
         }
-        catch { }
-        return null;
-    }
-
-    private static (string, string)? GetTopCpuProcess()
-    {
-        try
-        {
-            var p = Process.GetProcesses().OrderByDescending(x => x.WorkingSet64).FirstOrDefault();
-            if (p is not null)
-                return (p.ProcessName + ".exe", "high");
-        }
-        catch { }
-        return null;
+        finally { foreach (var p in all) p.Dispose(); }
     }
 
     private static string FormatBytes(long bytes)
@@ -1605,6 +1788,11 @@ public partial class BarWindow : Window, IDisposable
     {
         if (_warningKind == "RAM") SetIslandState(IslandVisualState.Detail, IslandMetric.Ram, force: true);
         else if (_warningKind == "CPU") SetIslandState(IslandVisualState.Detail, IslandMetric.Cpu, force: true);
+        else if (_warningKind == "Battery")
+        {
+            try { Process.Start(new ProcessStartInfo("ms-settings:batterysaver") { UseShellExecute = true }); }
+            catch (System.ComponentModel.Win32Exception ex) { Log.Warning("Battery settings could not open", ("error", ex.Message)); }
+        }
     }
 
     private void OnWarningCloseClick(object sender, RoutedEventArgs e)
@@ -1613,10 +1801,9 @@ public partial class BarWindow : Window, IDisposable
 
         _warningStripActive = false;
         Fade(WarningStrip, 0, 150, () => WarningStrip.Visibility = Visibility.Collapsed);
-        if (_islandState != IslandVisualState.Collapsed)
-        {
-            AnimateIsland(_currentW, MeasureIslandHeight());
-        }
+        CollapsedPanel.Margin = new Thickness(0);
+        if (_islandState != IslandVisualState.Collapsed) AnimateIsland(_currentW, MeasureIslandHeight());
+        else if (!_expanded) AnimateIsland(CollapsedW, CollapsedH);
     }
 
     private void UpdateIconRowValues()
@@ -1630,6 +1817,196 @@ public partial class BarWindow : Window, IDisposable
         IconRow.SetAvailability(cpu >= 0, gpu >= 0, ram >= 0);
         UpdateNetIcon();
         UpdateWeatherIcon();
+        UpdatePage2Rings();
+    }
+
+    /// <summary>Clip: fill = history size / limit, label = count. Toggles: no arc, label = number
+    /// on. Timer: arc = progress, label = time left or "off". Values come only from real state.</summary>
+    private void UpdatePage2Rings()
+    {
+        var t = _lastTimer;
+        if (t is { State: TimerState.Running or TimerState.Paused } && t.Remaining > TimeSpan.Zero)
+            IconRow.SetRing(IslandMetric.Timer, t.Progress * 100, IdleClock.FormatCountdown(t.Remaining));
+        else
+            IconRow.SetRing(IslandMetric.Timer, -1, "off");
+        UpdateClipRing();
+        UpdateTogglesRing();
+    }
+
+    // ---------------------------------------------------------------- clipboard history
+
+    private IntPtr _clipPasteTarget;
+    private bool _clipByHotkey;
+
+    private void HookClipboardPanel(bool on)
+    {
+        var p = ClipboardPanelComponent;
+        if (on)
+        {
+            p.ItemChosen += OnClipItemChosen;
+            p.PinRequested += OnClipPin;
+            p.DeleteRequested += OnClipDelete;
+            p.ClearRequested += OnClipClear;
+            p.PauseRequested += OnClipPause;
+            p.CloseRequested += CloseClipboardPanel;
+            if (App.ClipHistory is not null) App.ClipHistory.Changed += OnClipHistoryChanged;
+        }
+        else
+        {
+            p.ItemChosen -= OnClipItemChosen;
+            p.PinRequested -= OnClipPin;
+            p.DeleteRequested -= OnClipDelete;
+            p.ClearRequested -= OnClipClear;
+            p.PauseRequested -= OnClipPause;
+            p.CloseRequested -= CloseClipboardPanel;
+            if (App.ClipHistory is not null) App.ClipHistory.Changed -= OnClipHistoryChanged;
+        }
+    }
+
+    private void UpdateClipRing()
+    {
+        var c = App.ClipHistory;
+        if (c is null || !c.Enabled) { IconRow.SetRing(IslandMetric.Clipboard, -1, "off"); return; }
+        int n = c.Items.Count(i => !i.Pinned);
+        IconRow.SetRing(IslandMetric.Clipboard, n * 100.0 / Math.Max(1, c.Limit), c.Paused ? "pause" : n.ToString(CultureInfo.InvariantCulture));
+    }
+
+    private void RenderClipboard()
+    {
+        var c = App.ClipHistory;
+        ClipboardPanelComponent.Render(c?.Items ?? Array.Empty<WindowsDynamicBar.Core.Clipboard.ClipItem>(),
+            c?.Limit ?? _cfg.ClipboardLimit, c?.Paused ?? false, c?.Enabled ?? false);
+    }
+
+    private void OnClipHistoryChanged()
+    {
+        try
+        {
+            Dispatcher.BeginInvoke(() =>
+            {
+                if (IslandExpandedHost.Visibility != Visibility.Visible) return;
+                UpdateClipRing();
+                if (_islandState == IslandVisualState.Detail && _activeMetric == IslandMetric.Clipboard) RenderClipboard();
+            });
+        }
+        catch (TaskCanceledException) { /* dispatcher shutting down */ }
+    }
+
+    /// <summary>Hotkey (or debug/test): open the island directly on the clipboard card. Only the
+    /// hotkey takes keyboard focus (the search box); hover/click never steals focus.</summary>
+    private void OpenClipboardPanel(bool byHotkey)
+    {
+        if (App.ClipHistory is not { Enabled: true }) return;
+        if (_islandState == IslandVisualState.Search) CloseSearch();
+        if (!IsVisible && _cfg.BarEnabled) Show();
+        _clipByHotkey = byHotkey;
+        _clipPasteTarget = byHotkey ? NativeMethods.GetForegroundWindow() : IntPtr.Zero;
+        if (_clipPasteTarget == _hwnd) _clipPasteTarget = IntPtr.Zero;
+        ClipboardPanelComponent.ResetQuery();
+        int page = IconRow.PageOf(IslandMetric.Clipboard);
+        if (page >= 0) IconRow.SetPage(page, instant: true);
+        _pinned = true;
+        SetIslandState(IslandVisualState.Detail, IslandMetric.Clipboard, force: true);
+        if (byHotkey)
+        {
+            Activate();
+            // The card was just made visible: focus its search box after this layout pass.
+            Dispatcher.BeginInvoke(DispatcherPriority.Input, () =>
+            {
+                if (_activeMetric == IslandMetric.Clipboard) ClipboardPanelComponent.FocusSearch();
+            });
+        }
+    }
+
+    private void CloseClipboardPanel()
+    {
+        bool byHotkey = _clipByHotkey;
+        IntPtr back = _clipPasteTarget;
+        _clipByHotkey = false;
+        _clipPasteTarget = IntPtr.Zero;
+        _pinned = false;
+        SetIslandState(IslandVisualState.Collapsed, IslandMetric.None, force: true);
+        if (byHotkey && back != IntPtr.Zero) WindowActivation.BringToFront(back);
+    }
+
+    private void OnClipItemChosen(WindowsDynamicBar.Core.Clipboard.ClipItem item)
+    {
+        var c = App.ClipHistory;
+        if (c is null) return;
+        // The window that was in front when the hotkey opened the card.
+        IntPtr origin = _clipPasteTarget;
+        bool byHotkey = _clipByHotkey;
+        _clipPasteTarget = IntPtr.Zero;
+        _clipByHotkey = false;
+        _pinned = false;
+        SetIslandState(IslandVisualState.Collapsed, IslandMetric.None, force: true);
+
+        bool paste = _cfg.ClipboardPasteOnSelect && origin != IntPtr.Zero;
+        string? error = c.Restore(item, paste ? origin : IntPtr.Zero);   // paste: focus restored, then Ctrl+V
+        if (error is not null) { ShowActionSuccess(error); return; }
+        if (!paste)
+        {
+            ShowActionSuccess("Copied");
+            if (byHotkey && origin != IntPtr.Zero) WindowActivation.BringToFront(origin);
+        }
+    }
+
+    private void OnClipPin(long id, bool pinned) => App.ClipHistory?.SetPinned(id, pinned);
+    private void OnClipDelete(long id) => App.ClipHistory?.Remove(id);
+    private void OnClipClear() => App.ClipHistory?.ClearAll();
+    private void OnClipPause(bool paused) => App.ClipHistory?.SetPaused(paused);
+
+    private void UpdateTogglesRing()
+    {
+        // No arc for toggles: the label is the number of toggles that are on.
+        var t = App.Toggles;
+        IconRow.SetRing(IslandMetric.Toggles, -1, t is null ? "" : $"{t.OnCount} on");
+    }
+
+    // ---------------------------------------------------------------- quick toggles
+
+    private string _toggleStatus = "";
+    private QuickToggleService? _hookedToggles;
+
+    private void OnServiceToggled()
+    {
+        if (_hookedToggles is not null) _hookedToggles.Changed -= OnTogglesChanged;
+        _hookedToggles = App.Toggles;
+        if (_hookedToggles is not null) _hookedToggles.Changed += OnTogglesChanged;
+    }
+
+    private void RenderToggles()
+    {
+        var t = App.Toggles;
+        TogglesPanelComponent.ReduceMotion = _cfg.ReduceMotion;
+        TogglesPanelComponent.Render(t?.States ?? Array.Empty<ToggleState>(), _toggleStatus);
+    }
+
+    /// <summary>A toggle changed (here or elsewhere, from OS events): refresh ring + panel.</summary>
+    private void OnTogglesChanged()
+    {
+        try
+        {
+            Dispatcher.BeginInvoke(() =>
+            {
+                if (IslandExpandedHost.Visibility != Visibility.Visible) return;
+                UpdateTogglesRing();
+                if (_islandState == IslandVisualState.Detail && _activeMetric == IslandMetric.Toggles) RenderToggles();
+            });
+        }
+        catch (TaskCanceledException) { /* dispatcher shutting down */ }
+    }
+
+    private async void OnToggleRequested(ToggleId id, bool on)
+    {
+        var svc = App.Toggles;
+        if (svc is null) return;
+        string? error = await svc.SetAsync(id, on);
+        // On failure the old (re-read) state stays and the real error is shown once.
+        string label = svc.States.FirstOrDefault(s => s.Id == id)?.Label ?? id.ToString();
+        _toggleStatus = error is null ? $"{label} {(on ? "on" : "off")}" : $"{label}: {error}";
+        if (_islandState == IslandVisualState.Detail && _activeMetric == IslandMetric.Toggles) RenderToggles();
+        UpdateTogglesRing();
     }
 
     private void UpdateWeatherIcon()
@@ -1637,7 +2014,7 @@ public partial class BarWindow : Window, IDisposable
         var snap = _weather?.Snapshot;
         if (snap is null || !snap.Available)
         {
-            IconRow.UpdateWeather(-1, "\u2014", Color.FromRgb(0xE8, 0xB0, 0x4B));
+            IconRow.UpdateWeather(-1, "", Color.FromRgb(0xE8, 0xB0, 0x4B));
             return;
         }
 
@@ -1668,7 +2045,7 @@ public partial class BarWindow : Window, IDisposable
     private void UpdateNetIcon()
     {
         var monitor = _netMonitor;
-        if (monitor is null) { IconRow.UpdateNet(-1, "\u2014"); return; }
+        if (monitor is null) { IconRow.UpdateNet(-1, ""); return; }
 
         var test = monitor.TestState;
         bool running = test.Phase is NetTestPhase.Ping or NetTestPhase.Download or NetTestPhase.Upload;
@@ -1678,7 +2055,7 @@ public partial class BarWindow : Window, IDisposable
         else if (test.DownMbps is double down)
             IconRow.UpdateNet(Math.Clamp(down / NetworkMonitor.GraphMaxMbps * 100, 0, 100), ShortRate(down));
         else
-            IconRow.UpdateNet(-1, "\u2014");
+            IconRow.UpdateNet(-1, "");
     }
 
     private static string ShortRate(double mbps)
@@ -1710,7 +2087,7 @@ public partial class BarWindow : Window, IDisposable
 
     private void OnNetTestToggle()
     {
-        if (_netMonitor is null) return;
+        if (_netMonitor is null || !_cfg.FeatureSpeedTest) return;
         if (_netMonitor.TestRunning) _netMonitor.CancelSpeedTest();
         else _netMonitor.StartSpeedTest();
     }
@@ -1751,6 +2128,27 @@ public partial class BarWindow : Window, IDisposable
         {
             EnsureNetMonitor();
             if (_netMonitor is not null) NetPanelComponent.Render(_netMonitor);
+            UpdateIconRowValues();
+            return;
+        }
+
+        if (_activeMetric == IslandMetric.Toggles)
+        {
+            RenderToggles();
+            UpdateIconRowValues();
+            return;
+        }
+
+        if (_activeMetric == IslandMetric.Clipboard)
+        {
+            RenderClipboard();
+            UpdateIconRowValues();
+            return;
+        }
+
+        if (_activeMetric == IslandMetric.Timer)
+        {
+            TimerPanelComponent.Render(_lastTimer ?? App.Timer?.Current);
             UpdateIconRowValues();
             return;
         }
@@ -1823,9 +2221,27 @@ public partial class BarWindow : Window, IDisposable
         try { if (App.Telemetry is { IsActive: true }) App.Telemetry.Deactivate(); } catch { }
     }
 
+    /// <summary>The ring's panel switched off the visible page: close it, keep the island open.</summary>
+    private void OnIconPageChanged(int page)
+    {
+        _collapseDelay.Stop();
+        if (_islandState == IslandVisualState.Detail && !IconRow.IsOnVisiblePage(_activeMetric))
+        {
+            _pinned = false;
+            SetIslandState(IslandVisualState.Expanded, IslandMetric.None, force: true);
+        }
+        UpdateIconRowValues();
+    }
+
+    /// <summary>Metrics whose ring opens a detail panel (page-2 panels register here as they land).</summary>
+    private static bool HasPanel(IslandMetric m) => m is IslandMetric.Cpu or IslandMetric.Gpu or IslandMetric.Ram
+        or IslandMetric.Mirror or IslandMetric.Net or IslandMetric.Weather or IslandMetric.Toggles
+        or IslandMetric.Clipboard or IslandMetric.Timer;
+
     private void OnIconMetricHovered(IslandMetric metric)
     {
         if (_islandState == IslandVisualState.Search) return;
+        if (!HasPanel(metric)) return;
         if (_expanded || _pinned) return;   // pinned panel ignores hover until clicked again
         _collapseDelay.Stop();
         SetIslandState(IslandVisualState.Detail, metric);
@@ -1844,6 +2260,7 @@ public partial class BarWindow : Window, IDisposable
     private void OnIconMetricClicked(IslandMetric metric)
     {
         if (_islandState == IslandVisualState.Search) return;
+        if (!HasPanel(metric)) return;
         // Mirror: a click toggles the camera (per privacy design). Click once to start and pin the
         // panel; click again to stop the camera and shrink back to the collapsed island.
         if (metric == IslandMetric.Mirror)
@@ -1905,6 +2322,9 @@ public partial class BarWindow : Window, IDisposable
     {
         try
         {
+            // Volume/brightness HUD switched off: those events never open the island.
+            if (!_cfg.FeatureVolumeHud && evt.Kind is BarEventKind.Volume or BarEventKind.Brightness) return;
+
             // If the dynamic island is open (expanded music pill, detail telemetry panel, or hovered),
             // transient HUD events (volume, brightness) or media must NOT collapse or preempt the open island.
             if (_islandState != IslandVisualState.Collapsed || _islandHovering)
@@ -1923,6 +2343,12 @@ public partial class BarWindow : Window, IDisposable
                     UpdateIslandContent();
                     return;
                 }
+
+                if (evt.Kind is BarEventKind.Focus or BarEventKind.Timer)
+                {
+                    _shown = evt;   // the open island (timer card, ring, Focus button) shows the countdown
+                    return;
+                }
             }
 
             // Refresh in place when the same widget is already on screen.
@@ -1938,6 +2364,13 @@ public partial class BarWindow : Window, IDisposable
             // Respect a recent manual dismissal of this same kind (no nagging).
             if (_userDismissed && _shown?.Kind == evt.Kind &&
                 DateTime.UtcNow - _dismissedAt < TimeSpan.FromSeconds(3))
+            {
+                _shown = evt;
+                return;
+            }
+
+            // Do Not Disturb (island): notification cards never open the island.
+            if (_cfg.DoNotDisturb && evt.Kind == BarEventKind.Notification)
             {
                 _shown = evt;
                 return;
@@ -1983,6 +2416,7 @@ public partial class BarWindow : Window, IDisposable
         }
 
         _lastMedia = info;
+        ApplyLayoutMode();
         if (_islandState != IslandVisualState.Collapsed)
         {
             UpdateIslandContent();
@@ -2003,7 +2437,16 @@ public partial class BarWindow : Window, IDisposable
 
     private void OnTimerChanged(TimerInfo info)
     {
+        var prev = _lastTimer;
         _lastTimer = info;
+        long second = (long)Math.Ceiling(info.Remaining.TotalSeconds);
+        bool finishedNow = info.State == TimerState.Finished && prev?.State == TimerState.Running;
+        if (second != _timerUiSecond || info.State != prev?.State)
+        {
+            _timerUiSecond = second;
+            try { Dispatcher.BeginInvoke(() => OnTimerUi(info, finishedNow)); }
+            catch (TaskCanceledException) { /* dispatcher shutting down */ }
+        }
         RerenderCurrent(BarEventKind.Timer, () => BarEvent.Create(BarEventKind.Timer,
             info.Label, TimerService.Format(info.Remaining), value: info.Progress,
             valueText: TimerService.Format(info.Remaining), payload: info, priority: 75,
@@ -2022,6 +2465,7 @@ public partial class BarWindow : Window, IDisposable
     private void OnFocusChanged(FocusInfo info)
     {
         _lastFocus = info;
+        try { Dispatcher.BeginInvoke(() => OnFocusUi(info)); } catch { }
         RerenderCurrent(BarEventKind.Focus, () => BarEvent.Create(BarEventKind.Focus,
             "Focus", info.Phase, valueText: TimerService.Format(info.Remaining),
             payload: info, priority: 70, displayDuration: TimeSpan.FromSeconds(4)));
@@ -2065,6 +2509,29 @@ public partial class BarWindow : Window, IDisposable
     {
         try
         {
+            // Effective Reduce Motion: Always / Never / follow Windows "Animation effects".
+            m.ReduceMotion = m.ReduceMotionMode switch
+            {
+                ReduceMotionMode.Always => true,
+                ReduceMotionMode.Never => false,
+                _ => !SystemParameters.ClientAreaAnimation,
+            };
+            bool first = !_settingsApplied;
+            _settingsApplied = true;
+            bool animChanged = first || _cfg.ReduceMotion != m.ReduceMotion || _cfg.AnimationSpeed != m.AnimationSpeed
+                               || _cfg.SpringStiffness != m.SpringStiffness || _cfg.SpringDamping != m.SpringDamping;
+            bool hotkeysChanged = first || _cfg.HotkeyToggle != m.HotkeyToggle || _cfg.HotkeyMedia != m.HotkeyMedia
+                                  || _cfg.HotkeyTimer != m.HotkeyTimer || _cfg.HotkeySearch != m.HotkeySearch
+                                  || _cfg.HotkeyClipboard != m.HotkeyClipboard
+                                  || _cfg.FeatureClipboardHistory != m.FeatureClipboardHistory
+                                  || _cfg.FeatureSearch != m.FeatureSearch || _cfg.FeatureTimers != m.FeatureTimers;
+            _cfg.HotkeyClipboard = m.HotkeyClipboard;
+            _cfg.FeatureClipboardHistory = m.FeatureClipboardHistory;
+            _cfg.ClipboardPasteOnSelect = m.ClipboardPasteOnSelect;
+            bool placeChanged = first || _cfg.MonitorIndex != m.MonitorIndex
+                                || Math.Abs(_cfg.CustomOffsetX - m.CustomOffsetX) > 0.5;
+            bool sizeChanged = first || _cfg.BarWidth != m.BarWidth || _cfg.BarHeight != m.BarHeight
+                               || _cfg.CornerRadius != m.CornerRadius;
             _cfg.BarWidth = m.BarWidth;
             _cfg.BarHeight = m.BarHeight;
             _cfg.CornerRadius = m.CornerRadius;
@@ -2081,6 +2548,7 @@ public partial class BarWindow : Window, IDisposable
             DetailPanelComponent.ReduceMotion = m.ReduceMotion;
             NetPanelComponent.ReduceMotion = m.ReduceMotion;
             MirrorPanelComponent.ReduceMotion = m.ReduceMotion;
+            IdleDotClock.ReduceMotion = m.ReduceMotion;
             _cfg.CollapseDelayMs = m.CollapseDelayMs;
             _cfg.HoverPreview = m.HoverPreview;
             _cfg.SystemMonitorInBar = m.SystemMonitorInBar;
@@ -2094,6 +2562,19 @@ public partial class BarWindow : Window, IDisposable
             _cfg.HotkeyMedia = m.HotkeyMedia;
             _cfg.HotkeyTimer = m.HotkeyTimer;
             _cfg.HotkeySearch = m.HotkeySearch;
+            _cfg.TemperatureFahrenheit = m.TemperatureFahrenheit;
+            ApplyFeatureSettings(m, first);
+            _warningLogic.RamPercent = Math.Clamp(m.WarnRamPercent, 50, 100);
+            _warningLogic.CpuPercent = Math.Clamp(m.WarnCpuPercent, 50, 100);
+            _warningLogic.BatteryPercent = Math.Clamp(m.WarnBatteryPercent, 5, 100);
+            if (_cfg.DoNotDisturb != m.DoNotDisturb)
+            {
+                _cfg.DoNotDisturb = m.DoNotDisturb;
+                App.Toggles?.RefreshDnd();
+            }
+            _cfg.IslandPage1 = m.IslandPage1;
+            _cfg.IslandPage2 = m.IslandPage2;
+            ApplyRingLayout(first);
 
             // accent (shared resource → DynamicResource consumers update live;
             // compiled brushes are frozen, so replace instead of mutating)
@@ -2120,19 +2601,28 @@ public partial class BarWindow : Window, IDisposable
                 RefreshBlur();
             }
 
-            _anim.Dispose();
-            _anim = CreateAnimator(m);
-
-            if (!_expanded)
+            if (animChanged)
             {
-                _anim.Animate("w", _currentW, m.BarWidth, ApplyW);
-                _anim.Animate("h", _currentH, m.BarHeight, ApplyH);
+                _anim.AnimationCompleted -= OnAnimationsSettled;
+                _anim.Dispose();
+                _anim = CreateAnimator(m);
             }
 
-            RegisterHotkeys();
-            Reposition(m.CustomOffsetX);
+            // Only re-size a collapsed pill; an open island keeps its geometry.
+            if (sizeChanged && !_expanded && _islandState == IslandVisualState.Collapsed)
+            {
+                _anim.Animate("w", _currentW, CollapsedW, ApplyW);
+                _anim.Animate("h", _currentH, CollapsedH, ApplyH);
+            }
+
+            if (hotkeysChanged) RegisterHotkeys();
+            if (placeChanged) Reposition(m.CustomOffsetX);
             UpdateShape();
             UpdateCollapsed();
+            IdleSearchText.Text = string.IsNullOrWhiteSpace(m.HotkeySearch)
+                ? "Search" : $"Search · {m.HotkeySearch.Replace("+", " ")}";
+            ApplyTodColors();
+            UpdateIslandContent();
             if (_expanded && _shown is { } s) { RenderEvent(s); }
         }
         catch (Exception ex) { Log.Error("Apply settings failed", ex); }
@@ -2216,6 +2706,13 @@ public partial class BarWindow : Window, IDisposable
 
     private void OnPillMouseWheel(object sender, MouseWheelEventArgs e)
     {
+        if (_islandState is IslandVisualState.Expanded or IslandVisualState.Detail && IconRow.IsMouseOver
+            && IconRow.PageCount > 1)
+        {
+            if (e.Delta < 0) IconRow.SetPage(IconRow.Page + 1); else IconRow.SetPage(IconRow.Page - 1);
+            e.Handled = true;
+            return;
+        }
         if (App.Volume is null) return;
         float delta = e.Delta > 0 ? 0.03f : -0.03f;
         float cur = App.Volume.Level;
@@ -2235,11 +2732,26 @@ public partial class BarWindow : Window, IDisposable
             CloseSearch();
             return;
         }
+        // The clipboard card opened by its hotkey closes when the user clicks elsewhere.
+        if (_clipByHotkey && _activeMetric == IslandMetric.Clipboard)
+        {
+            _clipByHotkey = false;
+            _clipPasteTarget = IntPtr.Zero;
+            _pinned = false;
+            SetIslandState(IslandVisualState.Collapsed, IslandMetric.None, force: true);
+            return;
+        }
         if (_expanded && !_dragMoved) UserDismiss();
     }
 
     private void OnPreviewKeyDown(object sender, KeyEventArgs e)
     {
+        if (e.Key == Key.Escape && _islandState == IslandVisualState.Detail && _activeMetric == IslandMetric.Clipboard)
+        {
+            e.Handled = true;
+            CloseClipboardPanel();
+            return;
+        }
         if (e.Key == Key.Escape)
         {
             if (_islandState == IslandVisualState.Search)
@@ -2344,66 +2856,46 @@ public partial class BarWindow : Window, IDisposable
     private void RegisterHotkeys()
     {
         if (_hwnd == IntPtr.Zero) return;
-        for (int id = 1; id <= 4; id++)
+        for (int id = 1; id <= 5; id++)
         {
             try { NativeMethods.UnregisterHotKey(_hwnd, id); } catch { }
         }
+        if (_hotkeysSuspended) return;
         if (TryParseHotkey(_cfg.HotkeyToggle, out uint m1, out uint v1))
             NativeMethods.RegisterHotKey(_hwnd, 1, m1 | NativeMethods.MOD_NOREPEAT, v1);
         if (TryParseHotkey(_cfg.HotkeyMedia, out uint m2, out uint v2))
             NativeMethods.RegisterHotKey(_hwnd, 2, m2 | NativeMethods.MOD_NOREPEAT, v2);
-        if (TryParseHotkey(_cfg.HotkeyTimer, out uint m3, out uint v3))
+        if (_cfg.FeatureTimers && TryParseHotkey(_cfg.HotkeyTimer, out uint m3, out uint v3))
             NativeMethods.RegisterHotKey(_hwnd, 3, m3 | NativeMethods.MOD_NOREPEAT, v3);
-        if (TryParseHotkey(_cfg.HotkeySearch, out uint m4, out uint v4))
+        if (_cfg.FeatureSearch && TryParseHotkey(_cfg.HotkeySearch, out uint m4, out uint v4))
         {
             bool ok = NativeMethods.RegisterHotKey(_hwnd, 4, m4 | NativeMethods.MOD_NOREPEAT, v4);
             if (!ok) Log.Debug("Search hotkey registration failed", ("hotkey", _cfg.HotkeySearch));
         }
+        if (_cfg.FeatureClipboardHistory && TryParseHotkey(_cfg.HotkeyClipboard, out uint m5, out uint v5))
+        {
+            bool ok = NativeMethods.RegisterHotKey(_hwnd, 5, m5 | NativeMethods.MOD_NOREPEAT, v5);
+            if (!ok) Log.Info("Clipboard hotkey is taken by another app", ("hotkey", _cfg.HotkeyClipboard));
+        }
+    }
+
+    private bool _hotkeysSuspended;
+
+    /// <summary>While the settings window records a shortcut, our own global hotkeys must not
+    /// swallow the keys being pressed.</summary>
+    public void SetHotkeysSuspended(bool suspended)
+    {
+        if (_hotkeysSuspended == suspended) return;
+        _hotkeysSuspended = suspended;
+        if (suspended)
+        {
+            for (int id = 1; id <= 5; id++) NativeMethods.UnregisterHotKey(_hwnd, id);
+        }
+        else RegisterHotkeys();
     }
 
     /// <summary>"Ctrl+Alt+Space" → (modifier flags, virtual-key code).</summary>
-    public static bool TryParseHotkey(string? text, out uint mods, out uint vk)
-    {
-        mods = 0; vk = 0;
-        if (string.IsNullOrWhiteSpace(text)) return false;
-        var parts = text.Split('+',
-            StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        if (parts.Length == 0) return false;
-
-        for (int i = 0; i < parts.Length - 1; i++)
-        {
-            switch (parts[i].ToLowerInvariant())
-            {
-                case "ctrl" or "control": mods |= NativeMethods.MOD_CONTROL; break;
-                case "alt": mods |= NativeMethods.MOD_ALT; break;
-                case "shift": mods |= NativeMethods.MOD_SHIFT; break;
-                case "win" or "windows": mods |= NativeMethods.MOD_WIN; break;
-                default: return false;
-            }
-        }
-
-        var key = parts[^1];
-        if (key.Equals("Space", StringComparison.OrdinalIgnoreCase))
-        {
-            if (mods == 0) return false;
-            vk = 0x20;
-            return true;
-        }
-        if (key.Length == 1)
-        {
-            char c = char.ToUpperInvariant(key[0]);
-            if (c is (>= 'A' and <= 'Z') or (>= '0' and <= '9')) { vk = c; return true; }
-            return false;
-        }
-        if (key.Length >= 2 && key.Length <= 3 &&
-            (key[0] is 'F' or 'f') && int.TryParse(key.AsSpan(1), out int fn) &&
-            fn is >= 1 and <= 24)
-        {
-            vk = (uint)(0x70 + fn - 1);
-            return true;
-        }
-        return false;
-    }
+    public static bool TryParseHotkey(string? text, out uint mods, out uint vk) => Hotkeys.TryParse(text, out mods, out vk);
 
     // ---------------------------------------------------------------- rendering
 
@@ -2834,7 +3326,7 @@ public partial class BarWindow : Window, IDisposable
     private void UpdateCollapsed()
     {
         if (_actionSuccessTimer?.IsEnabled == true) return;
-        var cfg = App.Settings?.Current ?? _cfg;
+        var cfg = _cfg;   // kept in sync by ApplySettingsUi; Settings.Current deep-clones
         string? value = null;
 
         if (_lastTimer is { State: TimerState.Running, Remaining: var rem } && rem > TimeSpan.Zero)
@@ -2862,9 +3354,13 @@ public partial class BarWindow : Window, IDisposable
         }
         else
         {
-            CollapsedTitle.Text = "Dynamic";
+            // No placeholder: the music row is only shown while a media session exists.
+            CollapsedTitle.Text = HasMediaSession(_lastMedia)
+                ? (string.IsNullOrWhiteSpace(_lastMedia!.Title) ? _lastMedia.SourceAppName : _lastMedia.Title)
+                : "";
             SetOrb(IcDot);
         }
+        if (_idleMode) UpdateIdleCollapsed(DateTime.Now);
 
         if (cfg.SystemMonitorInBar && _lastStats is { } s)
         {
@@ -2926,7 +3422,11 @@ public partial class BarWindow : Window, IDisposable
 
         if (m.SourceAppIconBytes is not null)
         {
-            SourceBadgeIcon.Source = AppIconHelper.BytesToBitmap(m.SourceAppIconBytes);
+            if (!ReferenceEquals(m.SourceAppIconBytes, _badgeIconBytes))
+            {
+                _badgeIconBytes = m.SourceAppIconBytes;
+                SourceBadgeIcon.Source = AppIconHelper.BytesToBitmap(m.SourceAppIconBytes);
+            }
             SourceBadge.Visibility = _islandState != IslandVisualState.Collapsed ? Visibility.Visible : Visibility.Collapsed;
         }
         else
@@ -2934,6 +3434,8 @@ public partial class BarWindow : Window, IDisposable
             SourceBadge.Visibility = Visibility.Collapsed;
         }
     }
+
+    private byte[]? _badgeIconBytes;
 
     private BitmapSource? BytesToImage(byte[]? bytes)
     {
@@ -3091,8 +3593,309 @@ public partial class BarWindow : Window, IDisposable
     private void UpdateClock()
     {
         var now = DateTime.Now;
-        CollapsedClock.Text = now.ToString("HH:mm");
+        CollapsedClock.Text = IdleClock.FormatTime(now, _twelveHour);
         CollapsedDate.Text = now.ToString("ddd d MMM");
+    }
+
+    // ---------------------------------------------------------------- idle layout (no media session)
+
+    private bool HasMediaSession(MediaInfo? m) => _cfg.FeatureMedia &&
+        m is not null && (!string.IsNullOrWhiteSpace(m.Title) || !string.IsNullOrWhiteSpace(m.AppId));
+
+    /// <summary>12-hour clock? From the setting, or the Windows region format when it says System.</summary>
+    private bool ResolveTwelveHour() => _cfg.ClockFormat switch
+    {
+        ClockFormat.Hours12 => true,
+        ClockFormat.Hours24 => false,
+        _ => ReadTwelveHour(),
+    };
+
+    private static bool ReadTwelveHour()
+    {
+        try
+        {
+            CultureInfo.CurrentCulture.ClearCachedData();
+            return IdleClock.Uses12Hour(new CultureInfo(CultureInfo.CurrentCulture.Name, useUserOverride: true));
+        }
+        catch { return IdleClock.Uses12Hour(CultureInfo.CurrentCulture); }
+    }
+
+    /// <summary>Pick the music or idle layout from the media session and crossfade (280 ms) when it
+    /// changes. The ring grid on the right is shared and never touched.</summary>
+    private void ApplyLayoutMode(bool instant = false)
+    {
+        bool idle = !HasMediaSession(_lastMedia);
+        if (_layoutApplied && idle == _idleMode) return;
+        _idleMode = idle;
+        _layoutApplied = true;
+
+        MusicCollapsedRow.Visibility = Visibility.Visible;
+        IdleCollapsedRow.Visibility = Visibility.Visible;
+        MediaInfoStack.Visibility = Visibility.Visible;
+        IdleOpenPanel.Visibility = Visibility.Visible;
+        OrbContainer.Visibility = Visibility.Visible;
+        OrbContainer.IsHitTestVisible = !idle;
+
+        double to = idle ? 1 : 0;
+        if (instant || _cfg.ReduceMotion)
+        {
+            _layoutTween.Stop();
+            SetLayoutProgress(to);
+            FinishLayoutFade();
+        }
+        else _layoutTween.Run(_layoutP, to, TimeSpan.FromMilliseconds(LayoutFadeMs), SetLayoutProgress, Easing.CubicOut);
+
+        if (!instant)
+        {
+            switch (_islandState)
+            {
+                case IslandVisualState.Collapsed when !_expanded: AnimateIsland(CollapsedW, CollapsedH); break;
+                case IslandVisualState.Expanded: AnimateIsland(IslandOpenW, MeasureIslandHeight()); break;
+                case IslandVisualState.Detail: AnimateIsland(DetailWidth(), MeasureIslandHeight()); break;
+            }
+        }
+        RefreshIdle(DateTime.Now);
+        SyncTimelineTimer();
+    }
+
+    private void SetLayoutProgress(double p)
+    {
+        _layoutP = p;
+        MusicCollapsedRow.Opacity = 1 - p;
+        IdleCollapsedRow.Opacity = p;
+        MediaInfoStack.Opacity = 1 - p;
+        IdleOpenPanel.Opacity = p;
+        OrbContainer.Opacity = 1 - p;
+        IslandLeftHost.Width = MusicLeftW + (IdleLeftW - MusicLeftW) * p;
+    }
+
+    private void FinishLayoutFade()
+    {
+        MusicCollapsedRow.Visibility = _idleMode ? Visibility.Collapsed : Visibility.Visible;
+        MediaInfoStack.Visibility = _idleMode ? Visibility.Collapsed : Visibility.Visible;
+        OrbContainer.Visibility = _idleMode ? Visibility.Collapsed : Visibility.Visible;
+        IdleCollapsedRow.Visibility = _idleMode ? Visibility.Visible : Visibility.Collapsed;
+        IdleOpenPanel.Visibility = _idleMode ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>The single 1 s tick. Re-aligns itself to the wall-clock second so the ring and the
+    /// colon blink stay in step. Only does work for what is on screen.</summary>
+    private void OnSecondTick()
+    {
+        var now = DateTime.Now;
+        UpdateClock();
+        UpdateTimeOfDay(now);
+        CheckWarningStrip();
+        if (_idleMode)
+        {
+            if (_cfg.FeatureIdleDashboard) _calendar.RefreshIfStale(TimeSpan.FromMinutes(5));
+            RefreshIdle(now);
+        }
+        _clockTimer.Interval = TimeSpan.FromMilliseconds(1000 - now.Millisecond + 10);
+    }
+
+    private void RefreshIdle(DateTime now)
+    {
+        if (!_idleMode) return;
+        if (_islandState == IslandVisualState.Collapsed || _expanded) UpdateIdleCollapsed(now);
+        else if (_islandState is IslandVisualState.Expanded or IslandVisualState.Detail) UpdateIdleOpen(now);
+    }
+
+    private void UpdateIdleCollapsed(DateTime now)
+    {
+        IdleRing.Fraction = now.Second / 60.0;
+        IdleTime.Text = IdleClock.FormatTime(now, _twelveHour);
+        IdleDate.Text = now.ToString("ddd, MMM d", CultureInfo.CurrentCulture);
+        IdleDayBar.Fraction = IdleClock.DayFraction(now);
+        if (_actionSuccessTimer?.IsEnabled == true) return;   // chip is showing a confirmation
+
+        string? chip = null;
+        if (_lastTimer is { State: TimerState.Running, Remaining: var trem } && trem > TimeSpan.Zero)
+            chip = $"{(string.IsNullOrWhiteSpace(_lastTimer.Label) ? "Timer" : _lastTimer.Label)} {IdleClock.FormatCountdown(trem)}";
+        else if (App.Focus?.Current is { Running: true } f)
+            chip = $"Focus {IdleClock.FormatCountdown(f.Remaining)}";
+        else if (_lastStopwatch is { Running: true, Elapsed: var sel })
+            chip = $"Stopwatch {StopwatchService.FormatMs(sel)}";
+        else if (_cfg.FeatureIdleDashboard && _calendar.NextAfter(now) is { } ev)
+            chip = $"{ev.Title} · {IdleClock.FormatUntil(ev.Start - now)}";
+
+        IdleChip.Visibility = chip is null ? Visibility.Collapsed : Visibility.Visible;
+        if (chip is not null) IdleChipText.Text = chip;
+    }
+
+    private void UpdateIdleOpen(DateTime now)
+    {
+        if (!_cfg.FeatureIdleDashboard) return;
+        IdleDotClock.SetTime(IdleClock.FormatTime(now, _twelveHour), now.Second % 2 == 0);
+        IdleFullDate.Text = now.ToString("dddd, d MMMM", CultureInfo.CurrentCulture);
+        double frac = IdleClock.DayFraction(now);
+        IdleDayBarLarge.Fraction = frac;
+        IdleDayLabel.Text = $"day {(int)Math.Floor(frac * 100)}% · {_todPeriod.Name}";
+        IdleGreeting.Text = IdleClock.Greeting(now.Hour);
+        UpdateEventLine(now);
+        UpdateFocusButton();
+    }
+
+    /// <summary>Next real calendar event (bold) + "in 25 min". Hidden when no calendar is connected.</summary>
+    private void UpdateEventLine(DateTime now)
+    {
+        if (!_calendar.HasCalendar)
+        {
+            IdleEventLine.Visibility = Visibility.Collapsed;
+            _eventLineKey = "";
+            return;
+        }
+        var ev = _calendar.NextAfter(now);
+        string when = ev is null ? "" : IdleClock.FormatIn(ev.Start - now);
+        string key = ev is null ? "none" : $"{ev.Title}|{when}";
+        IdleEventLine.Visibility = Visibility.Visible;
+        if (key == _eventLineKey) return;
+        _eventLineKey = key;
+        IdleEventLine.Inlines.Clear();
+        if (ev is null)
+        {
+            IdleEventLine.Inlines.Add(new Run("Nothing else today"));
+            return;
+        }
+        IdleEventLine.Inlines.Add(new Run(ev.Title) { FontWeight = FontWeights.SemiBold, Foreground = Brushes.White });
+        IdleEventLine.Inlines.Add(new Run(" " + when));
+    }
+
+    /// <summary>The Focus button runs the one timer service ("Focus", 25 min); while any timer runs
+    /// it shows that countdown and a click stops it.</summary>
+    private void UpdateFocusButton()
+    {
+        var t = _lastTimer ?? App.Timer?.Current;
+        bool running = t is { State: TimerState.Running } && t.Remaining > TimeSpan.Zero;
+        IdleFocusText.Text = running ? $"{t!.Label} {IdleClock.FormatCountdown(t.Remaining)}" : "Focus 25:00";
+        // The pill style does not pass Foreground down, so the text block is coloured directly.
+        if (running)
+        {
+            IdleFocusButton.Background = new SolidColorBrush(_cfg.AccentMode == AccentMode.Fixed ? FixedAccent() : IdleClock.Accent(_todHue));
+            IdleFocusText.Foreground = Brushes.Black;
+        }
+        else
+        {
+            IdleFocusButton.ClearValue(BackgroundProperty);
+            IdleFocusText.ClearValue(TextBlock.ForegroundProperty);
+        }
+    }
+
+    private void OnIdleFocusClick(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if (App.Timer is null) return;
+            if (App.Timer.Current.State == TimerState.Running) App.Timer.Cancel();
+            else App.Timer.Start(TimeSpan.FromMinutes(25), "Focus");
+        }
+        catch (Exception ex) { Log.Error("Idle focus toggle failed", ex); }
+        UpdateFocusButton();
+    }
+
+    private void OnIdleSearchClick(object sender, RoutedEventArgs e) => OpenSearch();
+
+    private long _timerUiSecond = -1;
+
+    /// <summary>Timer state on the UI thread (at most once per displayed second).</summary>
+    private void OnTimerUi(TimerInfo info, bool finishedNow)
+    {
+        if (finishedNow) PulseIsland();   // once, scale 1 -> 1.03 -> 1 (skipped with Reduce Motion)
+        if (IslandExpandedHost.Visibility == Visibility.Visible)
+        {
+            UpdatePage2Rings();
+            if (_islandState == IslandVisualState.Detail && _activeMetric == IslandMetric.Timer)
+                TimerPanelComponent.Render(info);
+            if (_idleMode) UpdateFocusButton();
+        }
+    }
+
+    private void OnTimerStartRequested(TimeSpan duration)
+    {
+        try { App.Timer?.Start(duration, "Timer"); }
+        catch (ObjectDisposedException) { /* shutting down */ }
+    }
+
+    private void OnTimerStopRequested() => App.Timer?.Cancel();
+
+    /// <summary>Focus updates arrive on a worker thread (2 Hz). Detect a natural finish (countdown
+    /// reached zero rather than the user stopping it) and pulse the island once.</summary>
+    private void OnFocusUi(FocusInfo info)
+    {
+        bool finished = _focusWasRunning && !info.Running && info.Remaining <= TimeSpan.Zero
+                        && _focusLastRemaining <= TimeSpan.FromSeconds(1.5);
+        _focusWasRunning = info.Running;
+        _focusLastRemaining = info.Remaining;
+        if (finished) PulseIsland();
+        if (_idleMode) RefreshIdle(DateTime.Now);
+    }
+
+    /// <summary>One gentle pulse: scale 1 -> 1.03 -> 1.</summary>
+    private void PulseIsland()
+    {
+        if (_cfg.ReduceMotion) return;
+        _pulseTween.Run(0, 1, TimeSpan.FromMilliseconds(420), t =>
+        {
+            double s = 1 + 0.03 * Math.Sin(Math.PI * t);
+            PillPulse.ScaleX = s;
+            PillPulse.ScaleY = s;
+        }, t => t);
+    }
+
+    // ---------------------------------------------------------------- time-of-day colour
+
+    /// <summary>Tracks the day period; when it changes the hue animates (shortest way round the
+    /// colour wheel) over 800 ms instead of jumping.</summary>
+    private void UpdateTimeOfDay(DateTime now)
+    {
+        var period = IdleClock.PeriodFor(now.Hour);
+        if (!_todInit)
+        {
+            _todInit = true;
+            _todPeriod = period;
+            _todHue = period.Hue;
+            ApplyTodColors();
+            return;
+        }
+        if (period == _todPeriod) return;
+        _todPeriod = period;
+
+        double from = _todHue, delta = IdleClock.HueDelta(from, period.Hue);
+        if (_cfg.ReduceMotion)
+        {
+            _todHue = period.Hue;
+            ApplyTodColors();
+            return;
+        }
+        _hueTween.Run(0, 1, TimeSpan.FromMilliseconds(800), t =>
+        {
+            _todHue = IdleClock.NormalizeHue(from + delta * t);
+            ApplyTodColors();
+        }, Easing.CubicOut);
+    }
+
+    private Color FixedAccent()
+    {
+        try { if (ColorConverter.ConvertFromString(_cfg.AccentColor) is Color c) return c; }
+        catch (FormatException) { /* validated on load; fall back below */ }
+        return Color.FromRgb(0x0A, 0x84, 0xFF);
+    }
+
+    /// <summary>Push the idle accent (time of day, or the fixed colour) to the ring, dots, day bars, glow and tint.</summary>
+    private void ApplyTodColors()
+    {
+        Color accent = _cfg.AccentMode == AccentMode.Fixed ? FixedAccent() : IdleClock.Accent(_todHue);
+        IdleDotClock.Hue = _cfg.AccentMode == AccentMode.Fixed ? HueOf(accent) : _todHue;
+        IdleRing.Color = accent;
+        IdleDayBar.Color = accent;
+        IdleDayBarLarge.Color = accent;
+        if (App.Timer?.Current is { State: TimerState.Running })
+            IdleFocusButton.Background = new SolidColorBrush(accent);
+        if (_idleMode && _islandState != IslandVisualState.Collapsed)
+        {
+            AlbumRadialGlowStop.Color = Color.FromArgb(38, accent.R, accent.G, accent.B);
+            PillShadow.Color = accent;
+        }
     }
 
     // ---------------------------------------------------------------- search bar with tab commands
@@ -3107,6 +3910,7 @@ public partial class BarWindow : Window, IDisposable
 
     public void OpenSearch()
     {
+        if (!_cfg.FeatureSearch) return;
         _prevForegroundHwnd = NativeMethods.GetForegroundWindow();
         EnsureOnCursorMonitor();
         SetIslandState(IslandVisualState.Search, IslandMetric.None, force: true);
@@ -3128,6 +3932,7 @@ public partial class BarWindow : Window, IDisposable
         RemoveAppTag();
 
         AppDiscoveryService.Instance.RefreshInBackground();
+        WindowSwitcherService.Instance.RefreshInBackground(_hwnd);
 
         Activate();
         SearchInput.Focus();
@@ -3167,25 +3972,8 @@ public partial class BarWindow : Window, IDisposable
             pt.X >= m.Bounds.Left && pt.X < m.Bounds.Right &&
             pt.Y >= m.Bounds.Top && pt.Y < m.Bounds.Bottom) ?? monitors[0];
 
-        double scale = 1.0;
-        try
-        {
-            if (NativeMethods.GetDpiForMonitor(mon.Handle, NativeMethods.MDT_EFFECTIVE_DPI, out uint dpiX, out _) == 0)
-                scale = dpiX / 96.0;
-        }
-        catch { }
-
-        int workW = mon.WorkArea.Right - mon.WorkArea.Left;
-        int workH = mon.WorkArea.Bottom - mon.WorkArea.Top;
-        _winW = workW / scale;
-        _winH = workH / scale;
-
-        Width = _winW;
-        Height = _winH;
-        NativeMethods.SetWindowPos(_hwnd, NativeMethods.HWND_TOPMOST,
-            mon.WorkArea.Left, mon.WorkArea.Top,
-            workW, workH,
-            NativeMethods.SWP_NOACTIVATE);
+        _tallWindow = true;
+        PlaceWindow(mon);
     }
 
     private void ActivateAppTag(AppInfo app)
@@ -3383,6 +4171,18 @@ public partial class BarWindow : Window, IDisposable
             return;
         }
 
+        // "w " prefix: only windows (an empty filter lists all, most recently used first).
+        if (text.StartsWith("w ", StringComparison.OrdinalIgnoreCase))
+        {
+            SearchGhostText.Inlines.Clear();
+            _ghostApp = null;
+            _ghostRemainder = "";
+            AddWindowResults(text[2..].Trim(), max: 12);
+            _selectedResultIndex = _searchResults.Count > 0 ? 0 : -1;
+            RenderResultRows();
+            return;
+        }
+
         // 1. Ghost completion & Apps
         var allApps = AppDiscoveryService.Instance.GetApps();
         AppInfo? topPrefixApp = null;
@@ -3428,6 +4228,26 @@ public partial class BarWindow : Window, IDisposable
             SearchGhostText.Inlines.Clear();
             _ghostApp = null;
             _ghostRemainder = "";
+        }
+
+        // Priority 0: "timer 10 min" / "timer 90s" starts the one timer
+        if (_cfg.FeatureTimers && TimerCommand.TryParseSearch(query, out var timerDuration))
+        {
+            var d = timerDuration;
+            _searchResults.Add(new SearchResult
+            {
+                Title = $"Start timer {TimerCommand.Format(d)}",
+                Subtitle = "Countdown in the island",
+                Category = SearchCategory.Commands,
+                FallbackLetter = "\u23F1",
+                FallbackColor = Color.FromRgb(0xE8, 0xB0, 0x4B),
+                KeyboardHint = "Enter",
+                Action = () =>
+                {
+                    App.Timer?.Start(d, "Timer");
+                    ShowActionSuccess($"Timer {TimerCommand.Format(d)}");
+                },
+            });
         }
 
         // Priority 1: Calculator / Converter
@@ -3485,6 +4305,9 @@ public partial class BarWindow : Window, IDisposable
             });
         }
 
+        // Priority 2b: open windows, up to 4 (from the list cached when the bar opened)
+        if (query.Length > 0) AddWindowResults(query, max: 4);
+
         // Priority 3: Commands, up to 3
         var sysCmds = GetSystemCommands(query);
         _searchResults.AddRange(sysCmds.Take(3));
@@ -3527,6 +4350,50 @@ public partial class BarWindow : Window, IDisposable
                 RenderResultRows();
             });
         });
+    }
+
+    private void AddWindowResults(string query, int max)
+    {
+        var svc = WindowSwitcherService.Instance;
+        foreach (var (w, score, indices) in svc.Match(query, max))
+        {
+            var target = w.Handle;
+            _searchResults.Add(new SearchResult
+            {
+                Title = w.Title,
+                Subtitle = w.ProcessName,
+                Category = SearchCategory.Windows,
+                Icon = svc.CachedIcon(w),
+                FallbackLetter = w.ProcessName.Length > 0 ? char.ToUpperInvariant(w.ProcessName[0]).ToString() : "W",
+                FallbackColor = Color.FromRgb(0x5E, 0x81, 0xAC),
+                KeyboardHint = "Switch",
+                Score = score,
+                MatchedIndices = indices,
+                WindowHandle = target,
+                Action = () =>
+                {
+                    // CloseSearch would hand focus back to the previous window; switch afterwards instead.
+                    _prevForegroundHwnd = IntPtr.Zero;
+                    Dispatcher.BeginInvoke(DispatcherPriority.Background, () =>
+                    {
+                        if (!WindowActivation.BringToFront(target)) ShowActionSuccess("Could not switch to that window");
+                    });
+                },
+            });
+        }
+    }
+
+    /// <summary>The cached window list arrived after the bar opened: refresh the visible results.</summary>
+    private void OnWindowListRefreshed()
+    {
+        try
+        {
+            Dispatcher.BeginInvoke(() =>
+            {
+                if (_islandState == IslandVisualState.Search && _activeTag is null) UpdateSearchResults(SearchInput.Text);
+            });
+        }
+        catch (TaskCanceledException) { /* dispatcher shutting down */ }
     }
 
     private List<SearchResult> GetSystemCommands(string query)
@@ -3631,6 +4498,7 @@ public partial class BarWindow : Window, IDisposable
                 SearchCategory.Calculator => "CALCULATOR",
                 SearchCategory.Apps => "APPLICATIONS",
                 SearchCategory.Commands => "COMMANDS",
+                SearchCategory.Windows => "WINDOWS",
                 SearchCategory.Files => "FILES",
                 SearchCategory.Web => "WEB SEARCH",
                 _ => group.Key.ToString().ToUpperInvariant()
@@ -3895,6 +4763,7 @@ public partial class BarWindow : Window, IDisposable
     {
         _actionSuccessTimer?.Stop();
         CollapsedTitle.Text = message;
+        if (_idleMode) { IdleChipText.Text = message; IdleChip.Visibility = Visibility.Visible; }
         _actionSuccessTimer ??= new DispatcherTimer { Interval = TimeSpan.FromSeconds(2.6) };
         _actionSuccessTimer.Tick -= OnActionSuccessTick;
         _actionSuccessTimer.Tick += OnActionSuccessTick;

@@ -1,0 +1,35 @@
+<UserControl x:Class="WindowsDynamicBar.UI.TogglesDetailPanel"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             UseLayoutRounding="True">
+
+    <!-- Same boxed card as the telemetry panels: thin green border, black fill, title tag on the edge. -->
+    <Grid>
+        <Border x:Name="Frame" Width="494" Height="138" HorizontalAlignment="Right" VerticalAlignment="Top"
+                BorderBrush="#8AB478" BorderThickness="1" CornerRadius="12" Background="#FF000000">
+            <Grid Margin="14,6,11,4">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+
+                <!-- 2 rows x up to 4 round toggles (46px), label under each -->
+                <UniformGrid x:Name="ToggleGrid" Columns="4" Rows="2" VerticalAlignment="Center" Margin="0,8,0,0" />
+
+                <!-- status: last change or the real error text -->
+                <StackPanel Grid.Column="1" Margin="16,0,0,0" VerticalAlignment="Center">
+                    <TextBlock x:Name="StatusText" FontFamily="Cascadia Mono, Consolas, Courier New" FontSize="10.5"
+                               Foreground="#E8E8DC" TextWrapping="Wrap" />
+                    <TextBlock x:Name="HintText" FontFamily="Cascadia Mono, Consolas, Courier New" FontSize="10"
+                               Foreground="#9AA088" TextWrapping="Wrap" Margin="0,6,0,0" />
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- title tag:  ┤toggles├┤2 on├ -->
+        <Border x:Name="TitleTag" HorizontalAlignment="Left" VerticalAlignment="Top"
+                Margin="29,0,0,0" Background="#FF000000" Padding="6,0">
+            <TextBlock x:Name="TitleText" FontFamily="Cascadia Mono, Consolas, Courier New" FontSize="11.5" />
+        </Border>
+    </Grid>
+</UserControl>

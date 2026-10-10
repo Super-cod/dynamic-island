@@ -24,6 +24,7 @@ public sealed class NotificationListenerService : IDisposable
     private DateTime _lastRaise = DateTime.MinValue;
 
     public bool AccessGranted { get; private set; }
+    public bool IsRunning => _running;
     public string? AccessError { get; private set; }
 
     public event Action<AppNotification>? NotificationReceived;

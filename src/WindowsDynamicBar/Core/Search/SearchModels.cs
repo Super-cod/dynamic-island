@@ -9,6 +9,7 @@ public enum SearchCategory
     Calculator,
     Apps,
     Commands,
+    Windows,
     Files,
     Web
 }
@@ -28,6 +29,8 @@ public sealed class SearchResult
     public List<int>? MatchedIndices { get; set; }
     public string? AppId { get; set; }
     public string? ExePath { get; set; }
+    /// <summary>Window switcher row: the window to bring to the front.</summary>
+    public IntPtr WindowHandle { get; set; }
 }
 
 public sealed class AppInfo

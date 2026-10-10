@@ -34,12 +34,27 @@ public sealed class MediaService : IDisposable
     private byte[]? _lastArtwork;
     private string? _lastKey;
     private string? _lastArtworkKey;
+    private byte[]? _dominantFor;          // artwork the cached dominant colour was computed from
+    private Color _dominantCached;
+    private MediaInfo? _lastEmitted;
     private string? _userSelectedAppId;
     private bool _started;
 
     public event Action<MediaInfo>? MediaChanged;
 
     public string? CurrentAppId => _current?.SourceAppUserModelId;
+
+    public bool IsRunning => _started;
+
+    /// <summary>Music feature switched off: drop the session hooks and the poll.</summary>
+    public void Stop()
+    {
+        if (!_started) return;
+        _started = false;
+        if (_manager is not null) _manager.SessionsChanged -= OnSessionsChanged;
+        HookSession(null);   // unhooks the session, stops the poll, emits "no media"
+        _manager = null;
+    }
 
     public MediaService(EventBus bus) => _bus = bus;
 
@@ -131,7 +146,8 @@ public sealed class MediaService : IDisposable
             _lastKey = null;
             _lastArtwork = null;
             _lastArtworkKey = null;
-            MediaChanged?.Invoke(new MediaInfo("", "", "", "", false, TimeSpan.Zero, TimeSpan.Zero, null, 0));
+            _dominantFor = null;
+            Emit(new MediaInfo("", "", "", "", false, TimeSpan.Zero, TimeSpan.Zero, null, 0));
             return;
         }
         _current.MediaPropertiesChanged += OnMediaProperties;
@@ -152,13 +168,15 @@ public sealed class MediaService : IDisposable
 
     private void StartTimelineTimer()
     {
+        // Safety-net poll for apps that do not raise timeline/playback events (e.g. browsers).
+        // The UI extrapolates the position itself, so only real changes are forwarded.
         _timelineTimer ??= new DispatcherTimerRef();
-        _timelineTimer.Start(TimeSpan.FromMilliseconds(250), async () =>
+        _timelineTimer.Start(TimeSpan.FromSeconds(1), async () =>
         {
             if (_current is null) return;
             var info = await BuildInfoAsync();
-            if (info is null) return;
-            MediaChanged?.Invoke(info);  // Fire on ALL state changes (playing and paused)
+            if (info is null || !IsMeaningfulChange(_lastEmitted, info)) return;
+            Emit(info);
         });
     }
 
@@ -168,7 +186,7 @@ public sealed class MediaService : IDisposable
         {
             var info = await BuildInfoAsync();
             if (info is null) return;
-            MediaChanged?.Invoke(info);
+            Emit(info);
 
             string key = $"{info.Title}|{info.Artist}|{info.AppId}";
             bool trackChanged = key != _lastKey;
@@ -225,9 +243,14 @@ public sealed class MediaService : IDisposable
             Color dominant = identity.DominantColor;
             if (art is not null)
             {
-                var artBmp = AppIconHelper.BytesToBitmap(art);
-                if (artBmp is not null)
-                    dominant = AppIconHelper.ExtractDominantColor(artBmp);
+                // Decode once per artwork, not on every poll.
+                if (!ReferenceEquals(art, _dominantFor))
+                {
+                    var artBmp = AppIconHelper.BytesToBitmap(art);
+                    _dominantCached = artBmp is not null ? AppIconHelper.ExtractDominantColor(artBmp) : identity.DominantColor;
+                    _dominantFor = art;
+                }
+                dominant = _dominantCached;
             }
 
             return new MediaInfo(
@@ -248,6 +271,27 @@ public sealed class MediaService : IDisposable
             Log.Debug("BuildInfo failed", ("error", ex.Message));
             return null;
         }
+    }
+
+    private void Emit(MediaInfo info)
+    {
+        _lastEmitted = info;
+        MediaChanged?.Invoke(info);
+    }
+
+    /// <summary>True when the new snapshot differs in anything the UI shows. Position is
+    /// extrapolated by the UI, so it only counts when it jumps (seek) by more than 1.5 s.</summary>
+    internal static bool IsMeaningfulChange(MediaInfo? prev, MediaInfo next)
+    {
+        if (prev is null) return true;
+        if (prev.Title != next.Title || prev.Artist != next.Artist || prev.Album != next.Album ||
+            prev.AppId != next.AppId || prev.IsPlaying != next.IsPlaying || prev.Duration != next.Duration ||
+            prev.CanSeek != next.CanSeek || !ReferenceEquals(prev.ArtworkBytes, next.ArtworkBytes))
+            return true;
+        TimeSpan expected = prev.Position;
+        if (prev.IsPlaying && prev.LastUpdatedTime is { } lu && next.LastUpdatedTime is { } nu)
+            expected += nu - lu;
+        return Math.Abs((next.Position - expected).TotalSeconds) > 1.5;
     }
 
     private async Task<byte[]?> TryGetArtworkAsync()

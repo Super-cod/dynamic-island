@@ -94,10 +94,26 @@ public sealed class RingGauge : FrameworkElement
 /// Rendered entirely in a single <see cref="OnRender"/> pass (no per-cell elements).
 /// Brushes are cached and frozen; ghost cells are faint white.
 /// </summary>
+/// <summary>Scroll helper shared by the scrolling dot graphs.</summary>
+public static class GraphScroll
+{
+    /// <summary>Snap a 0..1 cell scroll to whole device pixels. A 4 DIP cell then has only 4
+    /// distinct positions at 100% scale (8 at 200%), so the 60 Hz loop produces ~4 changed
+    /// frames per sample instead of ~30 sub-pixel (blurry) ones. Unchanged values do not
+    /// invalidate, so no frame is rendered.</summary>
+    public static double Quantize(double scroll, Visual v, double cell = 4.0)
+    {
+        double steps = cell * VisualTreeHelper.GetDpi(v).PixelsPerDip;
+        return Math.Round(Math.Clamp(scroll, 0, 1) * steps) / steps;
+    }
+}
+
 public sealed class DotMatrixGraph : FrameworkElement
 {
     private const double Cell = 4.0;
     private const double Dot = 3.0;
+
+    public DotMatrixGraph() => IsHitTestVisible = false;
 
     // Theme-neutral ghost dots (visible on both dark and light pill backgrounds).
     private static readonly Brush GhostBrush = Frozen(Color.FromArgb(34, 128, 128, 128));

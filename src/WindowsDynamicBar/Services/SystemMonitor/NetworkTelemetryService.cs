@@ -631,11 +631,20 @@ public sealed class NetworkMonitor : IDisposable
         string today = DateTime.Now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
         try
         {
-            var cfg = _settings.Current;
-            if (string.Equals(cfg.NetDailyDate, today, StringComparison.Ordinal))
+            // Daily totals live in state.json (runtime data, not a user setting). Older builds kept
+            // them in settings.json; read that once as a fallback.
+            var st = RuntimeState.Instance.Current;
+            string date = st.NetDailyDate;
+            long rx = st.NetDailyRxBytes, tx = st.NetDailyTxBytes;
+            if (string.IsNullOrEmpty(date))
             {
-                Interlocked.Exchange(ref _dayRx, Math.Max(0, cfg.NetDailyRxBytes));
-                Interlocked.Exchange(ref _dayTx, Math.Max(0, cfg.NetDailyTxBytes));
+                var cfg = _settings.Current;
+                (date, rx, tx) = (cfg.NetDailyDate, cfg.NetDailyRxBytes, cfg.NetDailyTxBytes);
+            }
+            if (string.Equals(date, today, StringComparison.Ordinal))
+            {
+                Interlocked.Exchange(ref _dayRx, Math.Max(0, rx));
+                Interlocked.Exchange(ref _dayTx, Math.Max(0, tx));
             }
             else
             {
@@ -658,7 +667,7 @@ public sealed class NetworkMonitor : IDisposable
         long tx = Interlocked.Read(ref _dayTx);
         try
         {
-            _settings.Update(s =>
+            RuntimeState.Instance.Update(s =>
             {
                 s.NetDailyDate = today;
                 s.NetDailyRxBytes = rx;

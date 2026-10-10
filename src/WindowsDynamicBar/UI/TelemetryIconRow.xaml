@@ -1,103 +1,24 @@
 <UserControl x:Class="WindowsDynamicBar.UI.TelemetryIconRow"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             xmlns:local="clr-namespace:WindowsDynamicBar.UI"
              Background="Transparent"
              UseLayoutRounding="True">
 
-    <!-- 3x2 grid of 46px circles: CPU/GPU/RAM/Mirror/Net/Weather live gauges. -->
-    <WrapPanel Width="175" HorizontalAlignment="Center" VerticalAlignment="Center">
-
-        <Grid x:Name="CpuCell" Width="46" Height="46" Margin="0,0,10.5,10.5" Background="Transparent" Cursor="Hand">
-            <local:RingGauge x:Name="CpuRing" Thickness="3.0" />
-            <Border x:Name="CpuBorder" Width="38" Height="38" CornerRadius="19"
-                    HorizontalAlignment="Center" VerticalAlignment="Center"
-                    Background="{DynamicResource WdbDimBrush}"
-                    BorderBrush="{DynamicResource WdbHairlineBrush}" BorderThickness="1">
-                <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
-                    <TextBlock Text="CPU" FontFamily="Cascadia Mono, Consolas" FontSize="9"
-                               Foreground="{DynamicResource WdbTextMutedBrush}" HorizontalAlignment="Center" />
-                    <TextBlock x:Name="CpuPct" Text="…" FontFamily="Cascadia Mono, Consolas"
-                               FontSize="8.5" Foreground="{DynamicResource WdbTextBrush}" HorizontalAlignment="Center" />
-                </StackPanel>
-            </Border>
+    <!-- Pages of 3x2 46px ring cells (built in code from the page layout). The pages slide inside a
+         clip that ends just right of the third ring; the pager dots sit in the free strip after it. -->
+    <Grid Width="175" HorizontalAlignment="Center" VerticalAlignment="Center">
+        <Grid x:Name="PagesClip" Width="164" HorizontalAlignment="Left" ClipToBounds="True">
+            <WrapPanel x:Name="Page0" Width="175" HorizontalAlignment="Left">
+                <WrapPanel.RenderTransform><TranslateTransform x:Name="Page0Shift" /></WrapPanel.RenderTransform>
+            </WrapPanel>
+            <WrapPanel x:Name="Page1" Width="175" HorizontalAlignment="Left" Opacity="0" IsHitTestVisible="False">
+                <WrapPanel.RenderTransform><TranslateTransform x:Name="Page1Shift" X="175" /></WrapPanel.RenderTransform>
+            </WrapPanel>
         </Grid>
 
-        <Grid x:Name="GpuCell" Width="46" Height="46" Margin="0,0,10.5,10.5" Background="Transparent" Cursor="Hand">
-            <local:RingGauge x:Name="GpuRing" Thickness="3.0" />
-            <Border x:Name="GpuBorder" Width="38" Height="38" CornerRadius="19"
-                    HorizontalAlignment="Center" VerticalAlignment="Center"
-                    Background="{DynamicResource WdbDimBrush}"
-                    BorderBrush="{DynamicResource WdbHairlineBrush}" BorderThickness="1">
-                <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
-                    <TextBlock Text="GPU" FontFamily="Cascadia Mono, Consolas" FontSize="9"
-                               Foreground="{DynamicResource WdbTextMutedBrush}" HorizontalAlignment="Center" />
-                    <TextBlock x:Name="GpuPct" Text="…" FontFamily="Cascadia Mono, Consolas"
-                               FontSize="8.5" Foreground="{DynamicResource WdbTextBrush}" HorizontalAlignment="Center" />
-                </StackPanel>
-            </Border>
-        </Grid>
-
-        <Grid x:Name="RamCell" Width="46" Height="46" Margin="0,0,10.5,10.5" Background="Transparent" Cursor="Hand">
-            <local:RingGauge x:Name="RamRing" Thickness="3.0" />
-            <Border x:Name="RamBorder" Width="38" Height="38" CornerRadius="19"
-                    HorizontalAlignment="Center" VerticalAlignment="Center"
-                    Background="{DynamicResource WdbDimBrush}"
-                    BorderBrush="{DynamicResource WdbHairlineBrush}" BorderThickness="1">
-                <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
-                    <TextBlock Text="RAM" FontFamily="Cascadia Mono, Consolas" FontSize="9"
-                               Foreground="{DynamicResource WdbTextMutedBrush}" HorizontalAlignment="Center" />
-                    <TextBlock x:Name="RamPct" Text="…" FontFamily="Cascadia Mono, Consolas"
-                               FontSize="8.5" Foreground="{DynamicResource WdbTextBrush}" HorizontalAlignment="Center" />
-                </StackPanel>
-            </Border>
-        </Grid>
-
-        <Grid x:Name="MirrorCell" Width="46" Height="46" Margin="0,0,10.5,10.5" Background="Transparent" Cursor="Hand">
-            <local:RingGauge x:Name="MirrorRing" Thickness="3.0" RingColor="#E5484D" />
-            <Border x:Name="MirrorBorder" Width="38" Height="38" CornerRadius="19"
-                    HorizontalAlignment="Center" VerticalAlignment="Center"
-                    Background="{DynamicResource WdbDimBrush}"
-                    BorderBrush="{DynamicResource WdbHairlineBrush}" BorderThickness="1">
-                <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
-                    <TextBlock Text="Mirror" FontFamily="Cascadia Mono, Consolas" FontSize="8.5"
-                               Foreground="{DynamicResource WdbTextMutedBrush}" HorizontalAlignment="Center" />
-                    <TextBlock x:Name="MirrorPct" Text="off" FontFamily="Cascadia Mono, Consolas"
-                               FontSize="8" Foreground="{DynamicResource WdbTextBrush}" HorizontalAlignment="Center" />
-                </StackPanel>
-            </Border>
-        </Grid>
-
-        <Grid x:Name="NetCell" Width="46" Height="46" Margin="0,0,10.5,10.5" Background="Transparent" Cursor="Hand">
-            <local:RingGauge x:Name="NetRing" Thickness="3.0" RingColor="#6FA8DC" />
-            <Border x:Name="NetBorder" Width="38" Height="38" CornerRadius="19"
-                    HorizontalAlignment="Center" VerticalAlignment="Center"
-                    Background="{DynamicResource WdbDimBrush}"
-                    BorderBrush="{DynamicResource WdbHairlineBrush}" BorderThickness="1">
-                <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
-                    <TextBlock Text="NET" FontFamily="Cascadia Mono, Consolas" FontSize="9"
-                               Foreground="{DynamicResource WdbTextMutedBrush}" HorizontalAlignment="Center" />
-                    <TextBlock x:Name="NetPct" Text="&#x2014;" FontFamily="Cascadia Mono, Consolas"
-                               FontSize="8.5" Foreground="{DynamicResource WdbTextBrush}" HorizontalAlignment="Center" />
-                </StackPanel>
-            </Border>
-        </Grid>
-
-        <Grid x:Name="WeatherCell" Width="46" Height="46" Margin="0,0,10.5,0" Background="Transparent" Cursor="Hand">
-            <local:RingGauge x:Name="WeatherRing" Thickness="3.0" RingColor="#E8B04B" />
-            <Border x:Name="WeatherBorder" Width="38" Height="38" CornerRadius="19"
-                    HorizontalAlignment="Center" VerticalAlignment="Center"
-                    Background="{DynamicResource WdbDimBrush}"
-                    BorderBrush="{DynamicResource WdbHairlineBrush}" BorderThickness="1">
-                <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
-                    <TextBlock Text="WX" FontFamily="Cascadia Mono, Consolas" FontSize="9"
-                               Foreground="{DynamicResource WdbTextMutedBrush}" HorizontalAlignment="Center" />
-                    <TextBlock x:Name="WeatherPct" Text="&#x2014;" FontFamily="Cascadia Mono, Consolas"
-                               FontSize="8.5" Foreground="{DynamicResource WdbTextBrush}" HorizontalAlignment="Center" />
-                </StackPanel>
-            </Border>
-        </Grid>
-
-    </WrapPanel>
+        <!-- pager: one 6px dot per page; active = white, others = white 25% -->
+        <StackPanel x:Name="Pager" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,1,0"
+                    Visibility="Collapsed" />
+    </Grid>
 
 </UserControl>

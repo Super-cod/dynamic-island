@@ -28,6 +28,8 @@ public partial class TelemetryDetailPanel : UserControl
     private DateTime _lastSampleUtc = DateTime.UtcNow;
     private bool _rendering;
     private int _gpuCount;
+    private int _gpuIndex;
+    private IReadOnlyList<string> _gpuNames = Array.Empty<string>();
 
     public TelemetryDetailPanel()
     {
@@ -43,54 +45,60 @@ public partial class TelemetryDetailPanel : UserControl
 
     // ------------------------------------------------------------------ public API
 
+    /// <summary>CPU canvas. Every row is shown only when its value is real; nothing reads "N/A".</summary>
     public void ShowCpu(CpuStats cpu, IReadOnlyList<double>? cores, TelemetryHistory? history,
-        IReadOnlyList<ProcessSample>? procs = null)
+        IReadOnlyList<ProcessSample>? procs = null, double? tempC = null,
+        (double? M1, double? M5, double? M15) load = default, bool fahrenheit = false)
     {
         _gpuCount = 0;
         Clear();
-        double pct = cpu.Available ? cpu.Utilization : -1;
+        double? pct = cpu.Available ? cpu.Utilization : null;
 
         if (!string.IsNullOrWhiteSpace(cpu.Name)) AddName(cpu.Name);
-        AddBar("CPU", pct, cpu.Available ? $"{pct:F0}%" : "N/A");
-        AddLine("freq", cpu.Available ? TelemetryFormat.Frequency(cpu.FrequencyMhz) : "N/A");
-        AddLine("temp", "N/A");
-        AddLine("load", "N/A");
+        if (pct is double p) AddBar("CPU", p, $"{p:F0}%");
+        if (cpu.Available && cpu.FrequencyMhz > 0) AddLine("freq", TelemetryFormat.Frequency(cpu.FrequencyMhz));
+        if (tempC is double t)
+            AddLine("temp", TelemetryFormat.Temperature(t, fahrenheit), "Hottest ACPI thermal zone (no admin rights needed)");
+        if (load.M1 is double m1)
+        {
+            string text = $"{m1:F0}";
+            if (load.M5 is double m5) text += $"/{m5:F0}";
+            if (load.M15 is double m15) text += $"/{m15:F0}";
+            AddLine("load", text + "%", "Average CPU use over the last 1 / 5 / 15 minutes");
+        }
         if (cores is { Count: > 0 }) AddHeatmap(cores);
-        else AddLine("cores", "N/A");
         if (cpu.Available && cpu.LogicalThreads > 0) AddCaption($"{cpu.LogicalThreads} threads");
 
         Render(history, procs);
         SetTitle("cpu", pct, history);
     }
 
-    public void ShowGpu(GpuTrack gpu, int index, int count, TelemetryHistory? history,
-        IReadOnlyList<ProcessSample>? procs = null)
+    /// <summary>GPU canvas for one adapter. <paramref name="names"/> lists every adapter (selector).</summary>
+    public void ShowGpu(GpuTrack gpu, int index, IReadOnlyList<string> names, TelemetryHistory? history,
+        IReadOnlyList<ProcessSample>? procs = null, bool fahrenheit = false)
     {
-        _gpuCount = count;
+        _gpuCount = names.Count;
         Clear();
         double pct = gpu.Utilization;
 
         if (!string.IsNullOrWhiteSpace(gpu.Name)) AddName(gpu.Name);
         AddBar("GPU", pct, $"{Math.Round(pct)}%");
-        AddBar("PWR", -1, "N/A");
-
-        double vramPct = gpu.VramAvailable && gpu.VramTotal > 0
-            ? (double)gpu.VramUsed / gpu.VramTotal * 100 : -1;
-        AddBar("VRAM", vramPct,
-            gpu.VramAvailable && gpu.VramTotal > 0
-                ? $"{TelemetryFormat.Bytes(gpu.VramUsed)}/{TelemetryFormat.Bytes(gpu.VramTotal)}"
-                : "N/A");
-
+        if (gpu.VramAvailable && gpu.VramTotal > 0)
+            AddBar("VRAM", (double)gpu.VramUsed / gpu.VramTotal * 100,
+                $"{TelemetryFormat.Bytes(gpu.VramUsed)}/{TelemetryFormat.Bytes(gpu.VramTotal)}");
+        if (gpu.PowerW is double w) AddLine("PWR", $"{w:F1} W");
+        if (gpu.TempC is double t) AddLine("temp", TelemetryFormat.Temperature(t, fahrenheit));
+        if (gpu.ClockMhz is double mhz) AddLine("clock", TelemetryFormat.Frequency(mhz));
         if (gpu.EnginesAvailable)
         {
             AddBar("3D", gpu.Engine3D, $"{Math.Round(gpu.Engine3D)}%");
             AddBar("Copy", gpu.EngineCopy, $"{Math.Round(gpu.EngineCopy)}%");
         }
-        AddLine("temp", "N/A");
-        AddLine("clock", "N/A");
 
         Render(history, procs);
-        SetTitle(count > 1 ? $"gpu{index}" : "gpu", pct, history);
+        _gpuNames = names;
+        _gpuIndex = index;
+        SetTitle(TelemetryFormat.ShortGpuName(gpu.Name) is { Length: > 0 } shortName ? shortName : "gpu", pct, history);
     }
 
     public void ShowRam(MemoryStats ram, long swapUsed, long swapTotal,
@@ -99,25 +107,26 @@ public partial class TelemetryDetailPanel : UserControl
     {
         _gpuCount = 0;
         Clear();
-        double pct = ram.Available ? ram.UsedPercent : -1;
+        double? pct = ram.Available ? ram.UsedPercent : null;
 
-        AddName(ram.Available ? $"{TelemetryFormat.Bytes(ram.TotalBytes)} total" : "Memory");
-        AddBar("Used", pct, ram.Available ? TelemetryFormat.Bytes(ram.UsedBytes) : "N/A");
-        AddBar("Cache", cacheBytes > 0 ? (double)cacheBytes / Math.Max(1, ram.TotalBytes) * 100 : -1,
-            cacheBytes > 0 ? TelemetryFormat.Bytes(cacheBytes) : "N/A");
+        if (ram.Available && ram.TotalBytes > 0)
+        {
+            AddName($"{TelemetryFormat.Bytes(ram.TotalBytes)} total");
+            AddBar("Used", ram.UsedPercent, TelemetryFormat.Bytes(ram.UsedBytes));
+            if (cacheBytes > 0)
+                AddBar("Cache", (double)cacheBytes / ram.TotalBytes * 100, TelemetryFormat.Bytes(cacheBytes));
+            long free = ram.TotalBytes - ram.UsedBytes;
+            AddBar("Free", (double)free / ram.TotalBytes * 100, TelemetryFormat.Bytes(free));
+        }
+        if (swapTotal > 0)
+            AddBar("Swap", (double)swapUsed / swapTotal * 100, TelemetryFormat.Bytes(swapUsed));
 
-        long free = ram.TotalBytes - ram.UsedBytes;
-        AddBar("Free", ram.Available && ram.TotalBytes > 0 ? (double)free / ram.TotalBytes * 100 : -1,
-            ram.Available ? TelemetryFormat.Bytes(free) : "N/A");
-        AddBar("Swap", swapTotal > 0 ? (double)swapUsed / swapTotal * 100 : -1,
-            swapTotal > 0 ? TelemetryFormat.Bytes(swapUsed) : "N/A");
-
-        AddSeparator();
-        AddLine("Disk R", diskRead >= 0 ? $"{TelemetryFormat.Bytes(diskRead)}/s" : "N/A");
-        AddLine("Disk W", diskWrite >= 0 ? $"{TelemetryFormat.Bytes(diskWrite)}/s" : "N/A");
+        if (diskRead >= 0 || diskWrite >= 0) AddSeparator();
+        if (diskRead >= 0) AddLine("Disk R", $"{TelemetryFormat.Bytes(diskRead)}/s");
+        if (diskWrite >= 0) AddLine("Disk W", $"{TelemetryFormat.Bytes(diskWrite)}/s");
 
         Render(history, procs);
-        SetTitle("ram", ram.Available ? pct : (double?)null, history);
+        SetTitle("ram", pct, history);
     }
 
     // ------------------------------------------------------------------ title / graph
@@ -132,13 +141,25 @@ public partial class TelemetryDetailPanel : UserControl
                 if (!double.IsNaN(v)) { max = Math.Max(max, v); any = true; }
             if (any) peak = max;
         }
-        string p = pct is null ? "N/A" : $"{Math.Round(pct.Value):F0}%";
-        string pk = peak is null ? "N/A" : $"{Math.Round(peak.Value):F0}%";
-
         TitleText.Inlines.Clear();
         TitleText.Inlines.Add(Run("\u2524", NameBrush));
         TitleText.Inlines.Add(Run(metric, MetricBrush));
-        TitleText.Inlines.Add(Run($"\u251C\u2524{p}\u251C\u2524peak {pk}\u251C", NameBrush));
+        TitleText.Inlines.Add(Run("\u251C", NameBrush));
+        if (pct is double p) TitleText.Inlines.Add(Run($"\u2524{Math.Round(p):F0}%\u251C", NameBrush));
+        if (peak is double pk) TitleText.Inlines.Add(Run($"\u2524peak {Math.Round(pk):F0}%\u251C", NameBrush));
+        if (_gpuCount > 1)
+        {
+            // Selector: gpu0 gpu1 ... (active one highlighted); clicking the tag picks the next GPU.
+            TitleText.Inlines.Add(Run("\u2524", NameBrush));
+            for (int i = 0; i < _gpuCount; i++)
+            {
+                if (i > 0) TitleText.Inlines.Add(Run(" ", NameBrush));
+                TitleText.Inlines.Add(Run($"gpu{i}", i == _gpuIndex ? MetricBrush : LabelBrush));
+            }
+            TitleText.Inlines.Add(Run("\u251C", NameBrush));
+            TitleTag.ToolTip = string.Join("\n", _gpuNames.Select((n, i) => $"gpu{i}: {n}"));
+        }
+        else TitleTag.ToolTip = null;
         TitleTag.Cursor = _gpuCount > 1 ? System.Windows.Input.Cursors.Hand : System.Windows.Input.Cursors.Arrow;
     }
 
@@ -209,7 +230,7 @@ public partial class TelemetryDetailPanel : UserControl
 
     private const double StatRowHeight = 14;
     private const double StatFontSize = 10;
-    private const double StatLabelWidth = 36;
+    private const double StatLabelWidth = 40;   // fits "Disk R" without touching its value
     private double _col0H, _col1H;
 
     private void Clear()
@@ -264,7 +285,7 @@ public partial class TelemetryDetailPanel : UserControl
             FillColor = percent >= 0 ? DotBar.ValueColor(percent) : Color.FromRgb(0x8A, 0xB4, 0x78),
         }, value);
 
-    private void AddLine(string label, string value)
+    private void AddLine(string label, string value, string? tooltip = null)
         => AddRow(label, new TextBlock
         {
             Text = value,
@@ -273,6 +294,7 @@ public partial class TelemetryDetailPanel : UserControl
             Foreground = ValueBrush,
             VerticalAlignment = VerticalAlignment.Center,
             TextTrimming = TextTrimming.CharacterEllipsis,
+            ToolTip = tooltip,
         }, null);
 
     private void AddHeatmap(IReadOnlyList<double> cores)
@@ -365,6 +387,6 @@ public partial class TelemetryDetailPanel : UserControl
     private void OnRendering(object? sender, EventArgs e)
     {
         double scroll = Math.Clamp((DateTime.UtcNow - _lastSampleUtc).TotalSeconds / SampleSeconds, 0, 1);
-        Graph.Scroll = scroll;
+        Graph.Scroll = GraphScroll.Quantize(scroll, Graph);
     }
 }
