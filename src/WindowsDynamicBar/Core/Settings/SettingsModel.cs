@@ -44,11 +44,11 @@ public sealed class SettingsModel
     // ---- Appearance ----
     public AppTheme Theme { get; set; } = AppTheme.Dark;
     public double Opacity { get; set; } = 0.92;
-    public bool BlurEnabled { get; set; } = true;
+    public bool BlurEnabled { get; set; } = false;
     public double CornerRadius { get; set; } = 26;
     public double BarWidth { get; set; } = 260;
     public double BarHeight { get; set; } = 40;
-    public bool ShadowEnabled { get; set; } = true;
+    public bool ShadowEnabled { get; set; } = false;
     public string AccentColor { get; set; } = "#FF0A84FF";
 
     // ---- Animations ----

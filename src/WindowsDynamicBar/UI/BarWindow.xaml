@@ -211,7 +211,7 @@
             </Border.RenderTransform>
 
             <Border.Effect>
-                <DropShadowEffect x:Name="PillShadow" Color="#000000" BlurRadius="24" ShadowDepth="4" Opacity="0.55" Direction="270" />
+                <DropShadowEffect x:Name="PillShadow" Color="#000000" BlurRadius="0" ShadowDepth="0" Opacity="0" />
             </Border.Effect>
 
             <Grid x:Name="PillGrid">

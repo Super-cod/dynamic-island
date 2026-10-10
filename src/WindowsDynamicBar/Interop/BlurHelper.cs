@@ -15,58 +15,37 @@ public static class BlurHelper
 {
     private static IntPtr _currentRegion = IntPtr.Zero;
     private static IntPtr _hwnd = IntPtr.Zero;
-    private static bool _available = true;
 
-    public static void Attach(IntPtr hwnd) => _hwnd = hwnd;
+    public static void Attach(IntPtr hwnd)
+    {
+        _hwnd = hwnd;
+        Disable();
+    }
 
-    /// <summary>Update the blurred region to a pill at (leftPx, topPx) of given size (device pixels).</summary>
+    /// <summary>
+    /// On Windows 10 and 11, DwmEnableBlurBehindWindow is deprecated and creates an aliased dark
+    /// translucent box artifact with GDI region borders behind transparent layered windows.
+    /// Blur is disabled so the island floats cleanly with true alpha transparency.
+    /// </summary>
     public static void UpdateRegion(int leftPx, int topPx, int widthPx, int heightPx, int radiusPx, bool enabled)
     {
-        if (!_available || _hwnd == IntPtr.Zero) return;
-        try
-        {
-            // Recreate region
-            if (_currentRegion != IntPtr.Zero)
-            {
-                NativeMethods.DeleteObject(_currentRegion);
-                _currentRegion = IntPtr.Zero;
-            }
-
-            var bb = new NativeMethods.DWM_BLURBEHIND { dwFlags = NativeMethods.DWM_BB_ENABLE };
-            if (!enabled)
-            {
-                bb.fEnable = false;
-                NativeMethods.DwmEnableBlurBehindWindow(_hwnd, ref bb);
-                return;
-            }
-
-            int w = Math.Max(4, widthPx), h = Math.Max(4, heightPx);
-            int r = Math.Clamp(radiusPx, 2, Math.Min(w, h) / 2);
-            // Inset 1px so GDI region aliasing hides under the pill border stroke.
-            _currentRegion = NativeMethods.CreateRoundRectRgn(leftPx + 1, topPx + 1, leftPx + w - 1, topPx + h - 1, r * 2, r * 2);
-            bb.dwFlags = NativeMethods.DWM_BB_ENABLE | NativeMethods.DWM_BB_BLURREGION;
-            bb.fEnable = true;
-            bb.hRgnBlur = _currentRegion;
-            bb.fTransitionOnMaximized = false;
-            int hr = NativeMethods.DwmEnableBlurBehindWindow(_hwnd, ref bb);
-            if (hr != 0)
-            {
-                Log.Debug("DwmEnableBlurBehindWindow returned {hr}", ("hr", hr));
-                // Non-fatal: pill still renders with translucent fill.
-            }
-        }
-        catch (Exception ex)
-        {
-            _available = false;
-            Log.Warning("Blur unavailable, continuing without", ("error", ex.Message));
-        }
+        Disable();
     }
 
     public static void Disable()
     {
         if (_hwnd == IntPtr.Zero) return;
-        var bb = new NativeMethods.DWM_BLURBEHIND { dwFlags = NativeMethods.DWM_BB_ENABLE, fEnable = false };
-        NativeMethods.DwmEnableBlurBehindWindow(_hwnd, ref bb);
+        try
+        {
+            if (_currentRegion != IntPtr.Zero)
+            {
+                NativeMethods.DeleteObject(_currentRegion);
+                _currentRegion = IntPtr.Zero;
+            }
+            var bb = new NativeMethods.DWM_BLURBEHIND { dwFlags = NativeMethods.DWM_BB_ENABLE, fEnable = false };
+            NativeMethods.DwmEnableBlurBehindWindow(_hwnd, ref bb);
+        }
+        catch { }
     }
 
     public static void Detach()

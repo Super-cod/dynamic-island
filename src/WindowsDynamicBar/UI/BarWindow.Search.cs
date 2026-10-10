@@ -299,9 +299,7 @@ public partial class BarWindow
     {
         if (suspend == _blurSuspended || !_blurOn) { _blurSuspended = suspend && _blurOn; return; }
         _blurSuspended = suspend;
-        _blurL = int.MinValue;
-        if (suspend) BlurHelper.UpdateRegion(0, 0, 0, 0, 0, enabled: false);
-        else RefreshBlur();
+        BlurHelper.Disable();
     }
 
     private void ApplySearchMorph(double p)

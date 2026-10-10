@@ -181,9 +181,8 @@ public partial class BarWindow : Window, IDisposable
     private bool _timerPaused, _stopwatchPaused, _focusPaused;
     private bool _disposed;
 
-    // blur region cache (px)
+    // blur state
     private bool _blurOn;
-    private int _blurL = int.MinValue, _blurT, _blurW, _blurH;
 
     // latest states
     private MediaInfo? _lastMedia;
@@ -447,7 +446,6 @@ public partial class BarWindow : Window, IDisposable
         StartBatteryNotifications();
 
         Reposition();
-        _blurL = int.MinValue;
         RefreshBlur();
         _fullscreenTimer?.Start();
     }
@@ -716,20 +714,7 @@ public partial class BarWindow : Window, IDisposable
 
     private void RefreshBlur()
     {
-        if (!_blurOn || _blurSuspended || _hwnd == IntPtr.Zero) return;
-        double scale = CurrentDpi();
-        double l = Pill.Margin.Left * scale;
-        double t = _currentTop * scale;
-        double w = _currentW * scale;
-        double h = _currentH * scale;
-        int li = (int)Math.Round(l);
-        int ti = (int)Math.Round(t);
-        int wi = (int)Math.Round(w);
-        int hi = (int)Math.Round(h);
-        if (li == _blurL && ti == _blurT && wi == _blurW && hi == _blurH) return;
-        _blurL = li; _blurT = ti; _blurW = wi; _blurH = hi;
-        double targetR = _currentCornerRadius;
-        BlurHelper.UpdateRegion(li, ti, wi, hi, (int)Math.Round(targetR * scale), true);
+        BlurHelper.Disable();
     }
 
     private void UpdateShape()
@@ -2811,17 +2796,10 @@ public partial class BarWindow : Window, IDisposable
             Core.Theme.ThemeService.Apply(m.Theme, m.Opacity);
 
             if (Pill.Effect is DropShadowEffect sh)
-                sh.Opacity = m.ShadowEnabled ? 0.55 : 0;
+                sh.Opacity = 0;
 
-            bool blurWasOn = _blurOn;
-            _blurOn = m.BlurEnabled;
-            if (!_blurOn) BlurHelper.Disable();
-            else if (!blurWasOn || _blurL == int.MinValue)
-            {
-                BlurHelper.Attach(_hwnd);
-                _blurL = int.MinValue;
-                RefreshBlur();
-            }
+            _blurOn = false;
+            BlurHelper.Disable();
 
             if (animChanged)
             {
