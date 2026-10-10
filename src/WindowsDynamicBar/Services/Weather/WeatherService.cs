@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Net.Http;
 using System.Text.Json;
 using WindowsDynamicBar.Core.Logging;
+using WindowsDynamicBar.Core.Settings;
 
 namespace WindowsDynamicBar.Services.Weather;
 
@@ -89,6 +90,7 @@ public sealed class WeatherService : IDisposable
 {
     private const string ForecastUrl = "https://api.open-meteo.com/v1/forecast";
     private const string AirUrl = "https://air-quality-api.open-meteo.com/v1/air-quality";
+    private const string GeocodeUrl = "https://geocoding-api.open-meteo.com/v1/search";
 
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(20) };
     private readonly object _sync = new();
@@ -96,13 +98,27 @@ public sealed class WeatherService : IDisposable
     private System.Threading.Timer? _timer;
     private int _fetching;
 
-    private WeatherSnapshot _snapshot = new() { Available = false };
-    private double? _lat, _lon;
-    private string _place = "";
+    private readonly SettingsService? _settings;
+    private string _configuredLocation = "Chennai";
+    private bool _configuredAutoLocation = false;
+
+    private WeatherSnapshot _snapshot = new() { Available = false, LocationName = "Chennai, IN" };
+    private double? _lat = 13.0827, _lon = 80.2707;
+    private string _place = "Chennai, IN";
     private DateTime _locationResolvedUtc = DateTime.MinValue;
 
-    public WeatherService()
-        => _http.DefaultRequestHeaders.UserAgent.ParseAdd("WindowsDynamicBar/1.0");
+    public WeatherService(SettingsService? settings = null)
+    {
+        _http.DefaultRequestHeaders.UserAgent.ParseAdd("WindowsDynamicBar/1.0");
+        _settings = settings ?? (App.Settings ?? SettingsService.Instance);
+        if (_settings is not null)
+        {
+            var cur = _settings.Current;
+            _configuredLocation = cur.WeatherLocation;
+            _configuredAutoLocation = cur.WeatherAutoLocation;
+            _settings.SettingsChanged += OnSettingsChanged;
+        }
+    }
 
     public WeatherSnapshot Snapshot { get { lock (_sync) return _snapshot; } }
     public bool HasLocation => _lat is not null && _lon is not null;
@@ -210,37 +226,158 @@ public sealed class WeatherService : IDisposable
             ("hours", snap.Hours.Length), ("aqi", snap.UsAqi?.ToString("0") ?? "—"));
     }
 
-    private async Task ResolveLocationAsync(CancellationToken token)
+    private void OnSettingsChanged(SettingsModel m)
     {
-        try
+        bool changed = false;
+        lock (_sync)
         {
-            using var resp = await _http.GetAsync("https://ipwho.is/", token).ConfigureAwait(false);
-            if (resp.IsSuccessStatusCode)
+            if (!string.Equals(_configuredLocation, m.WeatherLocation, StringComparison.OrdinalIgnoreCase) ||
+                _configuredAutoLocation != m.WeatherAutoLocation)
             {
-                using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(token).ConfigureAwait(false));
-                var root = doc.RootElement;
-                bool ok = !root.TryGetProperty("success", out var s) || s.ValueKind != JsonValueKind.False;
-                if (ok && TryCoords(root, out double la, out double lo))
+                _configuredLocation = m.WeatherLocation;
+                _configuredAutoLocation = m.WeatherAutoLocation;
+                _lat = null;
+                _lon = null;
+                _locationResolvedUtc = DateTime.MinValue;
+                changed = true;
+            }
+        }
+        if (changed) RequestRefresh();
+    }
+
+    public void RequestRefresh()
+    {
+        Task.Run(async () =>
+        {
+            for (int i = 0; i < 10; i++)
+            {
+                if (Interlocked.CompareExchange(ref _fetching, 1, 0) == 0)
                 {
-                    _lat = la; _lon = lo; _place = Place(root); _locationResolvedUtc = DateTime.UtcNow;
+                    try { await RefreshAsync(_cts.Token).ConfigureAwait(false); }
+                    catch (Exception ex) { Log.Info("Weather refresh failed", ("error", ex.Message)); }
+                    finally { Interlocked.Exchange(ref _fetching, 0); }
                     return;
                 }
+                await Task.Delay(200);
             }
-        }
-        catch { /* try next provider */ }
+        });
+    }
 
-        try
+    private async Task ResolveLocationAsync(CancellationToken token)
+    {
+        var settings = _settings?.Current ?? SettingsService.Instance.Current;
+        bool autoLocation = settings.WeatherAutoLocation;
+        string location = settings.WeatherLocation?.Trim() ?? "";
+
+        // Manual location (default when autoLocation is false and location is specified)
+        if (!autoLocation && !string.IsNullOrWhiteSpace(location))
         {
-            using var resp = await _http.GetAsync("https://ipapi.co/json/", token).ConfigureAwait(false);
-            if (!resp.IsSuccessStatusCode) return;
-            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(token).ConfigureAwait(false));
-            var root = doc.RootElement;
-            if (TryCoords(root, out double la, out double lo))
+            // 1. Explicit coordinates: "13.0827, 80.2707"
+            if (TryParseCoords(location, out double cLat, out double cLon))
             {
-                _lat = la; _lon = lo; _place = Place(root); _locationResolvedUtc = DateTime.UtcNow;
+                _lat = cLat;
+                _lon = cLon;
+                _place = $"{cLat:0.00}, {cLon:0.00}";
+                _locationResolvedUtc = DateTime.UtcNow;
+                return;
+            }
+
+            // 2. Chennai shortcut / instant local resolution
+            if (location.Equals("Chennai", StringComparison.OrdinalIgnoreCase) ||
+                location.Equals("Madras", StringComparison.OrdinalIgnoreCase))
+            {
+                _lat = 13.0827;
+                _lon = 80.2707;
+                _place = "Chennai, IN";
+                _locationResolvedUtc = DateTime.UtcNow;
+                return;
+            }
+
+            // 3. Geocode via Open-Meteo Geocoding API
+            try
+            {
+                string geoUrl = $"{GeocodeUrl}?name={Uri.EscapeDataString(location)}&count=1&language=en&format=json";
+                using var resp = await _http.GetAsync(geoUrl, token).ConfigureAwait(false);
+                if (resp.IsSuccessStatusCode)
+                {
+                    using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(token).ConfigureAwait(false));
+                    var root = doc.RootElement;
+                    if (root.TryGetProperty("results", out var resArr) && resArr.ValueKind == JsonValueKind.Array && resArr.GetArrayLength() > 0)
+                    {
+                        var first = resArr[0];
+                        if (TryCoords(first, out double gLat, out double gLon))
+                        {
+                            _lat = gLat;
+                            _lon = gLon;
+                            string name = first.TryGetProperty("name", out var n) && n.ValueKind == JsonValueKind.String
+                                ? n.GetString() ?? location : location;
+                            string cc = first.TryGetProperty("country_code", out var c) && c.ValueKind == JsonValueKind.String
+                                ? c.GetString() ?? "" : "";
+                            _place = string.IsNullOrEmpty(cc) ? name : $"{name}, {cc}";
+                            _locationResolvedUtc = DateTime.UtcNow;
+                            return;
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Info("Geocoding failed for custom location", ("location", location), ("error", ex.Message));
+            }
+
+            // Cached coordinates fallback if present
+            if (settings.WeatherLatitude is not null && settings.WeatherLongitude is not null)
+            {
+                _lat = settings.WeatherLatitude;
+                _lon = settings.WeatherLongitude;
+                _place = location;
+                _locationResolvedUtc = DateTime.UtcNow;
+                return;
             }
         }
-        catch { /* retried next cycle */ }
+
+        // Auto location via IP lookup
+        if (autoLocation)
+        {
+            try
+            {
+                using var resp = await _http.GetAsync("https://ipwho.is/", token).ConfigureAwait(false);
+                if (resp.IsSuccessStatusCode)
+                {
+                    using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(token).ConfigureAwait(false));
+                    var root = doc.RootElement;
+                    bool ok = !root.TryGetProperty("success", out var s) || s.ValueKind != JsonValueKind.False;
+                    if (ok && TryCoords(root, out double la, out double lo))
+                    {
+                        _lat = la; _lon = lo; _place = Place(root); _locationResolvedUtc = DateTime.UtcNow;
+                        return;
+                    }
+                }
+            }
+            catch { /* try next provider */ }
+
+            try
+            {
+                using var resp = await _http.GetAsync("https://ipapi.co/json/", token).ConfigureAwait(false);
+                if (resp.IsSuccessStatusCode)
+                {
+                    using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(token).ConfigureAwait(false));
+                    var root = doc.RootElement;
+                    if (TryCoords(root, out double la, out double lo))
+                    {
+                        _lat = la; _lon = lo; _place = Place(root); _locationResolvedUtc = DateTime.UtcNow;
+                        return;
+                    }
+                }
+            }
+            catch { /* fallback to default */ }
+        }
+
+        // Final fallback: default to Chennai
+        _lat = 13.0827;
+        _lon = 80.2707;
+        _place = "Chennai, IN";
+        _locationResolvedUtc = DateTime.UtcNow;
     }
 
     private async Task<double?> FetchAqiAsync(double lat, double lon, CancellationToken token)
@@ -315,11 +452,29 @@ public sealed class WeatherService : IDisposable
         => arr.ValueKind == JsonValueKind.Array && i >= 0 && i < arr.GetArrayLength() && arr[i].ValueKind == JsonValueKind.String
             ? arr[i].GetString() ?? "" : "";
 
+    private static bool TryParseCoords(string input, out double lat, out double lon)
+    {
+        lat = 0; lon = 0;
+        if (string.IsNullOrWhiteSpace(input)) return false;
+        var parts = input.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (parts.Length == 2 &&
+            double.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out lat) &&
+            double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out lon))
+        {
+            return lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180;
+        }
+        return false;
+    }
+
     private static DateTime ParseTime(string iso)
         => DateTime.TryParse(iso, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt) ? dt : DateTime.MinValue;
 
     public void Dispose()
     {
+        if (_settings is not null)
+        {
+            try { _settings.SettingsChanged -= OnSettingsChanged; } catch { }
+        }
         try { _cts.Cancel(); } catch { }
         _timer?.Dispose();
         _http.Dispose();

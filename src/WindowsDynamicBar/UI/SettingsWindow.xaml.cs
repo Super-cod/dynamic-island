@@ -16,15 +16,20 @@ public partial class SettingsWindow : Window
 {
     private static SettingsWindow? _open;
 
-    public static void ShowSingleton()
+    public static void ShowSingleton(string? initialPage = null)
     {
         if (_open is null)
         {
             _open = new SettingsWindow();
             _open.Closed += (_, _) => _open = null;
+            if (!string.IsNullOrEmpty(initialPage)) _open.SelectPage(initialPage);
             _open.Show();
         }
-        else if (_open.WindowState == WindowState.Minimized) _open.WindowState = WindowState.Normal;
+        else
+        {
+            if (_open.WindowState == WindowState.Minimized) _open.WindowState = WindowState.Normal;
+            if (!string.IsNullOrEmpty(initialPage)) _open.SelectPage(initialPage);
+        }
         _open.Activate();
     }
 
@@ -43,7 +48,7 @@ public partial class SettingsWindow : Window
     {
         ("general", "General", "Startup, monitor, hotkeys"),
         ("appearance", "Appearance", "Theme, colors, shape, motion"),
-        ("widgets", "Widgets", "Choose what the bar shows"),
+        ("widgets", "Widgets", "Weather, media, system, alerts"),
         ("privacy", "Privacy", "Clipboard, notifications, data"),
         ("diagnostics", "Diagnostics", "Version, services, logs"),
     };
@@ -230,14 +235,14 @@ public partial class SettingsWindow : Window
         return Row(label, hint, combo);
     }
 
-    private UIElement TextRow(string label, string? hint, string value, Action<string> apply)
+    private UIElement HotkeyRow(string label, string? hint, string value, Action<string> apply)
     {
         var box = new TextBox
         {
             Text = value, Width = 180, HorizontalAlignment = System.Windows.HorizontalAlignment.Right,
             VerticalAlignment = VerticalAlignment.Center, FontSize = 12,
             Background = new SolidColorBrush(Color.FromArgb(0x14, 0xFF, 0xFF, 0xFF)),
-            Foreground = White, BorderBrush = Hairline, Padding = new Thickness(6, 3, 6, 3),
+            Foreground = White, CaretBrush = White, BorderBrush = Hairline, Padding = new Thickness(6, 3, 6, 3),
         };
         void Commit()
         {
@@ -250,6 +255,25 @@ public partial class SettingsWindow : Window
             {
                 box.BorderBrush = new SolidColorBrush(Color.FromRgb(0xFF, 0x45, 0x3A));
             }
+        }
+        box.LostKeyboardFocus += (_, _) => Commit();
+        box.KeyUp += (_, e) => { if (e.Key == Key.Enter) Commit(); };
+        return Row(label, hint, box);
+    }
+
+    private UIElement TextRow(string label, string? hint, string value, Action<string> apply)
+    {
+        var box = new TextBox
+        {
+            Text = value, Width = 180, HorizontalAlignment = System.Windows.HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Center, FontSize = 12,
+            Background = new SolidColorBrush(Color.FromArgb(0x14, 0xFF, 0xFF, 0xFF)),
+            Foreground = White, CaretBrush = White, BorderBrush = Hairline, Padding = new Thickness(6, 3, 6, 3),
+        };
+        void Commit()
+        {
+            box.BorderBrush = Hairline;
+            apply(box.Text.Trim());
         }
         box.LostKeyboardFocus += (_, _) => Commit();
         box.KeyUp += (_, e) => { if (e.Key == Key.Enter) Commit(); };
@@ -319,13 +343,13 @@ public partial class SettingsWindow : Window
             true, _ => { }));
 
         root.Children.Add(SectionHeader("Global hotkeys"));
-        root.Children.Add(TextRow("Toggle bar", "Examples: Ctrl+Alt+Space, Ctrl+Shift+B, F9",
+        root.Children.Add(HotkeyRow("Toggle bar", "Examples: Ctrl+Alt+Space, Ctrl+Shift+B, F9",
             s.HotkeyToggle, v => Set(x => x.HotkeyToggle = v)));
-        root.Children.Add(TextRow("Media card", "Show the media player",
+        root.Children.Add(HotkeyRow("Media card", "Show the media player",
             s.HotkeyMedia, v => Set(x => x.HotkeyMedia = v)));
-        root.Children.Add(TextRow("Timer", "Start or show a 5-minute timer",
+        root.Children.Add(HotkeyRow("Timer", "Start or show a 5-minute timer",
             s.HotkeyTimer, v => Set(x => x.HotkeyTimer = v)));
-        root.Children.Add(TextRow("Search bar", "Island Search with Tab commands (default Ctrl+Space)",
+        root.Children.Add(HotkeyRow("Search bar", "Island Search with Tab commands (default Ctrl+Space)",
             s.HotkeySearch, v => Set(x => x.HotkeySearch = v)));
     }
 
@@ -374,6 +398,27 @@ public partial class SettingsWindow : Window
 
     private void PopulateWidgets(StackPanel root, SettingsModel s)
     {
+        root.Children.Add(SectionHeader("Weather"));
+        root.Children.Add(TextRow("Location",
+            "City name or coordinates for forecast (e.g. Chennai, London, 13.08, 80.28)",
+            s.WeatherLocation,
+            v => Set(x => x.WeatherLocation = v)));
+        root.Children.Add(ToggleRow("Auto-detect location",
+            "Resolve location automatically from public IP instead of manual location",
+            s.WeatherAutoLocation,
+            v => Set(x => x.WeatherAutoLocation = v)));
+        root.Children.Add(ButtonRow(("Set to Chennai", () =>
+        {
+            Set(x =>
+            {
+                x.WeatherLocation = "Chennai";
+                x.WeatherAutoLocation = false;
+                x.WeatherLatitude = 13.0827;
+                x.WeatherLongitude = 80.2707;
+            });
+            Populate("widgets");
+        })));
+
         root.Children.Add(SectionHeader("Media & sound"));
         root.Children.Add(ToggleRow("Media player", "Album art, transport, progress",
             s.FeatureMedia, v => Set(x => x.FeatureMedia = v)));

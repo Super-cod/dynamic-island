@@ -85,6 +85,12 @@ public sealed class SettingsModel
     public string AiModel { get; set; } = "llama3";
     public string AiKeyDPAPI { get; set; } = "";          // DPAPI-protected, never plaintext
 
+    // ---- Weather ----
+    public string WeatherLocation { get; set; } = "Chennai";
+    public double? WeatherLatitude { get; set; } = 13.0827;
+    public double? WeatherLongitude { get; set; } = 80.2707;
+    public bool WeatherAutoLocation { get; set; } = false;
+
     // ---- Advanced ----
     public bool CheckUpdatesOnStart { get; set; } = false;
     public string UpdateFeedUrl { get; set; } = "";

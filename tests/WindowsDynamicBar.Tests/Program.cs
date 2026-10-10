@@ -10,6 +10,7 @@ using WindowsDynamicBar.Services.Media;
 using WindowsDynamicBar.Services.SystemInfo;
 using WindowsDynamicBar.Services.SystemMonitor;
 using WindowsDynamicBar.Services.Timers;
+using WindowsDynamicBar.Services.Weather;
 using WindowsDynamicBar.UI;
 
 namespace WindowsDynamicBar.Tests;
@@ -66,6 +67,9 @@ internal static class Program
         Run("Warning strip 5s RAM trigger and hysteresis reset", TestWarningStripHysteresis);
         Run("FuzzyMatcher substring, subsequence, launch counts", TestSearchFuzzyMatcher);
         Run("ExpressionEvaluator math, units, currencies", TestSearchExpressionEvaluator);
+        Run("Weather settings default to Chennai", TestWeatherSettingsDefaults);
+        Run("Weather settings round-trip", TestWeatherSettingsRoundTrip);
+        Run("WeatherService defaults to Chennai coordinates", TestWeatherServiceDefaults);
 
         Console.WriteLine(new string('-', 46));
         Console.WriteLine($"passed: {_pass}   failed: {_fail}");
@@ -773,6 +777,48 @@ internal static class Program
         // 4. Invalid input does not throw or evaluate
         var (okFail, _, _) = ExpressionEvaluator.TryEvaluate("hello world");
         Assert(!okFail, "normal text rejected by expression evaluator");
+    }
+
+    private static void TestWeatherSettingsDefaults()
+    {
+        var model = new SettingsModel();
+        AssertEq("Chennai", model.WeatherLocation, "Default WeatherLocation");
+        AssertEq(13.0827, model.WeatherLatitude ?? 0, "Default WeatherLatitude");
+        AssertEq(80.2707, model.WeatherLongitude ?? 0, "Default WeatherLongitude");
+        Assert(!model.WeatherAutoLocation, "Default WeatherAutoLocation is false");
+    }
+
+    private static void TestWeatherSettingsRoundTrip()
+    {
+        string path = SettingsService.Instance.SettingsPath;
+        SettingsModel? original = File.Exists(path) ? JsonSerializer.LoadCopy(path) : null;
+        try
+        {
+            SettingsService.Instance.Save(new SettingsModel
+            {
+                WeatherLocation = "Tokyo",
+                WeatherAutoLocation = true,
+                WeatherLatitude = 35.6762,
+                WeatherLongitude = 139.6503,
+            });
+            var loaded = SettingsService.Instance.Load();
+            AssertEq("Tokyo", loaded.WeatherLocation, "WeatherLocation round-trip");
+            Assert(loaded.WeatherAutoLocation, "WeatherAutoLocation round-trip");
+            AssertEq(35.6762, loaded.WeatherLatitude ?? 0, "WeatherLatitude round-trip");
+            AssertEq(139.6503, loaded.WeatherLongitude ?? 0, "WeatherLongitude round-trip");
+        }
+        finally
+        {
+            if (original is not null) SettingsService.Instance.Save(original);
+            else if (File.Exists(path)) File.Delete(path);
+        }
+    }
+
+    private static void TestWeatherServiceDefaults()
+    {
+        using var ws = new WeatherService();
+        Assert(ws.HasLocation, "WeatherService has default location");
+        AssertEq("Chennai, IN", ws.Snapshot.LocationName, "WeatherService default place name");
     }
 }
 

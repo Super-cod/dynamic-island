@@ -353,7 +353,11 @@ public partial class BarWindow : Window, IDisposable
         _fullscreenTimer?.Start();
     }
 
-    private void OnLoaded(object sender, RoutedEventArgs e) => UpdateCollapsed();
+    private void OnLoaded(object sender, RoutedEventArgs e)
+    {
+        EnsureWeather();
+        UpdateCollapsed();
+    }
 
     private void OnClosed(object? sender, EventArgs e) => Dispose();
 
@@ -637,6 +641,17 @@ public partial class BarWindow : Window, IDisposable
     {
         if (_shown is null) return;
         if (_islandState != IslandVisualState.Collapsed) SetIslandState(IslandVisualState.Collapsed, IslandMetric.None, force: true);
+
+        // Guarantee mutual exclusion: legacy ExpandedHost and modern IslandExpandedHost must never overlap
+        IslandExpandedHost.Visibility = Visibility.Collapsed;
+        IslandExpandedHost.Opacity = 0;
+        foreach (UIElement panel in AllPanels)
+        {
+            panel.Visibility = Visibility.Collapsed;
+            panel.Opacity = 0;
+            panel.IsHitTestVisible = false;
+        }
+
         double w = Math.Clamp(TargetWidth(_shown.Kind), 120, MaxPillW);
 
         ExpandedHost.Visibility = Visibility.Visible;
@@ -913,6 +928,15 @@ public partial class BarWindow : Window, IDisposable
 
     private void ShowIslandContent(bool withPanel)
     {
+        // Mutual exclusion: dismiss and hide legacy ExpandedHost when modern dynamic island is shown
+        if (_expanded)
+        {
+            _expanded = false;
+            _idleCollapse.Stop();
+        }
+        ExpandedHost.Visibility = Visibility.Collapsed;
+        ExpandedHost.Opacity = 0;
+
         ApplyDynamicCardScale();
         CollapsedPanel.Visibility = Visibility.Visible;
         OrbHost.Visibility = Visibility.Visible;
@@ -975,6 +999,8 @@ public partial class BarWindow : Window, IDisposable
 
     private void HideIslandContent()
     {
+        ExpandedHost.Visibility = Visibility.Collapsed;
+        ExpandedHost.Opacity = 0;
         SearchHost.Visibility = Visibility.Collapsed;
         SearchHost.Opacity = 0;
         IconRow.SetActive(IslandMetric.None);
@@ -1692,7 +1718,7 @@ public partial class BarWindow : Window, IDisposable
     private void EnsureWeather()
     {
         if (_weather is not null) return;
-        _weather = new WeatherService();
+        _weather = new WeatherService(App.Settings);
         _weather.Updated += OnWeatherUpdated;
         WeatherPanelComponent.ReduceMotion = _cfg.ReduceMotion;
         _weather.Start();
@@ -1880,7 +1906,7 @@ public partial class BarWindow : Window, IDisposable
         try
         {
             // If the dynamic island is open (expanded music pill, detail telemetry panel, or hovered),
-            // transient HUD events (volume, brightness) must NOT collapse or preempt the open island.
+            // transient HUD events (volume, brightness) or media must NOT collapse or preempt the open island.
             if (_islandState != IslandVisualState.Collapsed || _islandHovering)
             {
                 if (evt.Kind is BarEventKind.Volume or BarEventKind.Brightness)
@@ -1889,6 +1915,12 @@ public partial class BarWindow : Window, IDisposable
                     {
                         UpdateVolumeControls();
                     }
+                    return;
+                }
+
+                if (evt.Kind == BarEventKind.Media)
+                {
+                    UpdateIslandContent();
                     return;
                 }
             }
@@ -1944,10 +1976,16 @@ public partial class BarWindow : Window, IDisposable
 
     private void OnMediaChanged(MediaInfo info)
     {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.BeginInvoke(() => OnMediaChanged(info));
+            return;
+        }
+
         _lastMedia = info;
         if (_islandState != IslandVisualState.Collapsed)
         {
-            Dispatcher.BeginInvoke(() => UpdateIslandContent());
+            UpdateIslandContent();
         }
         else
         {
@@ -2850,6 +2888,9 @@ public partial class BarWindow : Window, IDisposable
         OrbGlyph.Visibility = Visibility.Visible;
     }
 
+    private BitmapSource? _lastGradientDisc;
+    private Color? _lastGradientColor;
+
     private void ShowDisc(MediaInfo? m)
     {
         if (m is null || string.IsNullOrWhiteSpace(m.Title))
@@ -2864,7 +2905,21 @@ public partial class BarWindow : Window, IDisposable
         if (art is null)
         {
             Color dom = m.DominantColor ?? Color.FromRgb(0x0A, 0x84, 0xFF);
-            art = AppIconHelper.CreateGradientDisc(dom, 122);
+            if (_lastGradientDisc is not null && _lastGradientColor == dom)
+            {
+                art = _lastGradientDisc;
+            }
+            else
+            {
+                art = AppIconHelper.CreateGradientDisc(dom, 122);
+                _lastGradientDisc = art;
+                _lastGradientColor = dom;
+            }
+        }
+        else
+        {
+            _lastGradientDisc = null;
+            _lastGradientColor = null;
         }
         OrbDisc.SetArtwork(art, m.IsPlaying);
         OrbDisc.Visibility = Visibility.Visible;
@@ -2882,7 +2937,12 @@ public partial class BarWindow : Window, IDisposable
 
     private BitmapSource? BytesToImage(byte[]? bytes)
     {
-        if (bytes is null || bytes.Length == 0) return null;
+        if (bytes is null || bytes.Length == 0)
+        {
+            _lastArtBytes = null;
+            _lastArt = null;
+            return null;
+        }
         if (ReferenceEquals(bytes, _lastArtBytes) && _lastArt is not null) return _lastArt;
         try
         {
@@ -2966,6 +3026,7 @@ public partial class BarWindow : Window, IDisposable
                 HoverPlayGlyph.Text = nextPlaying ? IcPause : IcPlay;
                 HoverEq.Running = nextPlaying;
                 HoverEq.Visibility = Visibility.Visible;
+                OrbDisc.SetPlaying(nextPlaying);
                 if (nextPlaying && _islandState != IslandVisualState.Collapsed)
                     _spectrum.Start();
                 else

@@ -14,7 +14,6 @@ public partial class MediaDisc : UserControl
     private double _angle;
     private double _omega;
     private BitmapSource? _currentArt;
-    private bool _frontShown;
     private readonly Stopwatch _clock = Stopwatch.StartNew();
     private long _lastTickMs;
     private readonly DispatcherTimer _spin = new(DispatcherPriority.Render)
@@ -62,6 +61,12 @@ public partial class MediaDisc : UserControl
         _currentArt = art;
         if (art is null)
         {
+            foreach (var t in _tweens) t.Dispose();
+            _tweens.Clear();
+            ArtFront.Source = null;
+            ArtFront.Visibility = Visibility.Collapsed;
+            ArtBack.Source = null;
+            ArtBack.Visibility = Visibility.Collapsed;
             ArtMask.Visibility = Visibility.Collapsed;
             Fallback.Visibility = Visibility.Visible;
         }
@@ -88,36 +93,36 @@ public partial class MediaDisc : UserControl
         foreach (var t in _tweens) t.Dispose();
         _tweens.Clear();
 
-        Image fadeIn = _frontShown ? ArtBack : ArtFront;
-        Image fadeOut = _frontShown ? ArtFront : ArtBack;
-        fadeIn.Source = art;
-        fadeIn.Opacity = 0;
-        fadeIn.Visibility = Visibility.Visible;
-        fadeOut.Visibility = Visibility.Visible;
-
-        if (ReduceMotion)
+        // If no artwork was showing previously, or motion is reduced, display immediately on ArtFront
+        if (ArtFront.Source is null || ReduceMotion)
         {
-            fadeIn.Opacity = 1;
-            fadeOut.Opacity = 0;
-            fadeOut.Source = null;
-            fadeOut.Visibility = Visibility.Collapsed;
-            _frontShown = !_frontShown;
+            ArtBack.Source = null;
+            ArtBack.Visibility = Visibility.Collapsed;
+            ArtFront.Source = art;
+            ArtFront.Opacity = 1;
+            ArtFront.Visibility = Visibility.Visible;
             return;
         }
 
+        // Put the previous artwork on ArtBack underneath so it remains visible during transition
+        ArtBack.Source = ArtFront.Source;
+        ArtBack.Opacity = 1;
+        ArtBack.Visibility = Visibility.Visible;
+
+        // Place incoming artwork on ArtFront (on top) and fade it in
+        ArtFront.Source = art;
+        ArtFront.Opacity = 0;
+        ArtFront.Visibility = Visibility.Visible;
+
         var tIn = new TweenAnimation();
-        var tOut = new TweenAnimation();
         _tweens.Add(tIn);
-        _tweens.Add(tOut);
-        tIn.Run(0, 1, TimeSpan.FromMilliseconds(240), v => fadeIn.Opacity = v, Easing.CubicOut);
-        tOut.Run(1, 0, TimeSpan.FromMilliseconds(240), v => fadeOut.Opacity = v, Easing.CubicOut);
-        tOut.Completed += () =>
+        tIn.Run(0, 1, TimeSpan.FromMilliseconds(240), v => ArtFront.Opacity = v, Easing.CubicOut);
+        tIn.Completed += () =>
         {
-            fadeOut.Source = null;
-            fadeOut.Visibility = Visibility.Collapsed;
-            _frontShown = !_frontShown;
+            ArtBack.Source = null;
+            ArtBack.Visibility = Visibility.Collapsed;
+            ArtFront.Opacity = 1;
             _tweens.Remove(tIn);
-            _tweens.Remove(tOut);
         };
     }
 

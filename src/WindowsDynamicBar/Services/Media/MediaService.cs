@@ -145,7 +145,7 @@ public sealed class MediaService : IDisposable
         => await RefreshAsync(showEvent: true);
 
     private async void OnPlaybackInfo(GlobalSystemMediaTransportControlsSession s, PlaybackInfoChangedEventArgs e)
-        => await RefreshAsync(showEvent: true);
+        => await RefreshAsync(showEvent: false);
 
     private async void OnTimeline(GlobalSystemMediaTransportControlsSession s, TimelinePropertiesChangedEventArgs e)
         => await RefreshAsync(showEvent: false);
@@ -170,11 +170,11 @@ public sealed class MediaService : IDisposable
             if (info is null) return;
             MediaChanged?.Invoke(info);
 
-            string key = $"{info.Title}|{info.AppId}";
+            string key = $"{info.Title}|{info.Artist}|{info.AppId}";
             bool trackChanged = key != _lastKey;
-            if (showEvent && (trackChanged || force))
+            _lastKey = key;
+            if (showEvent && (trackChanged || force) && info.IsPlaying)
             {
-                _lastKey = key;
                 _bus.Raise(BarEvent.Create(BarEventKind.Media, info.Title,
                     info.Artist, payload: info,
                     displayDuration: TimeSpan.FromSeconds(4.5), priority: 60));
@@ -196,7 +196,7 @@ public sealed class MediaService : IDisposable
             var identity = AppIconHelper.ResolveAppIdentity(_current.SourceAppUserModelId);
 
             byte[]? art = _lastArtwork;
-            string artKey = $"{props.Title}|{_current.SourceAppUserModelId}";
+            string artKey = $"{props.Title}|{props.Artist}|{_current.SourceAppUserModelId}";
             bool keyChanged = artKey != _lastArtworkKey;
             if (keyChanged || art is null)
             {

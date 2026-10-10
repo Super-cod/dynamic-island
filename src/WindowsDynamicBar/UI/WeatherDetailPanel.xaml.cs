@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Documents;
+using System.Windows.Input;
 using System.Windows.Media;
 using WindowsDynamicBar.Services.Weather;
 
@@ -39,6 +40,9 @@ public partial class WeatherDetailPanel : UserControl
     {
         InitializeComponent();
         TitleText.Foreground = NameBrush;
+        CityText.Cursor = Cursors.Hand;
+        CityText.ToolTip = "Click to configure weather location in Settings";
+        CityText.MouseLeftButtonUp += (_, _) => SettingsWindow.ShowSingleton("widgets");
         BuildTiles();
         BuildStats();
     }
