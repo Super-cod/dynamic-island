@@ -182,6 +182,15 @@ public sealed class TrayController : IDisposable
             if (System.IO.File.Exists(path)) return new Icon(path);
         }
         catch { }
+        try
+        {
+            if (Environment.ProcessPath is { } exePath && System.IO.File.Exists(exePath))
+            {
+                var icon = Icon.ExtractAssociatedIcon(exePath);
+                if (icon != null) return icon;
+            }
+        }
+        catch { }
         return SystemIcons.Application;
     }
 

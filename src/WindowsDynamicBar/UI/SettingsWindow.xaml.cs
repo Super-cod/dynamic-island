@@ -689,18 +689,40 @@ public partial class SettingsWindow : Window
         return true;
     }
 
-    private static BitmapImage? LoadIcon(int size)
+    private static ImageSource? LoadIcon(int size)
     {
-        string path = Path.Combine(AppContext.BaseDirectory, "Assets", "app.ico");
-        if (!File.Exists(path)) return null;
-        var bi = new BitmapImage();
-        bi.BeginInit();
-        bi.UriSource = new Uri(path);
-        bi.DecodePixelWidth = size;
-        bi.CacheOption = BitmapCacheOption.OnLoad;
-        bi.EndInit();
-        bi.Freeze();
-        return bi;
+        try
+        {
+            string path = Path.Combine(AppContext.BaseDirectory, "Assets", "app.ico");
+            if (File.Exists(path))
+            {
+                var bi = new BitmapImage();
+                bi.BeginInit();
+                bi.UriSource = new Uri(path);
+                bi.DecodePixelWidth = size;
+                bi.CacheOption = BitmapCacheOption.OnLoad;
+                bi.EndInit();
+                bi.Freeze();
+                return bi;
+            }
+        }
+        catch { }
+        try
+        {
+            if (Environment.ProcessPath is { } exePath && File.Exists(exePath))
+            {
+                using var ico = System.Drawing.Icon.ExtractAssociatedIcon(exePath);
+                if (ico != null)
+                {
+                    return System.Windows.Interop.Imaging.CreateBitmapSourceFromHIcon(
+                        ico.Handle,
+                        Int32Rect.Empty,
+                        BitmapSizeOptions.FromEmptyOptions());
+                }
+            }
+        }
+        catch { }
+        return null;
     }
 }
 
