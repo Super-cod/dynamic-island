@@ -298,7 +298,12 @@ public sealed class Equalizer : FrameworkElement
 {
     private const double Cell = 4.0;
     private const double Dot = 3.0;
-    private readonly DateTime _t0 = DateTime.UtcNow;
+    private const int Cols = 25;
+    private const int Rows = 6;
+    private readonly float[] _bands = new float[Cols];
+    private static readonly Brush EmptyDotBrush = Frozen(Color.FromArgb(18, 255, 255, 255));
+    private double _time;
+    private DateTime _lastFrameTime = DateTime.UtcNow;
     private bool _hooked;
 
     public static readonly DependencyProperty RunningProperty =
@@ -308,6 +313,10 @@ public sealed class Equalizer : FrameworkElement
     public static readonly DependencyProperty ReduceMotionProperty =
         DependencyProperty.Register(nameof(ReduceMotion), typeof(bool), typeof(Equalizer),
             new FrameworkPropertyMetadata(false, FrameworkPropertyMetadataOptions.AffectsRender, OnRunningChanged));
+
+    public static readonly DependencyProperty AccentColorProperty =
+        DependencyProperty.Register(nameof(AccentColor), typeof(Color), typeof(Equalizer),
+            new FrameworkPropertyMetadata(Color.FromRgb(0x0A, 0x84, 0xFF), FrameworkPropertyMetadataOptions.AffectsRender));
 
     public bool Running
     {
@@ -321,43 +330,40 @@ public sealed class Equalizer : FrameworkElement
         set => SetValue(ReduceMotionProperty, value);
     }
 
+    public Color AccentColor
+    {
+        get => (Color)GetValue(AccentColorProperty);
+        set => SetValue(AccentColorProperty, value);
+    }
+
+    public Equalizer()
+    {
+        IsVisibleChanged += (_, _) => SyncLoop();
+        Unloaded += (_, _) =>
+        {
+            if (_hooked)
+            {
+                _hooked = false;
+                CompositionTarget.Rendering -= OnFrame;
+            }
+        };
+    }
+
     private static void OnRunningChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
         => ((Equalizer)d).SyncLoop();
 
-    protected override void OnRender(DrawingContext dc)
+    public void SetSpectrum(float[]? bands)
     {
-        double w = ActualWidth, h = ActualHeight;
-        if (w < 2 || h < 2) return;
-
-        int rows = (int)Math.Floor(h / Cell);
-        if (rows < 1) return;
-
-        int cols = (int)Math.Floor(w / Cell);
-        if (cols < 1) return;
-
-        double t = (DateTime.UtcNow - _t0).TotalSeconds;
-        bool animate = Running && !ReduceMotion;
-        double inset = (Cell - Dot) / 2;
-
-        for (int i = 0; i < cols; i++)
+        if (bands is not null && bands.Length > 0)
         {
-            double ratio = animate ? BarHeightAt(t, i, cols) : 0.0;
-            int filled = animate ? Math.Max(1, (int)Math.Round(ratio * rows)) : 1;
-            var brush = Frozen(Hsl(235 - ratio * 14, 0.70, 0.62 + ratio * 0.03));
-            double x = i * Cell + inset;
-            for (int r = 0; r < filled; r++)
-                dc.DrawRectangle(brush, null, new Rect(x, h - (r + 1) * Cell + inset, Dot, Dot));
+            int n = Math.Min(Cols, bands.Length);
+            for (int i = 0; i < n; i++) _bands[i] = bands[i];
         }
-    }
-
-    private static double BarHeightAt(double t, int i, int bars)
-    {
-        double p = i / (double)Math.Max(1, bars - 1);
-        double v = 0.5
-            + 0.30 * Math.Sin(t * 3.1 + p * 9.0)
-            + 0.16 * Math.Sin(t * 5.7 - p * 5.0 + 1.3)
-            + 0.10 * Math.Sin(t * 2.3 + p * 17.0);
-        return Math.Clamp(v, 0.05, 1.0);
+        else
+        {
+            Array.Clear(_bands, 0, Cols);
+        }
+        InvalidateVisual();
     }
 
     private void SyncLoop()
@@ -366,22 +372,79 @@ public sealed class Equalizer : FrameworkElement
         if (want && !_hooked)
         {
             _hooked = true;
+            _lastFrameTime = DateTime.UtcNow;
             CompositionTarget.Rendering += OnFrame;
         }
         else if (!want && _hooked)
         {
             _hooked = false;
             CompositionTarget.Rendering -= OnFrame;
+            InvalidateVisual();
         }
     }
 
-    private void OnFrame(object? sender, EventArgs e) => InvalidateVisual();
+    private void OnFrame(object? sender, EventArgs e)
+    {
+        var now = DateTime.UtcNow;
+        double dt = (now - _lastFrameTime).TotalSeconds;
+        _lastFrameTime = now;
+        if (dt > 0 && dt < 0.2)
+        {
+            _time += dt;
+        }
+        InvalidateVisual();
+    }
 
     protected override void OnVisualParentChanged(DependencyObject oldParent)
     {
         base.OnVisualParentChanged(oldParent);
         SyncLoop();
     }
+
+    protected override Size MeasureOverride(Size availableSize) => new Size(100, 24);
+
+    private bool HasLiveSpectrum()
+    {
+        for (int i = 0; i < Cols; i++)
+        {
+            if (_bands[i] > 0.04f) return true;
+        }
+        return false;
+    }
+
+    private static double BarHeightAt(double t, int i, int bars)
+    {
+        double p = i / (double)Math.Max(1, bars - 1);
+        double v = 0.45
+            + 0.32 * Math.Sin(t * 3.4 + p * 8.5)
+            + 0.18 * Math.Sin(t * 5.8 - p * 5.2 + 1.3)
+            + 0.12 * Math.Sin(t * 2.1 + p * 16.0);
+        return Math.Clamp(v, 0.10, 1.0);
+    }
+
+    protected override void OnRender(DrawingContext dc)
+    {
+        double h = ActualHeight > 0 ? ActualHeight : 24;
+        bool isMotion = !ReduceMotion;
+        double inset = (Cell - Dot) / 2;
+        var litBrush = Frozen(AccentColor);
+        bool useReal = Running && isMotion && HasLiveSpectrum();
+
+        for (int i = 0; i < Cols; i++)
+        {
+            double ratio = useReal ? Math.Clamp(_bands[i], 0.0, 1.0) : BarHeightAt(_time, i, Cols);
+            int filled = isMotion ? Math.Max(1, (int)Math.Round(ratio * Rows)) : 1;
+            double x = i * Cell + inset;
+
+            for (int r = 0; r < Rows; r++)
+            {
+                double y = h - (r + 1) * Cell + inset;
+                bool isLit = r < filled;
+                dc.DrawRectangle(isLit ? litBrush : EmptyDotBrush, null, new Rect(x, y, Dot, Dot));
+            }
+        }
+    }
+
 
     private static Color Hsl(double h, double s, double l)
     {

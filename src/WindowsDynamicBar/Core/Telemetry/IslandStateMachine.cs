@@ -1,7 +1,7 @@
 namespace WindowsDynamicBar.Core.Telemetry;
 
-/// <summary>Visual state of the dynamic island. Collapsed = pill; Expanded = hover; Detail = metric panel.</summary>
-public enum IslandVisualState { Collapsed, Expanded, Detail }
+/// <summary>Visual state of the dynamic island. Collapsed = pill; Expanded = hover; Detail = metric panel; Search = search bar.</summary>
+public enum IslandVisualState { Collapsed, Expanded, Detail, Search }
 
 /// <summary>Which telemetry metric the detail panel shows.</summary>
 public enum IslandMetric { None, Cpu, Gpu, Ram, Mirror, Net, Weather }

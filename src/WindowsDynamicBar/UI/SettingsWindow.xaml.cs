@@ -325,6 +325,8 @@ public partial class SettingsWindow : Window
             s.HotkeyMedia, v => Set(x => x.HotkeyMedia = v)));
         root.Children.Add(TextRow("Timer", "Start or show a 5-minute timer",
             s.HotkeyTimer, v => Set(x => x.HotkeyTimer = v)));
+        root.Children.Add(TextRow("Search bar", "Island Search with Tab commands (default Ctrl+Space)",
+            s.HotkeySearch, v => Set(x => x.HotkeySearch = v)));
     }
 
     private void PopulateAppearance(StackPanel root, SettingsModel s)

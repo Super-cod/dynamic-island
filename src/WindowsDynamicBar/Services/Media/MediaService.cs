@@ -1,8 +1,11 @@
 using System.Diagnostics;
+using System.IO;
+using System.Windows.Media;
 using Windows.Media.Control;
 using Windows.Storage.Streams;
 using WindowsDynamicBar.Core.Events;
 using WindowsDynamicBar.Core.Logging;
+using WindowsDynamicBar.Core.Media;
 
 namespace WindowsDynamicBar.Services.Media;
 
@@ -15,7 +18,12 @@ public sealed record MediaInfo(
     TimeSpan Position,
     TimeSpan Duration,
     byte[]? ArtworkBytes,
-    double Progress);
+    double Progress,
+    string SourceAppName = "",
+    byte[]? SourceAppIconBytes = null,
+    bool CanSeek = true,
+    DateTimeOffset? LastUpdatedTime = null,
+    Color? DominantColor = null);
 
 public sealed class MediaService : IDisposable
 {
@@ -25,9 +33,13 @@ public sealed class MediaService : IDisposable
     private DispatcherTimerRef? _timelineTimer;
     private byte[]? _lastArtwork;
     private string? _lastKey;
+    private string? _lastArtworkKey;
+    private string? _userSelectedAppId;
     private bool _started;
 
     public event Action<MediaInfo>? MediaChanged;
+
+    public string? CurrentAppId => _current?.SourceAppUserModelId;
 
     public MediaService(EventBus bus) => _bus = bus;
 
@@ -38,7 +50,7 @@ public sealed class MediaService : IDisposable
         {
             _manager = await GlobalSystemMediaTransportControlsSessionManager.RequestAsync();
             _manager.SessionsChanged += OnSessionsChanged;
-            HookSession(_manager.GetCurrentSession());
+            HookSession(PickBestSession());
             _started = true;
             Log.Info("Media service started");
         }
@@ -48,10 +60,60 @@ public sealed class MediaService : IDisposable
         }
     }
 
+    public IReadOnlyList<GlobalSystemMediaTransportControlsSession> GetSessions()
+    {
+        if (_manager is null) return Array.Empty<GlobalSystemMediaTransportControlsSession>();
+        try { return _manager.GetSessions(); }
+        catch { return Array.Empty<GlobalSystemMediaTransportControlsSession>(); }
+    }
+
+    private GlobalSystemMediaTransportControlsSession? PickBestSession()
+    {
+        if (_manager is null) return null;
+        var sessions = GetSessions();
+        if (sessions.Count == 0) return null;
+
+        if (!string.IsNullOrEmpty(_userSelectedAppId))
+        {
+            var matched = sessions.FirstOrDefault(s => s.SourceAppUserModelId == _userSelectedAppId);
+            if (matched is not null) return matched;
+        }
+
+        var playing = sessions.FirstOrDefault(s => s.GetPlaybackInfo()?.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing);
+        if (playing is not null) return playing;
+
+        return _manager.GetCurrentSession() ?? sessions.FirstOrDefault();
+    }
+
+    public void CycleSession()
+    {
+        if (_manager is null) return;
+        var sessions = GetSessions();
+        if (sessions.Count <= 1) return;
+
+        int idx = -1;
+        if (_current is not null)
+        {
+            for (int i = 0; i < sessions.Count; i++)
+            {
+                if (sessions[i].SourceAppUserModelId == _current.SourceAppUserModelId)
+                {
+                    idx = i;
+                    break;
+                }
+            }
+        }
+
+        int nextIdx = (idx + 1) % sessions.Count;
+        var nextSession = sessions[nextIdx];
+        _userSelectedAppId = nextSession.SourceAppUserModelId;
+        HookSession(nextSession);
+    }
+
     private void OnSessionsChanged(GlobalSystemMediaTransportControlsSessionManager sender,
         SessionsChangedEventArgs args)
     {
-        HookSession(_manager?.GetCurrentSession());
+        HookSession(PickBestSession());
     }
 
     private void HookSession(GlobalSystemMediaTransportControlsSession? session)
@@ -67,6 +129,9 @@ public sealed class MediaService : IDisposable
         {
             _timelineTimer?.Stop();
             _lastKey = null;
+            _lastArtwork = null;
+            _lastArtworkKey = null;
+            MediaChanged?.Invoke(new MediaInfo("", "", "", "", false, TimeSpan.Zero, TimeSpan.Zero, null, 0));
             return;
         }
         _current.MediaPropertiesChanged += OnMediaProperties;
@@ -88,7 +153,7 @@ public sealed class MediaService : IDisposable
     private void StartTimelineTimer()
     {
         _timelineTimer ??= new DispatcherTimerRef();
-        _timelineTimer.Start(TimeSpan.FromMilliseconds(1000), async () =>
+        _timelineTimer.Start(TimeSpan.FromMilliseconds(250), async () =>
         {
             if (_current is null) return;
             var info = await BuildInfoAsync();
@@ -128,15 +193,20 @@ public sealed class MediaService : IDisposable
             var timeline = _current.GetTimelineProperties();
             bool playing = playback.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing;
 
-            // Artwork: fetch when title/app changes, and keep retrying while it is still
-            // missing so a late-arriving thumbnail is picked up (many apps publish metadata
-            // before the artwork is ready). Once we have art for a key we don't re-fetch.
+            var identity = AppIconHelper.ResolveAppIdentity(_current.SourceAppUserModelId);
+
             byte[]? art = _lastArtwork;
             string artKey = $"{props.Title}|{_current.SourceAppUserModelId}";
             bool keyChanged = artKey != _lastArtworkKey;
             if (keyChanged || art is null)
             {
                 var fetched = await TryGetArtworkAsync();
+                if (fetched is not null && AppIconHelper.IsArtworkTinyOrAppIcon(fetched, identity.IconBytes, 64))
+                {
+                    // Do not show tiny artwork or app icon on disc
+                    fetched = null;
+                }
+
                 if (fetched is not null || keyChanged)
                 {
                     _lastArtwork = fetched;
@@ -150,13 +220,28 @@ public sealed class MediaService : IDisposable
             double progress = duration.TotalSeconds > 0
                 ? Math.Clamp(position.TotalSeconds / duration.TotalSeconds, 0, 1) : 0;
 
+            bool canSeek = playback.Controls?.IsPlaybackPositionEnabled ?? true;
+
+            Color dominant = identity.DominantColor;
+            if (art is not null)
+            {
+                var artBmp = AppIconHelper.BytesToBitmap(art);
+                if (artBmp is not null)
+                    dominant = AppIconHelper.ExtractDominantColor(artBmp);
+            }
+
             return new MediaInfo(
                 string.IsNullOrWhiteSpace(props.Title) ? "Unknown" : props.Title,
                 props.Artist ?? "",
                 props.AlbumTitle ?? "",
                 _current.SourceAppUserModelId ?? "",
                 playing,
-                position, duration, art, progress);
+                position, duration, art, progress,
+                identity.DisplayName,
+                identity.IconBytes,
+                canSeek,
+                timeline.LastUpdatedTime,
+                dominant);
         }
         catch (Exception ex)
         {
@@ -164,8 +249,6 @@ public sealed class MediaService : IDisposable
             return null;
         }
     }
-
-    private string? _lastArtworkKey;
 
     private async Task<byte[]?> TryGetArtworkAsync()
     {
@@ -216,6 +299,18 @@ public sealed class MediaService : IDisposable
             await _current.TryChangePlaybackPositionAsync(target.Ticks);
         }
         catch (Exception ex) { Log.Debug("Seek", ("error", ex.Message)); }
+    }
+
+    public async Task SeekToTimeAsync(TimeSpan position)
+    {
+        try
+        {
+            if (_current is null) return;
+            var timeline = _current.GetTimelineProperties();
+            var target = timeline.StartTime + position;
+            await _current.TryChangePlaybackPositionAsync(target.Ticks);
+        }
+        catch (Exception ex) { Log.Debug("SeekToTime", ("error", ex.Message)); }
     }
 
     public void Dispose()

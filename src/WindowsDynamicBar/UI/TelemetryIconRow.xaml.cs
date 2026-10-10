@@ -53,11 +53,81 @@ public partial class TelemetryIconRow : UserControl
     /// <summary>Metric icon clicked.</summary>
     public event Action<IslandMetric>? MetricClicked;
 
+    public static readonly DependencyProperty ReduceMotionProperty =
+        DependencyProperty.Register(nameof(ReduceMotion), typeof(bool), typeof(TelemetryIconRow),
+            new PropertyMetadata(false));
+
+    public bool ReduceMotion
+    {
+        get => (bool)GetValue(ReduceMotionProperty);
+        set => SetValue(ReduceMotionProperty, value);
+    }
+
+    private bool _ramPulsing;
+
     public void UpdateValues(double cpu, double gpu, double ram)
     {
         Apply(CpuRing, CpuPct, cpu);
         Apply(GpuRing, GpuPct, gpu);
-        Apply(RamRing, RamPct, ram);
+        ApplyRam(ram);
+    }
+
+    public static Color GetRamColor(double percent)
+    {
+        if (percent < 75) return Color.FromRgb(0x4C, 0xD9, 0x64);
+        if (percent < 90) return Color.FromRgb(0xD9, 0x8A, 0x5B);
+        return Color.FromRgb(0xE5, 0x48, 0x4D);
+    }
+
+    private void ApplyRam(double percent)
+    {
+        if (percent < 0)
+        {
+            RamRing.Value = -1;
+            RamPct.Text = "n/a";
+            StopRamPulse();
+            return;
+        }
+
+        RamRing.Value = Math.Clamp(percent, 0, 100);
+        RamPct.Text = $"{Math.Round(percent):F0}%";
+        RamRing.RingColor = GetRamColor(percent);
+
+        if (percent < 75)
+        {
+            StopRamPulse();
+        }
+        else if (percent < 90)
+        {
+            StopRamPulse();
+        }
+        else
+        {
+            if (!ReduceMotion && !_ramPulsing)
+            {
+                _ramPulsing = true;
+                var anim = new System.Windows.Media.Animation.DoubleAnimation(1.0, 0.35, TimeSpan.FromMilliseconds(500))
+                {
+                    AutoReverse = true,
+                    RepeatBehavior = System.Windows.Media.Animation.RepeatBehavior.Forever
+                };
+                RamRing.BeginAnimation(UIElement.OpacityProperty, anim);
+            }
+            else if (ReduceMotion)
+            {
+                StopRamPulse();
+            }
+        }
+    }
+
+    private void StopRamPulse()
+    {
+        if (_ramPulsing)
+        {
+            _ramPulsing = false;
+            RamRing.BeginAnimation(UIElement.OpacityProperty, null);
+            RamRing.Opacity = 1.0;
+        }
     }
 
     /// <summary>Updates the Net gauge ring (0..100) and its small label (e.g. "42%", "187M", "—").</summary>

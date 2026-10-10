@@ -5,6 +5,7 @@ using WindowsDynamicBar.Core.Events;
 using WindowsDynamicBar.Core.Media;
 using WindowsDynamicBar.Core.Settings;
 using WindowsDynamicBar.Core.Telemetry;
+using WindowsDynamicBar.Core.Search;
 using WindowsDynamicBar.Services.Media;
 using WindowsDynamicBar.Services.SystemInfo;
 using WindowsDynamicBar.Services.SystemMonitor;
@@ -59,6 +60,12 @@ internal static class Program
         Run("DotBar color ramp green→red", TestDotBarColorRamp);
         Run("TelemetryHistory capacity default is 240", TestTelemetryHistoryCapacity);
         Run("EventBus interactive preemption preempts active card", TestBusPreemption);
+        Run("Time format 0:00, 1:12, 1:01:05", TestTimeFormat);
+        Run("LRC parsing and active line matching", TestLrcParsing);
+        Run("RAM ring color thresholds green/orange/red", TestRamRingColorThresholds);
+        Run("Warning strip 5s RAM trigger and hysteresis reset", TestWarningStripHysteresis);
+        Run("FuzzyMatcher substring, subsequence, launch counts", TestSearchFuzzyMatcher);
+        Run("ExpressionEvaluator math, units, currencies", TestSearchExpressionEvaluator);
 
         Console.WriteLine(new string('-', 46));
         Console.WriteLine($"passed: {_pass}   failed: {_fail}");
@@ -226,6 +233,10 @@ internal static class Program
 
         Assert(BarWindow.TryParseHotkey("Ctrl+B", out _, out uint v6), "Ctrl+B");
         AssertEq(0x42u, v6, "VK of B");
+
+        Assert(BarWindow.TryParseHotkey("Ctrl+Space", out uint mSearch, out uint vSearch), "Ctrl+Space");
+        AssertEq(NativeMethodsProxy.ModCtrl, mSearch, "ctrl modifier");
+        AssertEq(0x20u, vSearch, "VK_SPACE");
     }
 
     private static void TestHotkeyInvalid()
@@ -237,6 +248,7 @@ internal static class Program
         Assert(!BarWindow.TryParseHotkey("Ctrl+", out _, out _), "missing key");
         Assert(!BarWindow.TryParseHotkey("Ctrl+Enter", out _, out _), "unsupported key name");
         Assert(!BarWindow.TryParseHotkey("Ctrl+ab", out _, out _), "multi-char non-function key");
+        Assert(!BarWindow.TryParseHotkey("Space", out _, out _), "bare space must be rejected");
     }
 
     private static void TestSettingsRoundTrip()
@@ -638,6 +650,129 @@ internal static class Program
         for (int i = 0; i < 500; i++) h.Push(i % 100);
         AssertEq(240, h.Count, "count capped at default capacity");
         AssertEq(240, h.Snapshot().Length, "snapshot capped at default capacity");
+    }
+
+    private static void TestTimeFormat()
+    {
+        AssertEq("0:00", BarWindow.FormatTime(TimeSpan.Zero), "format 0:00");
+        AssertEq("1:12", BarWindow.FormatTime(TimeSpan.FromSeconds(72)), "format 1:12");
+        AssertEq("1:01:05", BarWindow.FormatTime(TimeSpan.FromSeconds(3665)), "format 1:01:05");
+    }
+
+    private static void TestLrcParsing()
+    {
+        string sample = "[00:12.34] Hello world\n[00:15.50] Next line";
+        var lines = LrcLibClient.ParseLrc(sample);
+        AssertEq(2, lines.Count, "parsed 2 lines");
+        Assert(Math.Abs(lines[0].Timestamp.TotalSeconds - 12.34) < 0.01, "timestamp match");
+        AssertEq("Hello world", lines[0].Text, "line text match");
+        AssertEq("Hello world", LrcLibClient.GetCurrentLineText(lines, TimeSpan.FromSeconds(13)), "active line at 13s");
+        AssertEq("Next line", LrcLibClient.GetCurrentLineText(lines, TimeSpan.FromSeconds(16)), "active line at 16s");
+        AssertEq(null, LrcLibClient.GetCurrentLineText(lines, TimeSpan.FromSeconds(5)), "null before first line");
+    }
+
+    private static void TestRamRingColorThresholds()
+    {
+        var cGreen = TelemetryIconRow.GetRamColor(50);
+        var cOrange = TelemetryIconRow.GetRamColor(80);
+        var cRed = TelemetryIconRow.GetRamColor(92);
+
+        AssertEq(System.Windows.Media.Color.FromRgb(0x4C, 0xD9, 0x64), cGreen, "under 75% is green");
+        AssertEq(System.Windows.Media.Color.FromRgb(0xD9, 0x8A, 0x5B), cOrange, "75-89% is orange");
+        AssertEq(System.Windows.Media.Color.FromRgb(0xE5, 0x48, 0x4D), cRed, ">=90% is red");
+    }
+
+    private static void TestWarningStripHysteresis()
+    {
+        var logic = new WarningStripLogic();
+        string kind;
+
+        // 4 ticks at 92% -> not triggered yet
+        for (int i = 0; i < 4; i++)
+        {
+            Assert(!logic.Update(92, 10, 50, true, out kind), $"tick {i + 1} does not trigger");
+        }
+
+        // 5th tick at 92% -> triggered
+        Assert(logic.Update(92, 10, 50, true, out kind), "5th tick triggers");
+        AssertEq("RAM", kind, "kind is RAM");
+
+        // User dismisses
+        logic.Dismiss("RAM");
+        Assert(!logic.Update(92, 10, 50, true, out kind), "dismissed RAM does not trigger");
+
+        // Drop to 88% -> still above 85% hysteresis reset threshold
+        Assert(!logic.Update(88, 10, 50, true, out kind), "88% does not reset dismissal");
+        Assert(logic.RamDismissed, "still dismissed at 88%");
+
+        // Drop to 84% -> resets dismissal
+        Assert(!logic.Update(84, 10, 50, true, out kind), "84% resets dismissal");
+        Assert(!logic.RamDismissed, "dismissal is now reset");
+
+        // Spikes back to 92% for 5 ticks -> triggers again
+        for (int i = 0; i < 4; i++)
+            Assert(!logic.Update(92, 10, 50, true, out kind), $"re-spike tick {i + 1} does not trigger");
+
+        Assert(logic.Update(92, 10, 50, true, out kind), "re-spike 5th tick triggers");
+        AssertEq("RAM", kind, "re-triggered kind is RAM");
+    }
+
+    private static void TestSearchFuzzyMatcher()
+    {
+        // 1. Substring matches
+        var m1 = FuzzyMatcher.Match("Google Chrome", "chr");
+        Assert(m1.Matched, "substring matched");
+        Assert(m1.Score > 0, "score positive");
+        AssertEq(3, m1.MatchedIndices.Count, "indices count 3");
+
+        // Substring at start scores higher than in middle
+        var mStart = FuzzyMatcher.Match("Chrome", "chr");
+        var mMid = FuzzyMatcher.Match("Google Chrome", "chr");
+        Assert(mStart.Score > mMid.Score, "prefix match scores higher than middle");
+
+        // 2. Subsequence matches
+        var mSub = FuzzyMatcher.Match("Visual Studio Code", "vsc");
+        Assert(mSub.Matched, "subsequence matched");
+        AssertEq(3, mSub.MatchedIndices.Count, "3 characters matched in order");
+
+        // 3. Launch count boost (+8 per launch)
+        var m0 = FuzzyMatcher.Match("Spotify", "spot", launchCount: 0);
+        var m5 = FuzzyMatcher.Match("Spotify", "spot", launchCount: 5);
+        AssertEq(m0.Score + 40, m5.Score, "+40 for 5 launches");
+
+        // 4. Non-match
+        var mFail = FuzzyMatcher.Match("Firefox", "xyz");
+        Assert(!mFail.Matched, "non match");
+    }
+
+    private static void TestSearchExpressionEvaluator()
+    {
+        // 1. Basic math
+        var (ok1, res1, _) = ExpressionEvaluator.TryEvaluate("2 + 2 * 3");
+        Assert(ok1, "math evaluated");
+        AssertEq("8", res1, "operator precedence respected: 2 + 2 * 3 = 8");
+
+        var (ok2, res2, _) = ExpressionEvaluator.TryEvaluate("sqrt(16) + sin(0)");
+        Assert(ok2, "functions evaluated");
+        AssertEq("4", res2, "sqrt(16) + sin(0) = 4");
+
+        // 2. Unit conversion
+        var (ok3, res3, _) = ExpressionEvaluator.TryEvaluate("100 km to miles");
+        Assert(ok3, "unit conversion evaluated");
+        Assert(res3.Contains("62.1"), $"100 km in miles contains 62.1, got '{res3}'");
+
+        var (ok4, res4, _) = ExpressionEvaluator.TryEvaluate("72 f in c");
+        Assert(ok4, "temperature conversion evaluated");
+        Assert(res4.Contains("22.2"), $"72 f in c contains 22.2, got '{res4}'");
+
+        // 3. Currency conversion
+        var (ok5, res5, _) = ExpressionEvaluator.TryEvaluate("100 usd to eur");
+        Assert(ok5, "currency conversion evaluated");
+        Assert(res5.Contains("EUR", StringComparison.OrdinalIgnoreCase), $"currency result formatted with EUR, got '{res5}'");
+
+        // 4. Invalid input does not throw or evaluate
+        var (okFail, _, _) = ExpressionEvaluator.TryEvaluate("hello world");
+        Assert(!okFail, "normal text rejected by expression evaluator");
     }
 }
 

@@ -172,10 +172,21 @@
                     Cursor="Hand">
 
             <Border.Effect>
-                <DropShadowEffect Color="#000000" BlurRadius="24" ShadowDepth="4" Opacity="0.55" Direction="270" />
+                <DropShadowEffect x:Name="PillShadow" Color="#000000" BlurRadius="24" ShadowDepth="4" Opacity="0.55" Direction="270" />
             </Border.Effect>
 
             <Grid x:Name="PillGrid">
+
+                <!-- ============ FAINT ALBUM RADIAL GLOW (behind left side) ============ -->
+                <Border x:Name="AlbumRadialGlow" Panel.ZIndex="0" HorizontalAlignment="Left" VerticalAlignment="Stretch"
+                        Width="240" CornerRadius="36,0,0,36" IsHitTestVisible="False" Opacity="0">
+                    <Border.Background>
+                        <RadialGradientBrush Center="0.1,0.5" GradientOrigin="0.1,0.5" RadiusX="0.9" RadiusY="0.9">
+                            <GradientStop x:Name="AlbumRadialGlowStop" Color="#00000000" Offset="0" />
+                            <GradientStop Color="#00000000" Offset="1" />
+                        </RadialGradientBrush>
+                    </Border.Background>
+                </Border>
 
                 <!-- ============ ACCENT GLOW (volume / brightness HUD) ============ -->
                 <Border x:Name="VolumeHudGlow" Panel.ZIndex="0" Visibility="Collapsed" IsHitTestVisible="False">
@@ -374,57 +385,227 @@
                                Margin="0,8,0,0" Visibility="Collapsed" />
                 </StackPanel>
 
-                <!-- ============ ISLAND EXPANDED (.full: music + icon grid, left:150, centred) ============ -->
+                <!-- ============ ISLAND EXPANDED (.full: music + icon grid, left:158, 22px right padding) ============ -->
                 <Grid x:Name="IslandExpandedHost" Panel.ZIndex="10" HorizontalAlignment="Left" VerticalAlignment="Center"
-                      Margin="158,0,0,0" Visibility="Collapsed" Opacity="0">
+                      Margin="158,0,22,0" Visibility="Collapsed" Opacity="0">
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="210" />
+                        <ColumnDefinition Width="242" />
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
 
-                    <StackPanel x:Name="MediaInfoStack" Grid.Column="0" Width="210" VerticalAlignment="Center">
-                        <TextBlock x:Name="HoverTitle" Style="{StaticResource WdbTitleText}" FontSize="17" Text="" />
-                        <TextBlock x:Name="HoverArtist" Style="{StaticResource WdbSubText}" Text="" Margin="0,2,0,15" />
-                        <Grid x:Name="HoverProgressTrack" Height="4" VerticalAlignment="Center">
-                            <Border Height="4" CornerRadius="2" Background="{DynamicResource WdbTrackBrush}" />
-                            <Border x:Name="HoverProgressFill" Height="4" CornerRadius="2"
-                                    HorizontalAlignment="Left" Width="0" Background="{DynamicResource WdbTextBrush}" />
+                    <StackPanel x:Name="MediaInfoStack" Grid.Column="0" Width="242" VerticalAlignment="Center">
+                        <!-- 1. TITLE: 18 px, semibold, one line, clipped, soft fade on the right edge (last 6%) -->
+                        <Grid x:Name="TitleContainer" Height="24" ClipToBounds="True">
+                            <Grid.OpacityMask>
+                                <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                                    <GradientStop Color="#FFFFFFFF" Offset="0.0" />
+                                    <GradientStop Color="#FFFFFFFF" Offset="0.94" />
+                                    <GradientStop Color="#00FFFFFF" Offset="1.0" />
+                                </LinearGradientBrush>
+                            </Grid.OpacityMask>
+                            <TextBlock x:Name="HoverTitle" FontSize="18" FontWeight="SemiBold"
+                                       Foreground="#FFFFFFFF" VerticalAlignment="Center" Text="" TextTrimming="None">
+                                <TextBlock.RenderTransform>
+                                    <TranslateTransform x:Name="HoverTitleTransform" X="0" />
+                                </TextBlock.RenderTransform>
+                            </TextBlock>
                         </Grid>
-                        <StackPanel Orientation="Horizontal" Margin="0,13,0,0">
-                            <Button Style="{StaticResource WdbIconButton}" Width="30" Height="30"
-                                    Click="OnPrevClick" ToolTip="Previous">
-                                <TextBlock Style="{StaticResource WdbGlyph}" FontSize="12.5" Text="&#xE892;" />
+
+                        <!-- 2. ARTIST ROW: artist name 13 px in dim gray (#8e8e96), then small chip button -->
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,2,0,0">
+                            <TextBlock x:Name="HoverArtist" FontSize="13" Foreground="#8E8E96"
+                                       TextTrimming="CharacterEllipsis" MaxWidth="165" VerticalAlignment="Center" Text="" />
+                            <Button x:Name="SourceChip" Click="OnSourceChipClick" Cursor="Hand" Margin="8,0,0,0"
+                                    Background="#1AFFFFFF" BorderThickness="0" Padding="8,2" Height="20" VerticalAlignment="Center">
+                                <Button.Style>
+                                    <Style TargetType="Button">
+                                        <Setter Property="Template">
+                                            <Setter.Value>
+                                                <ControlTemplate TargetType="Button">
+                                                    <Border x:Name="ChipBorder" Background="{TemplateBinding Background}" CornerRadius="10" Padding="{TemplateBinding Padding}">
+                                                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                                    </Border>
+                                                    <ControlTemplate.Triggers>
+                                                        <Trigger Property="IsMouseOver" Value="True">
+                                                            <Setter TargetName="ChipBorder" Property="Background" Value="#33FFFFFF" />
+                                                        </Trigger>
+                                                    </ControlTemplate.Triggers>
+                                                </ControlTemplate>
+                                            </Setter.Value>
+                                        </Setter>
+                                    </Style>
+                                </Button.Style>
+                                <TextBlock x:Name="SourceChipText" FontSize="11" Foreground="#FFFFFFFF" Text="Music ▾" />
                             </Button>
-                            <Button x:Name="HoverPlayButton" Style="{StaticResource WdbIconButton}"
-                                    Width="30" Height="30" Margin="6,0,0,0"
-                                    Click="OnPlayPauseClick" ToolTip="Play / Pause">
-                                <TextBlock x:Name="HoverPlayGlyph" Style="{StaticResource WdbGlyph}"
-                                           FontSize="12.5" Text="&#xE769;" />
-                            </Button>
-                            <Button Style="{StaticResource WdbIconButton}" Width="30" Height="30"
-                                    Margin="6,0,0,0" Click="OnNextClick" ToolTip="Next">
-                                <TextBlock Style="{StaticResource WdbGlyph}" FontSize="12.5" Text="&#xE893;" />
-                            </Button>
-                            <local:Equalizer x:Name="HoverEq" Width="158" Height="27"
-                                             VerticalAlignment="Center" Margin="6,0,0,0" />
                         </StackPanel>
+
+                        <!-- 3. LYRIC LINE: 12 px, one line, ellipsis, color = accent mixed 55% white. Height reserved: 16 px -->
+                        <Grid x:Name="LyricContainer" Height="16" Margin="0,2,0,0" ClipToBounds="True">
+                            <TextBlock x:Name="LyricText" FontSize="12" Foreground="#D0E2FF"
+                                       TextTrimming="CharacterEllipsis" VerticalAlignment="Center" Text="" Opacity="0">
+                                <TextBlock.RenderTransform>
+                                    <TranslateTransform x:Name="LyricTransform" Y="0" />
+                                </TextBlock.RenderTransform>
+                            </TextBlock>
+                        </Grid>
+
+                        <!-- 4. PROGRESS ROW (6 px below): elapsed time, bar, -remaining -->
+                        <Grid x:Name="HoverProgressContainer" Height="16" Margin="0,6,0,0" Background="Transparent"
+                              PreviewMouseLeftButtonDown="OnHoverProgressMouseDown"
+                              PreviewMouseMove="OnHoverProgressMouseMove"
+                              PreviewMouseLeftButtonUp="OnHoverProgressMouseUp"
+                              MouseEnter="OnHoverProgressMouseEnter"
+                              MouseLeave="OnHoverProgressMouseLeave">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+
+                            <TextBlock x:Name="HoverTimeElapsed" Grid.Column="0" Text="0:00"
+                                       FontFamily="Cascadia Mono, Consolas, monospace" FontSize="11"
+                                       Foreground="#8E8E96" VerticalAlignment="Center" Margin="0,0,6,0" />
+
+                            <Grid x:Name="HoverProgressBarTrack" Grid.Column="1" Height="16" Background="Transparent" VerticalAlignment="Center">
+                                <Border Height="4" CornerRadius="2" Background="#1FFFFFFF" VerticalAlignment="Center" />
+                                <Border x:Name="HoverProgressFill" Height="4" CornerRadius="2"
+                                        HorizontalAlignment="Left" Width="0" Background="#FFFFFFFF" VerticalAlignment="Center" />
+                                <Ellipse x:Name="HoverProgressKnob" Width="10" Height="10" Fill="#FFFFFFFF"
+                                         HorizontalAlignment="Left" VerticalAlignment="Center" Margin="-5,0,0,0"
+                                         Visibility="Collapsed" IsHitTestVisible="False" />
+                                <Border x:Name="HoverProgressTooltip" Background="#F018181B" BorderBrush="#33FFFFFF" BorderThickness="1"
+                                        CornerRadius="4" Padding="5,2" HorizontalAlignment="Left" VerticalAlignment="Top"
+                                        Margin="0,-22,0,0" Visibility="Collapsed" IsHitTestVisible="False">
+                                    <TextBlock x:Name="HoverProgressTooltipText" Text="0:00"
+                                               FontFamily="Cascadia Mono, Consolas, monospace" FontSize="10" Foreground="#FFFFFFFF" />
+                                </Border>
+                            </Grid>
+
+                            <TextBlock x:Name="HoverTimeRemaining" Grid.Column="2" Text="-0:00"
+                                       FontFamily="Cascadia Mono, Consolas, monospace" FontSize="11"
+                                       Foreground="#8E8E96" VerticalAlignment="Center" Margin="6,0,0,0" />
+                        </Grid>
+
+                        <!-- 5. CONTROLS ROW: round 34 px buttons: prev, play/pause, next, volume + slider, eq -->
+                        <Grid Margin="0,8,0,0" VerticalAlignment="Center">
+                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                <Button Style="{StaticResource WdbIconButton}" Width="34" Height="34"
+                                        Click="OnPrevClick" ToolTip="Previous">
+                                    <TextBlock Style="{StaticResource WdbGlyph}" FontSize="13.5" Text="&#xE892;" />
+                                </Button>
+                                <Button x:Name="HoverPlayButton" Style="{StaticResource WdbIconButton}"
+                                        Width="34" Height="34" Margin="6,0,0,0"
+                                        Click="OnPlayPauseClick" ToolTip="Play / Pause">
+                                    <TextBlock x:Name="HoverPlayGlyph" Style="{StaticResource WdbGlyph}"
+                                               FontSize="13.5" Text="&#xE769;" />
+                                </Button>
+                                <Button Style="{StaticResource WdbIconButton}" Width="34" Height="34"
+                                        Margin="6,0,0,0" Click="OnNextClick" ToolTip="Next">
+                                    <TextBlock Style="{StaticResource WdbGlyph}" FontSize="13.5" Text="&#xE893;" />
+                                </Button>
+
+                                <StackPanel x:Name="VolumeControlGroup" Orientation="Horizontal" VerticalAlignment="Center"
+                                            Margin="6,0,0,0"
+                                            MouseEnter="OnVolumeGroupMouseEnter"
+                                            MouseLeave="OnVolumeGroupMouseLeave">
+                                    <Button x:Name="HoverSpeakerButton" Style="{StaticResource WdbIconButton}"
+                                            Width="34" Height="34" Click="OnHoverSpeakerClick" ToolTip="Mute / Unmute">
+                                        <TextBlock x:Name="HoverSpeakerGlyph" Style="{StaticResource WdbGlyph}"
+                                                   FontSize="13.5" Text="&#xE767;" />
+                                    </Button>
+                                    <Border x:Name="HoverVolumeSliderHost" Width="0" Height="24" ClipToBounds="True"
+                                            VerticalAlignment="Center" Opacity="0">
+                                        <Slider x:Name="HoverVolumeSlider" Minimum="0" Maximum="1" Width="70"
+                                                Margin="4,0,0,0" VerticalAlignment="Center"
+                                                ValueChanged="OnHoverVolumeSliderChanged"
+                                                Focusable="True" />
+                                    </Border>
+                                </StackPanel>
+
+                                <local:Equalizer x:Name="HoverEq" Width="100" Height="24"
+                                                 VerticalAlignment="Center" Margin="6,0,0,0"
+                                                 Visibility="Collapsed" />
+                            </StackPanel>
+                        </Grid>
                     </StackPanel>
 
+                    <!-- Ring grid: 3 cols x 2 rows of 46px round buttons, 10px gaps, 20px gap from middle column -->
                     <local:TelemetryIconRow x:Name="IconRow" Grid.Column="1"
                                             HorizontalAlignment="Left" VerticalAlignment="Center"
-                                            Margin="23,0,0,0" />
+                                            Margin="20,0,0,0" />
                 </Grid>
 
-                <!-- ============ THE (single) MORPHING DISC ============ -->
-                <Border x:Name="OrbHost" Panel.ZIndex="10" Width="27" Height="27" CornerRadius="13.5"
-                        Background="{DynamicResource WdbDimBrush}"
-                        HorizontalAlignment="Left" VerticalAlignment="Center" Margin="10.5,0,0,0">
+                <!-- ============ THE (single) MORPHING DISC + 30px SOURCE BADGE ============ -->
+                <Grid x:Name="OrbContainer" Panel.ZIndex="10" HorizontalAlignment="Left" VerticalAlignment="Center"
+                      Margin="10.5,0,0,0">
+                    <Border x:Name="OrbHost" Width="27" Height="27" CornerRadius="13.5"
+                            Background="{DynamicResource WdbDimBrush}"
+                            MouseLeftButtonUp="OnDiscClicked" Cursor="Hand" ToolTip="Bring app to front"
+                            PreviewMouseWheel="OnDiscMouseWheel">
+                        <Grid>
+                            <media:MediaDisc x:Name="OrbDisc" Diameter="{Binding ActualWidth, ElementName=OrbHost}"
+                                             Visibility="Collapsed" />
+                            <Image x:Name="OrbArt" Stretch="UniformToFill" Visibility="Collapsed" />
+                            <TextBlock x:Name="OrbGlyph" Style="{StaticResource WdbGlyph}"
+                                       FontSize="12" Text="&#x25CF;" Foreground="#FF0A84FF" />
+                        </Grid>
+                    </Border>
+
+                    <!-- 30 px round source badge at bottom-right of disc (-2px right, 2px bottom) -->
+                    <Border x:Name="SourceBadge" Width="30" Height="30" CornerRadius="15"
+                            Background="#FF18181B" BorderBrush="#FF000000" BorderThickness="2"
+                            HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                            Margin="0,0,-2,-2" Visibility="Collapsed" IsHitTestVisible="False">
+                        <Image x:Name="SourceBadgeIcon" Width="18" Height="18" Stretch="Uniform"
+                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    </Border>
+                </Grid>
+
+                <!-- ============ SMART WARNING STRIP (RAM / CPU / Battery) ============ -->
+                <Border x:Name="WarningStrip" Height="40" VerticalAlignment="Bottom"
+                        Background="#00000000" BorderBrush="#1FFFFFFF" BorderThickness="0,1,0,0"
+                        Visibility="Collapsed" Opacity="0">
                     <Grid>
-                        <media:MediaDisc x:Name="OrbDisc" Diameter="{Binding ActualWidth, ElementName=OrbHost}"
-                                         Visibility="Collapsed" />
-                        <Image x:Name="OrbArt" Stretch="UniformToFill" Visibility="Collapsed" />
-                        <TextBlock x:Name="OrbGlyph" Style="{StaticResource WdbGlyph}"
-                                   FontSize="12" Text="&#x25CF;" Foreground="#FF0A84FF" />
+                        <Border HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+                            <Border.Background>
+                                <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                                    <GradientStop Color="#38E5484D" Offset="0.0" />
+                                    <GradientStop Color="#00E5484D" Offset="0.75" />
+                                </LinearGradientBrush>
+                            </Border.Background>
+                        </Border>
+                        <Grid Margin="16,0,16,0" VerticalAlignment="Center">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock x:Name="WarningStripText" Grid.Column="0" FontSize="12"
+                                       Foreground="#FFFFFFFF" TextTrimming="CharacterEllipsis"
+                                       VerticalAlignment="Center" Text="" />
+                            <Button x:Name="WarningReviewBtn" Grid.Column="1" Click="OnWarningReviewClick"
+                                    Content="Review" FontSize="11" Foreground="#FFFFFFFF"
+                                    Background="#33FFFFFF" BorderThickness="0" Padding="10,3" Height="22"
+                                    VerticalAlignment="Center" Margin="10,0,0,0" Cursor="Hand">
+                                <Button.Style>
+                                    <Style TargetType="Button">
+                                        <Setter Property="Template">
+                                            <Setter.Value>
+                                                <ControlTemplate TargetType="Button">
+                                                    <Border CornerRadius="11" Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}">
+                                                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                                    </Border>
+                                                </ControlTemplate>
+                                            </Setter.Value>
+                                        </Setter>
+                                    </Style>
+                                </Button.Style>
+                            </Button>
+                            <Button x:Name="WarningCloseBtn" Grid.Column="2" Click="OnWarningCloseClick"
+                                    Content="✕" FontSize="11" Foreground="#8E8E96"
+                                    Background="Transparent" BorderThickness="0" Width="22" Height="22"
+                                    VerticalAlignment="Center" Margin="6,0,0,0" Cursor="Hand" />
+                        </Grid>
                     </Grid>
                 </Border>
 
@@ -442,7 +623,7 @@
                                       Visibility="Collapsed" Opacity="0" IsHitTestVisible="False" />
 
                 <local:MirrorDetailPanel x:Name="MirrorPanelComponent"
-                                         Panel.ZIndex="1" HorizontalAlignment="Right"
+                                         Panel.ZIndex="1" HorizontalAlignment="Right" Width="230"
                                          Margin="0,0,16,0"
                                          VerticalAlignment="Center"
                                          Visibility="Collapsed" Opacity="0" IsHitTestVisible="False" />
@@ -452,6 +633,96 @@
                                           Margin="0,0,16,0"
                                           VerticalAlignment="Center"
                                           Visibility="Collapsed" Opacity="0" IsHitTestVisible="False" />
+
+                <!-- ============ SEARCH BAR HOST ============ -->
+                <Grid x:Name="SearchHost" Panel.ZIndex="20" HorizontalAlignment="Stretch" VerticalAlignment="Top"
+                      Visibility="Collapsed">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="58" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+
+                    <!-- Search Input Bar (58px high, 22px side padding, 10px gaps) -->
+                    <Grid Grid.Row="0" Margin="22,0,22,0" VerticalAlignment="Center">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+
+                        <!-- Dimmed magnifier icon 20px -->
+                        <TextBlock x:Name="SearchMagnifier" Grid.Column="0" Text="&#xE721;"
+                                   FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="18"
+                                   Foreground="{DynamicResource WdbTextMutedBrush}" VerticalAlignment="Center" Margin="0,0,10,0" />
+
+                        <!-- Active App Tag Chip (pill shaped, 22px icon, semibold 14px text) -->
+                        <Border x:Name="SearchAppTag" Grid.Column="1" Height="32" CornerRadius="16"
+                                Background="#26FFFFFF" Margin="0,0,10,0" VerticalAlignment="Center"
+                                Visibility="Collapsed" Padding="6,2,12,2">
+                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                <Border Width="22" Height="22" CornerRadius="11" Background="#33FFFFFF" Margin="0,0,8,0">
+                                    <Grid>
+                                        <Image x:Name="SearchAppTagIcon" Width="18" Height="18" Stretch="Uniform" />
+                                        <TextBlock x:Name="SearchAppTagLetter" FontSize="12" FontWeight="Bold"
+                                                   Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed" />
+                                    </Grid>
+                                </Border>
+                                <TextBlock x:Name="SearchAppTagName" FontSize="14" FontWeight="SemiBold"
+                                           Foreground="{DynamicResource WdbTextBrush}" VerticalAlignment="Center" />
+                            </StackPanel>
+                        </Border>
+
+                        <!-- Text Input + Ghost Completion + Placeholder -->
+                        <Grid Grid.Column="2" VerticalAlignment="Center">
+                            <!-- Ghost Completion (faint gray text) -->
+                            <TextBlock x:Name="SearchGhostText" FontSize="20"
+                                       FontFamily="Segoe UI Variable Text, Segoe UI"
+                                       Foreground="#44FFFFFF" VerticalAlignment="Center"
+                                       IsHitTestVisible="False" Margin="2,0,0,0" />
+
+                            <!-- Real Input TextBox -->
+                            <TextBox x:Name="SearchInput" FontSize="20"
+                                     FontFamily="Segoe UI Variable Text, Segoe UI"
+                                     Foreground="{DynamicResource WdbTextBrush}"
+                                     Background="Transparent" BorderThickness="0"
+                                     CaretBrush="{DynamicResource WdbAccentBrush}"
+                                     VerticalAlignment="Center" TextChanged="OnSearchInputChanged"
+                                     PreviewKeyDown="OnSearchInputPreviewKeyDown" />
+
+                            <!-- Placeholder -->
+                            <TextBlock x:Name="SearchPlaceholder" FontSize="20"
+                                       FontFamily="Segoe UI Variable Text, Segoe UI"
+                                       Foreground="#38FFFFFF" VerticalAlignment="Center"
+                                       IsHitTestVisible="False" Margin="2,0,0,0"
+                                       Text="Search apps, files, commands..." />
+                        </Grid>
+
+                        <!-- Right hint -->
+                        <TextBlock x:Name="SearchRightHint" Grid.Column="3" Text="esc close"
+                                   FontFamily="Consolas, Cascadia Code, monospace" FontSize="11"
+                                   Foreground="{DynamicResource WdbTextMutedBrush}" VerticalAlignment="Center"
+                                   Margin="10,0,0,0" />
+                    </Grid>
+
+                    <!-- Results Section (Divider + Scrollable Results, max 330px high, ONLY AFTER TYPING) -->
+                    <Grid x:Name="SearchResultsSection" Grid.Row="1" Visibility="Collapsed">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="1" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+
+                        <!-- 1px divider -->
+                        <Border Grid.Row="0" Height="1" Background="{DynamicResource WdbHairlineBrush}" Margin="16,0,16,0" />
+
+                        <!-- Scrollable list -->
+                        <ScrollViewer x:Name="SearchResultsScroll" Grid.Row="1" MaxHeight="330"
+                                      VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                                      Margin="10,6,10,10" Focusable="False">
+                            <StackPanel x:Name="SearchResultsList" Orientation="Vertical" />
+                        </ScrollViewer>
+                    </Grid>
+                </Grid>
 
             </Grid>
         </Border>

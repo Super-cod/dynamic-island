@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Windows;
@@ -14,15 +15,22 @@ using System.Windows.Threading;
 using WindowsDynamicBar.Core.Animation;
 using WindowsDynamicBar.Core.Events;
 using WindowsDynamicBar.Core.Logging;
+using WindowsDynamicBar.Core.Media;
 using WindowsDynamicBar.Core.Settings;
 using WindowsDynamicBar.Core.Telemetry;
 using WindowsDynamicBar.Interop;
+using WindowsDynamicBar.Services.Audio;
 using WindowsDynamicBar.Services.Media;
 using WindowsDynamicBar.Services.Privacy;
 using WindowsDynamicBar.Services.SystemInfo;
 using WindowsDynamicBar.Services.SystemMonitor;
 using WindowsDynamicBar.Services.Timers;
 using WindowsDynamicBar.Services.Weather;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Windows.Documents;
+using System.Windows.Media.Animation;
+using WindowsDynamicBar.Core.Search;
 using KeyEventArgs = System.Windows.Input.KeyEventArgs;
 using MouseEventArgs = System.Windows.Input.MouseEventArgs;
 
@@ -37,13 +45,14 @@ public partial class BarWindow : Window, IDisposable
     private const double MaxPillH = 280;
 
     // ---- island geometry (DIPs) : dynamic based on screen size ----
-    private const double IslandExpandedW = 575;    // s2 (hover hub)
+    private const double IslandExpandedW = 600;    // s2 (hover hub)
+    private const double BaseIslandH = 152;        // target height in music mode
     private const double BaseDetailW = 1082;       // s3 baseline on >= 1650px desktop displays
-    private const double BaseMirrorW = 879;        // s3 mirror baseline
+    private const double BaseMirrorW = 843;        // s3 mirror baseline (600 + 13 + 230)
     private const double BaseDetailCardW = 494;    // native card width
-    private const double BaseMirrorCardW = 291;    // native mirror card width
+    private const double BaseMirrorCardW = 230;    // native mirror card width
     private const double DiscCollapsed = 27;
-    private const double DiscExpanded = 118;
+    private const double DiscExpanded = 122;
     private const double IslandPadV = 13;          // symmetric top/bottom padding inside the island
     private const double MinIslandH = 63;          // smallest island height (empty/placeholder content)
 
@@ -120,11 +129,26 @@ public partial class BarWindow : Window, IDisposable
     private DateTime _dismissedAt;
     private double _currentW;
     private double _currentH;
+    private double _currentTop = PillTop;
+    private double _currentCornerRadius = 26;
+    private double _winH = 800;
     private double _maxOffsetDip;
     private bool _dragMoved;
     private bool _dragPressing;
     private double _dragStartX, _dragStartOffset;
     private string _levelMode = "volume";
+
+    // ---- Island Search Bar state ----
+    private IntPtr _prevForegroundHwnd;
+    private AppInfo? _activeTag;
+    private AppInfo? _ghostApp;
+    private string _ghostRemainder = "";
+    private readonly List<SearchResult> _searchResults = new();
+    private int _selectedResultIndex = -1;
+    private CancellationTokenSource? _searchCts;
+    private DispatcherTimer? _actionSuccessTimer;
+    private bool _armedRiskyCommand;
+    private string _armedCommandTitle = "";
 
     // ---- volume / brightness HUD accents ----
     private static readonly Color VolAccent = Color.FromRgb(0x2F, 0xD2, 0xB0);
@@ -158,6 +182,31 @@ public partial class BarWindow : Window, IDisposable
     private TelemetrySnapshot? _telemetry;
     private NetworkMonitor? _netMonitor;
     private WeatherService? _weather;
+
+    // ---- timeline interpolation timer (250ms) ----
+    private readonly DispatcherTimer _timelineTimer = new() { Interval = TimeSpan.FromMilliseconds(250) };
+    private bool _isScrubbing;
+    private TimeSpan _scrubTime;
+
+    // ---- LRCLIB lyrics & caching ----
+    private readonly LrcLibClient _lrcClient = new();
+    private CancellationTokenSource? _lrcCts;
+    private List<LrcLine>? _currentLrcLines;
+    private string? _currentLyricLine;
+    private string? _lastLyricTrackKey;
+
+    // ---- Equalizer & Spectrum capture ----
+    private readonly WasapiSpectrumService _spectrum = new();
+
+    // ---- Volume hover & toast ----
+    private bool _syncingHoverVol;
+    private DispatcherTimer? _volumeToastTimer;
+    private bool _volumeToastActive;
+
+    // ---- Warning strip ----
+    private readonly WarningStripLogic _warningLogic = new();
+    private bool _warningStripActive;
+    private string _warningKind = "";
 
     // ---- clock ----
     private readonly DispatcherTimer _clockTimer = new() { Interval = TimeSpan.FromSeconds(1) };
@@ -209,7 +258,22 @@ public partial class BarWindow : Window, IDisposable
         };
 
         _fullscreenTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1500) };
-        _fullscreenTimer.Tick += OnFullscreenTick;
+        PreviewKeyDown += OnBarPreviewKeyDown;
+        _timelineTimer.Tick += (_, _) => OnTimelineTick();
+        _timelineTimer.Start();
+
+        _spectrum.SpectrumChanged += bands =>
+        {
+            try { Dispatcher.InvokeAsync(() => HoverEq.SetSpectrum(bands)); } catch { }
+        };
+
+        if (App.Volume is not null)
+        {
+            App.Volume.VolumeChanged += (_, _) =>
+            {
+                try { Dispatcher.InvokeAsync(UpdateVolumeControls); } catch { }
+            };
+        }
 
         ApplySettingsUi(_cfg);
         Subscribe();
@@ -242,6 +306,7 @@ public partial class BarWindow : Window, IDisposable
             if (App.Focus is not null) App.Focus.FocusChanged += OnFocusChanged;
             if (App.SysMon is not null) App.SysMon.StatsChanged += OnStatsChanged;
             if (App.Telemetry is not null) App.Telemetry.TelemetryUpdated += OnTelemetryUpdated;
+            if (App.Volume is not null) App.Volume.VolumeChanged += OnExternalVolumeChanged;
             if (App.Settings is not null) App.Settings.SettingsChanged += OnSettingsChanged;
         }
         catch (Exception ex) { Log.Error("Bar subscribe failed", ex); }
@@ -262,9 +327,15 @@ public partial class BarWindow : Window, IDisposable
             if (App.Focus is not null) App.Focus.FocusChanged -= OnFocusChanged;
             if (App.SysMon is not null) App.SysMon.StatsChanged -= OnStatsChanged;
             if (App.Telemetry is not null) App.Telemetry.TelemetryUpdated -= OnTelemetryUpdated;
+            if (App.Volume is not null) App.Volume.VolumeChanged -= OnExternalVolumeChanged;
             if (App.Settings is not null) App.Settings.SettingsChanged -= OnSettingsChanged;
         }
         catch { /* teardown is best-effort */ }
+    }
+
+    private void OnExternalVolumeChanged(float level, bool muted)
+    {
+        try { Dispatcher.BeginInvoke(() => UpdateVolumeControls()); } catch { }
     }
 
     private void OnSourceInitialized()
@@ -293,17 +364,23 @@ public partial class BarWindow : Window, IDisposable
         Unsubscribe();
         try { _collapseDelay.Stop(); } catch { }
         try { _clockTimer.Stop(); } catch { }
+        try { _timelineTimer.Stop(); } catch { }
+        try { _volumeToastTimer?.Stop(); } catch { }
+        try { _lrcCts?.Cancel(); _lrcClient.Dispose(); } catch { }
+        try { _spectrum.Dispose(); } catch { }
         try { _fullscreenTimer?.Stop(); } catch { }
         try { _idleCollapse.Stop(); } catch { }
         CancelDelays();
         _fadeCollapsed.Stop(); _fadeExpanded.Stop();
         try { if (_netMonitor is not null) { _netMonitor.Updated -= OnNetUpdated; _netMonitor.Dispose(); _netMonitor = null; } } catch { }
         try { if (_weather is not null) { _weather.Updated -= OnWeatherUpdated; _weather.Dispose(); _weather = null; } } catch { }
+        try { _searchCts?.Cancel(); } catch { }
+        try { _actionSuccessTimer?.Stop(); } catch { }
         try { MirrorPanelComponent.Shutdown(); } catch { }
         _anim.Dispose();
         try
         {
-            for (int id = 1; id <= 3; id++) NativeMethods.UnregisterHotKey(_hwnd, id);
+            for (int id = 1; id <= 4; id++) NativeMethods.UnregisterHotKey(_hwnd, id);
         }
         catch { }
         try { _src?.RemoveHook(WndProc); } catch { }
@@ -330,6 +407,7 @@ public partial class BarWindow : Window, IDisposable
                         case 1: Toggle(); break;
                         case 2: try { _ = App.Media?.RefreshAsync(showEvent: true, force: true); } catch { } break;
                         case 3: ShowOrStartTimer(); break;
+                        case 4: ToggleSearch(); break;
                     }
                 });
                 break;
@@ -360,8 +438,8 @@ public partial class BarWindow : Window, IDisposable
             var p = PointFromScreen(screen);
             double left = Pill.Margin.Left;
             double minDim = Math.Min(Math.Max(0, _currentW), Math.Max(0, _currentH));
-            double r = Math.Max(0, Math.Min(Pill.CornerRadius.TopLeft, minDim / 2));
-            if (InRoundedRect(p.X, p.Y, left, PillTop, _currentW, _currentH, r))
+            double r = Math.Max(0, Math.Min(_currentCornerRadius, minDim / 2));
+            if (InRoundedRect(p.X, p.Y, left, _currentTop, _currentW, _currentH, r))
                 return new IntPtr(NativeMethods.HTCLIENT);
             return new IntPtr(NativeMethods.HTTRANSPARENT);
         }
@@ -409,8 +487,9 @@ public partial class BarWindow : Window, IDisposable
             catch { }
 
             int workW = mon.WorkArea.Right - mon.WorkArea.Left;
-            double workH = WinH;
+            int workH = mon.WorkArea.Bottom - mon.WorkArea.Top;
             _winW = workW / scale;
+            _winH = workH / scale;
             _maxOffsetDip = Math.Max(0, (_winW - Math.Max(80, _cfg.BarWidth)) / 2 - 8);
 
             // Clamp a previously saved offset in case the target monitor shrank.
@@ -418,10 +497,10 @@ public partial class BarWindow : Window, IDisposable
 
             // One fixed full-work-area window; the island morphs inside it (no per-frame resize).
             Width = _winW;
-            Height = WinH;
+            Height = _winH;
             NativeMethods.SetWindowPos(_hwnd, NativeMethods.HWND_TOPMOST,
                 mon.WorkArea.Left, mon.WorkArea.Top,
-                (int)workW, (int)Math.Round(workH * scale),
+                workW, workH,
                 NativeMethods.SWP_NOACTIVATE);
 
             ApplyDynamicCardScale();
@@ -441,7 +520,7 @@ public partial class BarWindow : Window, IDisposable
         if (!_blurOn || _hwnd == IntPtr.Zero) return;
         double scale = CurrentDpi();
         double l = Pill.Margin.Left * scale;
-        double t = PillTop * scale;
+        double t = _currentTop * scale;
         double w = _currentW * scale;
         double h = _currentH * scale;
         int li = (int)Math.Round(l);
@@ -450,13 +529,15 @@ public partial class BarWindow : Window, IDisposable
         int hi = (int)Math.Round(h);
         if (li == _blurL && ti == _blurT && wi == _blurW && hi == _blurH) return;
         _blurL = li; _blurT = ti; _blurW = wi; _blurH = hi;
-        BlurHelper.UpdateRegion(li, ti, wi, hi, (int)Math.Round(_cfg.CornerRadius * scale), true);
+        double targetR = _currentCornerRadius;
+        BlurHelper.UpdateRegion(li, ti, wi, hi, (int)Math.Round(targetR * scale), true);
     }
 
     private void UpdateShape()
     {
         double minDim = Math.Min(Math.Max(0, _currentW), Math.Max(0, _currentH));
-        double r = Math.Max(0, Math.Min(_cfg.CornerRadius, minDim / 2));
+        double targetR = _currentCornerRadius;
+        double r = Math.Max(0, Math.Min(targetR, minDim / 2));
         Pill.CornerRadius = new CornerRadius(r);
         RefreshBlur();
     }
@@ -480,6 +561,19 @@ public partial class BarWindow : Window, IDisposable
         UpdateShape();
     }
 
+    private void ApplyTop(double v)
+    {
+        _currentTop = v;
+        UpdatePillMargin();
+        RefreshBlur();
+    }
+
+    private void ApplyCornerRadius(double r)
+    {
+        _currentCornerRadius = r;
+        UpdateShape();
+    }
+
     /// <summary>Position the pill. Up to the normal expanded width it stays centred on screen and
     /// grows symmetrically about the centre (the small pill expands evenly on both sides on hover).
     /// Wider than that - i.e. the detail panel - it extends to the right dynamically sized to the screen.
@@ -487,9 +581,13 @@ public partial class BarWindow : Window, IDisposable
     /// so it never touches the right screen edge or pushes the island abruptly.</summary>
     private void UpdatePillMargin()
     {
-        double offset = _cfg.CustomOffsetX;
+        double offset = _islandState == IslandVisualState.Search ? 0 : _cfg.CustomOffsetX;
         double left;
-        if (_currentW <= IslandExpandedW)
+        if (_islandState == IslandVisualState.Search)
+        {
+            left = (_winW - _currentW) / 2;
+        }
+        else if (_currentW <= IslandExpandedW)
         {
             // Collapsed and hover: stay centred so the pill grows evenly on both sides.
             left = (_winW - _currentW) / 2 + offset;
@@ -520,7 +618,7 @@ public partial class BarWindow : Window, IDisposable
         }
         double maxLeft = Math.Max(8, _winW - _currentW - 8);
         left = Math.Max(8, Math.Min(left, maxLeft));
-        Pill.Margin = new Thickness(left, PillTop, 0, 0);
+        Pill.Margin = new Thickness(left, _currentTop, 0, 0);
     }
 
     // ---------------------------------------------------------------- expand / collapse
@@ -695,6 +793,24 @@ public partial class BarWindow : Window, IDisposable
                 AnimateIsland(DetailWidth(), MeasureIslandHeight());
                 MorphDisc(DiscExpanded);
                 break;
+
+            case IslandVisualState.Search:
+                _pinned = false;
+                CollapsedPanel.Visibility = Visibility.Collapsed;
+                CollapsedPanel.Opacity = 0;
+                OrbHost.Visibility = Visibility.Collapsed;
+                OrbHost.Opacity = 0;
+                IslandExpandedHost.Visibility = Visibility.Collapsed;
+                IslandExpandedHost.Opacity = 0;
+                foreach (UIElement panel in AllPanels)
+                {
+                    panel.Visibility = Visibility.Collapsed;
+                    panel.Opacity = 0;
+                    panel.IsHitTestVisible = false;
+                }
+                SearchHost.Visibility = Visibility.Visible;
+                SearchHost.Opacity = 1;
+                break;
         }
     }
 
@@ -737,14 +853,21 @@ public partial class BarWindow : Window, IDisposable
 
     private void AnimateIsland(double w, double h)
     {
+        double targetTop = _islandState == IslandVisualState.Search ? Math.Round(_winH * 0.22) : PillTop;
+        double targetR = _islandState == IslandVisualState.Search ? 29 : (_islandState != IslandVisualState.Collapsed ? 36 : _cfg.CornerRadius);
+
         if (_cfg.ReduceMotion)
         {
             ApplyW(w);
             ApplyH(h);
+            ApplyTop(targetTop);
+            ApplyCornerRadius(targetR);
             return;
         }
         _anim.Animate("w", _currentW, w, ApplyW);
         _anim.Animate("h", _currentH, h, ApplyH);
+        _anim.Animate("top", _currentTop, targetTop, ApplyTop);
+        _anim.Animate("radius", _currentCornerRadius, targetR, ApplyCornerRadius);
     }
 
     /// <summary>Height of the island derived from its hover content: the tallest of the media
@@ -753,21 +876,9 @@ public partial class BarWindow : Window, IDisposable
     /// extends the island's right border.</summary>
     private double MeasureIslandHeight()
     {
-        double content = DiscExpanded;
-
-        if (IslandExpandedHost.Visibility == Visibility.Visible)
-        {
-            IslandExpandedHost.Measure(new Size(DynamicDetailW, double.PositiveInfinity));
-            content = Math.Max(content, IslandExpandedHost.DesiredSize.Height);
-        }
-
-        if (_islandState == IslandVisualState.Detail && ActivePanel is FrameworkElement panel && panel.Visibility == Visibility.Visible)
-        {
-            panel.Measure(new Size(panel.Width, double.PositiveInfinity));
-            content = Math.Max(content, panel.DesiredSize.Height);
-        }
-
-        return Math.Clamp(content + IslandPadV * 2, MinIslandH, MaxPillH);
+        double h = BaseIslandH;
+        if (_warningStripActive) h += 40;
+        return Math.Clamp(h, MinIslandH, MaxPillH);
     }
 
     /// <summary>Re-fit the island height after content changes, animating only when the
@@ -781,11 +892,13 @@ public partial class BarWindow : Window, IDisposable
 
     private void MorphDisc(double size)
     {
+        OrbContainer.Margin = new Thickness(_islandState == IslandVisualState.Collapsed ? 10.5 : 16, 0, 0, 0);
         if (_cfg.ReduceMotion)
         {
             OrbHost.Width = size;
             OrbHost.Height = size;
             OrbHost.CornerRadius = new CornerRadius(size / 2);
+            SourceBadge.Visibility = (_islandState != IslandVisualState.Collapsed && _lastMedia is not null && _lastMedia.SourceAppIconBytes is not null) ? Visibility.Visible : Visibility.Collapsed;
             return;
         }
         double from = OrbHost.Width > 0 ? OrbHost.Width : DiscCollapsed;
@@ -795,6 +908,7 @@ public partial class BarWindow : Window, IDisposable
             OrbHost.Height = v;
             OrbHost.CornerRadius = new CornerRadius(v / 2);
         });
+        SourceBadge.Visibility = (_islandState != IslandVisualState.Collapsed && _lastMedia is not null && _lastMedia.SourceAppIconBytes is not null) ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void ShowIslandContent(bool withPanel)
@@ -861,6 +975,8 @@ public partial class BarWindow : Window, IDisposable
 
     private void HideIslandContent()
     {
+        SearchHost.Visibility = Visibility.Collapsed;
+        SearchHost.Opacity = 0;
         IconRow.SetActive(IslandMetric.None);
         foreach (UIElement panel in AllPanels)
         {
@@ -882,19 +998,599 @@ public partial class BarWindow : Window, IDisposable
         UpdateIslandContent();
     }
 
+    private string _currentTitle = "";
+
     private void UpdateIslandContent()
     {
         UpdateCollapsed();
         var m = _lastMedia;
-        HoverTitle.Text = m is not null && !string.IsNullOrWhiteSpace(m.Title) ? m.Title : "Dynamic";
-        HoverArtist.Text = m is not null && !string.IsNullOrWhiteSpace(m.Artist) ? m.Artist : "Windows Dynamic Bar";
-        double prog = m?.Progress ?? 0;
-        HoverProgressFill.Width = Math.Max(0, HoverProgressTrack.ActualWidth * Math.Clamp(prog, 0, 1));
+        string title = m is not null && !string.IsNullOrWhiteSpace(m.Title) ? m.Title : "Dynamic";
+        UpdateTitleScroll(title);
+
+        HoverArtist.Text = m is not null && !string.IsNullOrWhiteSpace(m.Artist) ? m.Artist : (m is not null ? m.Album : "Windows Dynamic Bar");
+
+        var sessions = App.Media?.GetSessions();
+        string appName = !string.IsNullOrWhiteSpace(m?.SourceAppName) ? m.SourceAppName : "Music";
+        SourceChipText.Text = sessions is not null && sessions.Count > 1 ? $"{appName} ▾" : appName;
+        SourceChip.Cursor = sessions is not null && sessions.Count > 1 ? Cursors.Hand : Cursors.Arrow;
+
+        bool hasMedia = m is not null && !string.IsNullOrWhiteSpace(m.Title);
         bool playing = m?.IsPlaying == true;
         HoverPlayGlyph.Text = playing ? IcPause : IcPlay;
+
+        UpdateTimeline();
+        UpdateLyricsOnMediaChanged(m);
+        UpdateVolumeControls();
+
+        Color dominant = m?.DominantColor ?? Color.FromRgb(0x0A, 0x84, 0xFF);
         HoverEq.ReduceMotion = _cfg.ReduceMotion;
+        HoverEq.AccentColor = dominant;
         HoverEq.Running = playing;
+        HoverEq.Visibility = hasMedia ? Visibility.Visible : Visibility.Collapsed;
+
+        if (playing && _islandState != IslandVisualState.Collapsed)
+            _spectrum.Start();
+        else
+            _spectrum.Stop();
+
+        LyricText.Foreground = new SolidColorBrush(Color.FromArgb(255,
+            (byte)(dominant.R * 0.45 + 255 * 0.55),
+            (byte)(dominant.G * 0.45 + 255 * 0.55),
+            (byte)(dominant.B * 0.45 + 255 * 0.55)));
+
+        AlbumRadialGlowStop.Color = Color.FromArgb(38, dominant.R, dominant.G, dominant.B);
+        AlbumRadialGlow.Opacity = _islandState != IslandVisualState.Collapsed ? 1.0 : 0.0;
+        PillShadow.Color = _islandState != IslandVisualState.Collapsed ? dominant : Colors.Black;
+
+        ShowDisc(m);
+        IconRow.ReduceMotion = _cfg.ReduceMotion;
         UpdateIconRowValues();
+    }
+
+    private void UpdateTitleScroll(string title)
+    {
+        if (_currentTitle == title && HoverTitle.Text == title) return;
+        _currentTitle = title;
+        HoverTitle.Text = title;
+
+        HoverTitle.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+        double textW = HoverTitle.DesiredSize.Width;
+        double boxW = TitleContainer.ActualWidth > 0 ? TitleContainer.ActualWidth : 242;
+
+        if (textW <= boxW)
+        {
+            HoverTitleTransform.BeginAnimation(TranslateTransform.XProperty, null);
+            HoverTitleTransform.X = 0;
+            HoverTitle.TextTrimming = TextTrimming.None;
+        }
+        else
+        {
+            if (_cfg.ReduceMotion)
+            {
+                HoverTitleTransform.BeginAnimation(TranslateTransform.XProperty, null);
+                HoverTitleTransform.X = 0;
+                HoverTitle.TextTrimming = TextTrimming.CharacterEllipsis;
+            }
+            else
+            {
+                HoverTitle.TextTrimming = TextTrimming.None;
+                double delta = textW - boxW + 8;
+                var anim = new DoubleAnimationUsingKeyFrames
+                {
+                    Duration = TimeSpan.FromSeconds(10),
+                    RepeatBehavior = RepeatBehavior.Forever
+                };
+                anim.KeyFrames.Add(new LinearDoubleKeyFrame(0, KeyTime.FromPercent(0.14)));
+                anim.KeyFrames.Add(new SplineDoubleKeyFrame(-delta, KeyTime.FromPercent(0.46), new KeySpline(0.4, 0, 0.2, 1)));
+                anim.KeyFrames.Add(new LinearDoubleKeyFrame(-delta, KeyTime.FromPercent(0.64)));
+                anim.KeyFrames.Add(new SplineDoubleKeyFrame(0, KeyTime.FromPercent(0.96), new KeySpline(0.4, 0, 0.2, 1)));
+                anim.KeyFrames.Add(new LinearDoubleKeyFrame(0, KeyTime.FromPercent(1.0)));
+
+                HoverTitleTransform.BeginAnimation(TranslateTransform.XProperty, anim);
+            }
+        }
+    }
+
+    private void UpdateTimeline()
+    {
+        if (_isScrubbing) return;
+        var m = _lastMedia;
+        if (m is null || m.Duration <= TimeSpan.Zero)
+        {
+            HoverProgressContainer.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        HoverProgressContainer.Visibility = Visibility.Visible;
+
+        TimeSpan pos = m.Position;
+        if (m.IsPlaying && m.LastUpdatedTime.HasValue)
+        {
+            var el = DateTimeOffset.UtcNow - m.LastUpdatedTime.Value;
+            if (el > TimeSpan.Zero) pos += el;
+        }
+        pos = TimeSpan.FromTicks(Math.Clamp(pos.Ticks, 0, m.Duration.Ticks));
+
+        HoverTimeElapsed.Text = FormatTime(pos);
+        TimeSpan rem = m.Duration - pos;
+        HoverTimeRemaining.Text = $"-{FormatTime(rem)}";
+
+        double trackW = HoverProgressBarTrack.ActualWidth;
+        if (trackW > 0)
+        {
+            double frac = pos.TotalSeconds / m.Duration.TotalSeconds;
+            HoverProgressFill.Width = Math.Clamp(frac * trackW, 0, trackW);
+            if (HoverProgressKnob.Visibility == Visibility.Visible)
+            {
+                HoverProgressKnob.Margin = new Thickness(Math.Clamp(frac * trackW - 5, -5, trackW - 5), 0, 0, 0);
+            }
+        }
+    }
+
+    private void UpdateLyricsOnMediaChanged(MediaInfo? m)
+    {
+        string trackKey = $"{m?.Artist}|{m?.Title}|{(int)(m?.Duration.TotalSeconds ?? 0)}";
+        if (trackKey != _lastLyricTrackKey)
+        {
+            _lastLyricTrackKey = trackKey;
+            _currentLrcLines = null;
+            _currentLyricLine = null;
+            LyricText.Text = "";
+            LyricText.Opacity = 0;
+
+            if (!string.IsNullOrWhiteSpace(m?.Artist) && !string.IsNullOrWhiteSpace(m?.Title) && m.Duration > TimeSpan.Zero)
+            {
+                var cts = new CancellationTokenSource();
+                _lrcCts?.Cancel();
+                _lrcCts = cts;
+                _ = Task.Run(async () =>
+                {
+                    var lines = await _lrcClient.FetchLyricsAsync(m.Artist, m.Title, m.Duration, cts.Token);
+                    if (!cts.IsCancellationRequested && lines is not null)
+                    {
+                        _ = Dispatcher.InvokeAsync(() =>
+                        {
+                            _currentLrcLines = lines;
+                            UpdateLyricDisplay();
+                        });
+                    }
+                });
+            }
+        }
+        else
+        {
+            UpdateLyricDisplay();
+        }
+    }
+
+    private void UpdateLyricDisplay()
+    {
+        if (_volumeToastActive) return;
+
+        TimeSpan pos = _lastMedia?.Position ?? TimeSpan.Zero;
+        if (_lastMedia?.IsPlaying == true && _lastMedia.LastUpdatedTime.HasValue)
+        {
+            var el = DateTimeOffset.UtcNow - _lastMedia.LastUpdatedTime.Value;
+            if (el > TimeSpan.Zero) pos += el;
+        }
+
+        string? line = LrcLibClient.GetCurrentLineText(_currentLrcLines, pos);
+        if (line != _currentLyricLine)
+        {
+            _currentLyricLine = line;
+            if (string.IsNullOrWhiteSpace(line))
+            {
+                LyricText.Text = "";
+                LyricText.Opacity = 0;
+            }
+            else
+            {
+                LyricText.Text = line;
+                if (_cfg.ReduceMotion)
+                {
+                    LyricText.Opacity = 1;
+                    LyricTransform.Y = 0;
+                }
+                else
+                {
+                    LyricTransform.Y = 4;
+                    LyricText.Opacity = 0;
+                    _anim.Animate("lyricSlide", 4, 0, v => LyricTransform.Y = v);
+                    _anim.Animate("lyricFade", 0, 1, v => LyricText.Opacity = v);
+                }
+            }
+        }
+    }
+
+    private void OnTimelineTick()
+    {
+        if (_islandState != IslandVisualState.Collapsed)
+        {
+            UpdateTimeline();
+            UpdateLyricDisplay();
+        }
+        CheckWarningStrip();
+    }
+
+    private void UpdateVolumeControls()
+    {
+        if (App.Volume is null) return;
+        _syncingHoverVol = true;
+        try
+        {
+            if (!HoverVolumeSlider.IsMouseCaptureWithin)
+                HoverVolumeSlider.Value = App.Volume.Level;
+            bool muted = App.Volume.Muted || App.Volume.Level <= 0.001f;
+            HoverSpeakerGlyph.Text = muted ? "\uE74F" : "\uE767";
+        }
+        finally { _syncingHoverVol = false; }
+    }
+
+    private void OnVolumeGroupMouseEnter(object sender, MouseEventArgs e)
+    {
+        if (_cfg.ReduceMotion)
+        {
+            HoverVolumeSliderHost.Width = 74;
+            HoverVolumeSliderHost.Opacity = 1;
+            return;
+        }
+        _anim.Animate("volSliderW", HoverVolumeSliderHost.ActualWidth, 74, v => HoverVolumeSliderHost.Width = v);
+        _anim.Animate("volSliderOp", HoverVolumeSliderHost.Opacity, 1, v => HoverVolumeSliderHost.Opacity = v);
+    }
+
+    private void OnVolumeGroupMouseLeave(object sender, MouseEventArgs e)
+    {
+        if (HoverVolumeSlider.IsFocused || HoverVolumeSlider.IsKeyboardFocusWithin || HoverVolumeSlider.IsMouseCaptureWithin) return;
+        if (_cfg.ReduceMotion)
+        {
+            HoverVolumeSliderHost.Width = 0;
+            HoverVolumeSliderHost.Opacity = 0;
+            return;
+        }
+        _anim.Animate("volSliderW", HoverVolumeSliderHost.ActualWidth, 0, v => HoverVolumeSliderHost.Width = v);
+        _anim.Animate("volSliderOp", HoverVolumeSliderHost.Opacity, 0, v => HoverVolumeSliderHost.Opacity = v);
+    }
+
+    private void OnHoverVolumeSliderChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (_syncingHoverVol) return;
+        if (App.Volume is not null)
+        {
+            float lvl = (float)e.NewValue;
+            if (lvl > 0 && App.Volume.Muted) App.Volume.ToggleMute();
+            App.Volume.SetLevel(lvl);
+        }
+    }
+
+    private void OnHoverSpeakerClick(object sender, RoutedEventArgs e)
+    {
+        App.Volume?.ToggleMute();
+        UpdateVolumeControls();
+    }
+
+    private void OnDiscMouseWheel(object sender, MouseWheelEventArgs e)
+    {
+        if (App.Volume is null) return;
+        float delta = e.Delta > 0 ? 0.03f : -0.03f;
+        float next = Math.Clamp(App.Volume.Level + delta, 0f, 1f);
+        App.Volume.SetLevel(next);
+        ShowVolumeToast($"Volume {Math.Round(next * 100)}%");
+        e.Handled = true;
+    }
+
+    private void ShowVolumeToast(string message)
+    {
+        _volumeToastActive = true;
+        LyricText.Text = message;
+        LyricText.Opacity = 1;
+        LyricTransform.Y = 0;
+
+        _volumeToastTimer ??= new DispatcherTimer();
+        _volumeToastTimer.Interval = TimeSpan.FromSeconds(2.6);
+        _volumeToastTimer.Tick -= OnVolumeToastTick;
+        _volumeToastTimer.Tick += OnVolumeToastTick;
+        _volumeToastTimer.Stop();
+        _volumeToastTimer.Start();
+    }
+
+    private void OnVolumeToastTick(object? sender, EventArgs e)
+    {
+        _volumeToastTimer?.Stop();
+        _volumeToastActive = false;
+        UpdateLyricDisplay();
+    }
+
+    private void OnSourceChipClick(object sender, RoutedEventArgs e)
+    {
+        var sessions = App.Media?.GetSessions();
+        if (sessions is not null && sessions.Count > 1)
+        {
+            App.Media?.CycleSession();
+        }
+    }
+
+    private void OnDiscClicked(object sender, MouseButtonEventArgs e)
+    {
+        string? appId = App.Media?.CurrentAppId;
+        if (string.IsNullOrWhiteSpace(appId)) return;
+
+        Task.Run(() =>
+        {
+            try
+            {
+                string name = Path.GetFileNameWithoutExtension(appId);
+                if (name.Contains("Spotify", StringComparison.OrdinalIgnoreCase)) name = "Spotify";
+                else if (name.Contains("Chrome", StringComparison.OrdinalIgnoreCase)) name = "chrome";
+                else if (name.Contains("Edge", StringComparison.OrdinalIgnoreCase)) name = "msedge";
+
+                var procs = Process.GetProcessesByName(name);
+                if (procs.Length == 0)
+                {
+                    procs = Process.GetProcesses().Where(p => p.ProcessName.Contains(name, StringComparison.OrdinalIgnoreCase)).ToArray();
+                }
+
+                foreach (var p in procs)
+                {
+                    IntPtr hwnd = p.MainWindowHandle;
+                    if (hwnd != IntPtr.Zero)
+                    {
+                        NativeMethods.ShowWindow(hwnd, 9); // SW_RESTORE
+                        NativeMethods.SetForegroundWindow(hwnd);
+                        return;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Debug("Bring source app forward failed", ("error", ex.Message));
+            }
+        });
+    }
+
+    private void OnHoverProgressMouseEnter(object sender, MouseEventArgs e)
+    {
+        if (_lastMedia?.CanSeek == true)
+            HoverProgressKnob.Visibility = Visibility.Visible;
+    }
+
+    private void OnHoverProgressMouseLeave(object sender, MouseEventArgs e)
+    {
+        if (!_isScrubbing)
+        {
+            HoverProgressKnob.Visibility = Visibility.Collapsed;
+            HoverProgressTooltip.Visibility = Visibility.Collapsed;
+        }
+    }
+
+    private void OnHoverProgressMouseDown(object sender, MouseButtonEventArgs e)
+    {
+        if (_lastMedia is null || !_lastMedia.CanSeek || _lastMedia.Duration <= TimeSpan.Zero) return;
+        _isScrubbing = true;
+        HoverProgressBarTrack.CaptureMouse();
+        UpdateScrubFromPoint(e.GetPosition(HoverProgressBarTrack).X);
+    }
+
+    private void OnHoverProgressMouseMove(object sender, MouseEventArgs e)
+    {
+        if (_lastMedia is null || _lastMedia.Duration <= TimeSpan.Zero) return;
+        double x = e.GetPosition(HoverProgressBarTrack).X;
+        double trackW = HoverProgressBarTrack.ActualWidth;
+        if (trackW <= 0) return;
+
+        double frac = Math.Clamp(x / trackW, 0.0, 1.0);
+        var hoverTime = TimeSpan.FromSeconds(_lastMedia.Duration.TotalSeconds * frac);
+
+        if (_lastMedia.CanSeek)
+        {
+            HoverProgressTooltipText.Text = FormatTime(hoverTime);
+            HoverProgressTooltip.Margin = new Thickness(Math.Clamp(x - 16, 0, Math.Max(0, trackW - 32)), -24, 0, 0);
+            HoverProgressTooltip.Visibility = Visibility.Visible;
+        }
+
+        if (_isScrubbing)
+        {
+            UpdateScrubFromPoint(x);
+        }
+    }
+
+    private void OnHoverProgressMouseUp(object sender, MouseButtonEventArgs e)
+    {
+        if (!_isScrubbing) return;
+        _isScrubbing = false;
+        HoverProgressBarTrack.ReleaseMouseCapture();
+        HoverProgressTooltip.Visibility = Visibility.Collapsed;
+        if (!HoverProgressContainer.IsMouseOver)
+            HoverProgressKnob.Visibility = Visibility.Collapsed;
+
+        if (_lastMedia is not null && _lastMedia.CanSeek)
+        {
+            _ = App.Media?.SeekToTimeAsync(_scrubTime);
+        }
+    }
+
+    private void UpdateScrubFromPoint(double x)
+    {
+        if (_lastMedia is null || _lastMedia.Duration <= TimeSpan.Zero) return;
+        double trackW = HoverProgressBarTrack.ActualWidth;
+        if (trackW <= 0) return;
+
+        double frac = Math.Clamp(x / trackW, 0.0, 1.0);
+        _scrubTime = TimeSpan.FromSeconds(_lastMedia.Duration.TotalSeconds * frac);
+        HoverProgressFill.Width = frac * trackW;
+        HoverProgressKnob.Margin = new Thickness(Math.Clamp(frac * trackW - 5, -5, trackW - 5), 0, 0, 0);
+        HoverProgressKnob.Visibility = Visibility.Visible;
+        HoverTimeElapsed.Text = FormatTime(_scrubTime);
+        HoverTimeRemaining.Text = $"-{FormatTime(_lastMedia.Duration - _scrubTime)}";
+    }
+
+    private void OnBarPreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (!Pill.IsMouseOver && !IsKeyboardFocusWithin) return;
+        if (Keyboard.FocusedElement is TextBox || Keyboard.FocusedElement is Slider) return;
+
+        switch (e.Key)
+        {
+            case Key.Space:
+                _ = App.Media?.PlayPauseAsync();
+                e.Handled = true;
+                break;
+            case Key.Left:
+                SeekRelative(-5);
+                e.Handled = true;
+                break;
+            case Key.Right:
+                SeekRelative(+5);
+                e.Handled = true;
+                break;
+            case Key.Up:
+                AdjustVolume(0.05f);
+                e.Handled = true;
+                break;
+            case Key.Down:
+                AdjustVolume(-0.05f);
+                e.Handled = true;
+                break;
+            case Key.N:
+                _ = App.Media?.NextAsync();
+                e.Handled = true;
+                break;
+            case Key.P:
+                _ = App.Media?.PreviousAsync();
+                e.Handled = true;
+                break;
+        }
+    }
+
+    private void SeekRelative(double seconds)
+    {
+        if (_lastMedia is null || !_lastMedia.CanSeek || _lastMedia.Duration <= TimeSpan.Zero) return;
+        TimeSpan target = _lastMedia.Position + TimeSpan.FromSeconds(seconds);
+        target = TimeSpan.FromTicks(Math.Clamp(target.Ticks, 0, _lastMedia.Duration.Ticks));
+        _ = App.Media?.SeekToTimeAsync(target);
+    }
+
+    private void AdjustVolume(float delta)
+    {
+        if (App.Volume is null) return;
+        float next = Math.Clamp(App.Volume.Level + delta, 0f, 1f);
+        App.Volume.SetLevel(next);
+        ShowVolumeToast($"Volume {Math.Round(next * 100)}%");
+    }
+
+    private void CheckWarningStrip()
+    {
+        var snap = _telemetry;
+        double ram = snap is not null && snap.Memory.Available ? snap.Memory.UsedPercent : -1;
+        double cpu = snap is not null && snap.Cpu.Available ? snap.Cpu.Utilization : -1;
+
+        float batteryPct = -1;
+        bool isCharging = true;
+        try
+        {
+            var pwr = System.Windows.Forms.SystemInformation.PowerStatus;
+            batteryPct = pwr.BatteryLifePercent * 100f;
+            isCharging = (pwr.PowerLineStatus == System.Windows.Forms.PowerLineStatus.Online);
+        }
+        catch { }
+
+        bool shouldShow = _warningLogic.Update(ram, cpu, batteryPct, isCharging, out string kind);
+        string text = "";
+
+        if (shouldShow)
+        {
+            if (kind == "RAM")
+            {
+                var topProc = GetTopMemoryProcess();
+                string procStr = topProc is not null ? $" · {topProc.Value.Item1} is using {topProc.Value.Item2}" : "";
+                text = $"RAM at {Math.Round(ram):F0}%{procStr}";
+            }
+            else if (kind == "CPU")
+            {
+                var topProc = GetTopCpuProcess();
+                string procStr = topProc is not null ? $" · {topProc.Value.Item1} at {topProc.Value.Item2}%" : "";
+                text = $"CPU at {Math.Round(cpu):F0}%{procStr}";
+            }
+            else if (kind == "Battery")
+            {
+                text = $"Battery low at {Math.Round(batteryPct):F0}% · Plug in soon";
+            }
+        }
+
+        if (shouldShow != _warningStripActive || kind != _warningKind)
+        {
+            _warningStripActive = shouldShow;
+            _warningKind = kind;
+            WarningStripText.Text = text;
+
+            if (shouldShow)
+            {
+                WarningStrip.Visibility = Visibility.Visible;
+                Fade(WarningStrip, 1, 200);
+            }
+            else
+            {
+                Fade(WarningStrip, 0, 150, () => WarningStrip.Visibility = Visibility.Collapsed);
+            }
+
+            if (_islandState != IslandVisualState.Collapsed)
+            {
+                AnimateIsland(_currentW, MeasureIslandHeight());
+            }
+        }
+    }
+
+    private static (string, string)? GetTopMemoryProcess()
+    {
+        try
+        {
+            var p = Process.GetProcesses().OrderByDescending(x => x.WorkingSet64).FirstOrDefault();
+            if (p is not null)
+            {
+                string size = FormatBytes(p.WorkingSet64);
+                return (p.ProcessName + ".exe", size);
+            }
+        }
+        catch { }
+        return null;
+    }
+
+    private static (string, string)? GetTopCpuProcess()
+    {
+        try
+        {
+            var p = Process.GetProcesses().OrderByDescending(x => x.WorkingSet64).FirstOrDefault();
+            if (p is not null)
+                return (p.ProcessName + ".exe", "high");
+        }
+        catch { }
+        return null;
+    }
+
+    private static string FormatBytes(long bytes)
+    {
+        if (bytes >= 1024L * 1024 * 1024)
+            return $"{(double)bytes / (1024L * 1024 * 1024):F1} GB";
+        if (bytes >= 1024L * 1024)
+            return $"{(double)bytes / (1024L * 1024):F0} MB";
+        return $"{bytes / 1024} KB";
+    }
+
+    private void OnWarningReviewClick(object sender, RoutedEventArgs e)
+    {
+        if (_warningKind == "RAM") SetIslandState(IslandVisualState.Detail, IslandMetric.Ram, force: true);
+        else if (_warningKind == "CPU") SetIslandState(IslandVisualState.Detail, IslandMetric.Cpu, force: true);
+    }
+
+    private void OnWarningCloseClick(object sender, RoutedEventArgs e)
+    {
+        _warningLogic.Dismiss(_warningKind);
+
+        _warningStripActive = false;
+        Fade(WarningStrip, 0, 150, () => WarningStrip.Visibility = Visibility.Collapsed);
+        if (_islandState != IslandVisualState.Collapsed)
+        {
+            AnimateIsland(_currentW, MeasureIslandHeight());
+        }
     }
 
     private void UpdateIconRowValues()
@@ -1048,9 +1744,20 @@ public partial class BarWindow : Window, IDisposable
     /// <summary>Mouse entered the island region (pill + icons + panel).</summary>
     private void OnIslandMouseEnter(object sender, MouseEventArgs e)
     {
+        if (_islandState == IslandVisualState.Search) return;
         _islandHovering = true;
         _collapseDelay.Stop();
-        if (_expanded) return; // event-bus card owns the pill
+        if (_expanded)
+        {
+            if (_shown?.Kind is BarEventKind.Volume or BarEventKind.Brightness)
+            {
+                UserDismiss(clearBus: true);
+            }
+            else
+            {
+                return; // interactive event-bus card owns the pill
+            }
+        }
 
         var (state, metric) = IslandStateMachine.Resolve(
             _islandState, _activeMetric, pointerInside: true, IslandMetric.None, collapseElapsed: false);
@@ -1060,6 +1767,7 @@ public partial class BarWindow : Window, IDisposable
     /// <summary>Mouse left the island region entirely (grace timer defers collapse).</summary>
     private void OnIslandMouseLeave(object sender, MouseEventArgs e)
     {
+        if (_islandState == IslandVisualState.Search) return;
         _islandHovering = false;
         if (_expanded) return;
         if (_pinned) return;   // clicked open: hover-leave must not collapse it
@@ -1069,6 +1777,7 @@ public partial class BarWindow : Window, IDisposable
 
     private void OnCollapseDelayTick(object? sender, EventArgs e)
     {
+        if (_islandState == IslandVisualState.Search) return;
         _collapseDelay.Stop();
         if (_expanded || _pinned) return;
 
@@ -1090,6 +1799,7 @@ public partial class BarWindow : Window, IDisposable
 
     private void OnIconMetricHovered(IslandMetric metric)
     {
+        if (_islandState == IslandVisualState.Search) return;
         if (_expanded || _pinned) return;   // pinned panel ignores hover until clicked again
         _collapseDelay.Stop();
         SetIslandState(IslandVisualState.Detail, metric);
@@ -1097,6 +1807,7 @@ public partial class BarWindow : Window, IDisposable
 
     private void OnIconMetricUnhovered()
     {
+        if (_islandState == IslandVisualState.Search) return;
         if (_pinned) return;   // pinned panel ignores hover until clicked again
         // Leaving an icon closes the extended panel after a short grace (so moving between icons
         // still just switches metric). Hover only previews; use click to keep it open.
@@ -1106,6 +1817,7 @@ public partial class BarWindow : Window, IDisposable
 
     private void OnIconMetricClicked(IslandMetric metric)
     {
+        if (_islandState == IslandVisualState.Search) return;
         // Mirror: a click toggles the camera (per privacy design). Click once to start and pin the
         // panel; click again to stop the camera and shrink back to the collapsed island.
         if (metric == IslandMetric.Mirror)
@@ -1167,6 +1879,20 @@ public partial class BarWindow : Window, IDisposable
     {
         try
         {
+            // If the dynamic island is open (expanded music pill, detail telemetry panel, or hovered),
+            // transient HUD events (volume, brightness) must NOT collapse or preempt the open island.
+            if (_islandState != IslandVisualState.Collapsed || _islandHovering)
+            {
+                if (evt.Kind is BarEventKind.Volume or BarEventKind.Brightness)
+                {
+                    if (evt.Kind == BarEventKind.Volume)
+                    {
+                        UpdateVolumeControls();
+                    }
+                    return;
+                }
+            }
+
             // Refresh in place when the same widget is already on screen.
             if (_shown?.Kind == evt.Kind && _expanded)
             {
@@ -1219,11 +1945,16 @@ public partial class BarWindow : Window, IDisposable
     private void OnMediaChanged(MediaInfo info)
     {
         _lastMedia = info;
-        if (!_expanded)
+        if (_islandState != IslandVisualState.Collapsed)
+        {
+            Dispatcher.BeginInvoke(() => UpdateIslandContent());
+        }
+        else
         {
             UpdateCollapsed();
-            return;
         }
+
+        if (!_expanded) return;
         if (_shown?.Kind == BarEventKind.Media)
         {
             _shown = BarEvent.Create(BarEventKind.Media, info.Title, info.Artist,
@@ -1324,6 +2055,7 @@ public partial class BarWindow : Window, IDisposable
             _cfg.HotkeyToggle = m.HotkeyToggle;
             _cfg.HotkeyMedia = m.HotkeyMedia;
             _cfg.HotkeyTimer = m.HotkeyTimer;
+            _cfg.HotkeySearch = m.HotkeySearch;
 
             // accent (shared resource → DynamicResource consumers update live;
             // compiled brushes are frozen, so replace instead of mutating)
@@ -1373,6 +2105,7 @@ public partial class BarWindow : Window, IDisposable
     private void OnPillMouseDown(object sender, MouseButtonEventArgs e)
     {
         if (e.ChangedButton != MouseButton.Left) return;
+        if (_islandState == IslandVisualState.Search) return;
         // Pressing a control (slider, button) is that control's gesture - never start a pill drag,
         // otherwise dragging the mirror zoom/light sliders would slide the whole island sideways.
         if (IsInteractiveSource(e.OriginalSource)) { _dragPressing = false; return; }
@@ -1393,7 +2126,7 @@ public partial class BarWindow : Window, IDisposable
         var d = source as DependencyObject;
         while (d is not null and not Window)
         {
-            if (d is Slider or ButtonBase or Thumb) return true;
+            if (d is Slider or ButtonBase or Thumb or TextBox or ScrollViewer) return true;
             d = d is Visual or System.Windows.Media.Media3D.Visual3D
                 ? VisualTreeHelper.GetParent(d)
                 : LogicalTreeHelper.GetParent(d);
@@ -1446,24 +2179,42 @@ public partial class BarWindow : Window, IDisposable
     private void OnPillMouseWheel(object sender, MouseWheelEventArgs e)
     {
         if (App.Volume is null) return;
-        float delta = e.Delta > 0 ? 0.02f : -0.02f;
+        float delta = e.Delta > 0 ? 0.03f : -0.03f;
         float cur = App.Volume.Level;
         float next = Math.Clamp(cur + delta, 0f, 1f);
         App.Volume.SetLevel(next);
+        if (_islandState != IslandVisualState.Collapsed)
+        {
+            ShowVolumeToast($"Volume {Math.Round(next * 100)}%");
+        }
         e.Handled = true;
     }
 
     private void OnDeactivated(object? sender, EventArgs e)
     {
+        if (_islandState == IslandVisualState.Search)
+        {
+            CloseSearch();
+            return;
+        }
         if (_expanded && !_dragMoved) UserDismiss();
     }
 
     private void OnPreviewKeyDown(object sender, KeyEventArgs e)
     {
-        if (e.Key == Key.Escape && _expanded)
+        if (e.Key == Key.Escape)
         {
-            e.Handled = true;
-            UserDismiss();
+            if (_islandState == IslandVisualState.Search)
+            {
+                e.Handled = true;
+                CloseSearch();
+                return;
+            }
+            if (_expanded)
+            {
+                e.Handled = true;
+                UserDismiss();
+            }
         }
     }
 
@@ -1555,7 +2306,7 @@ public partial class BarWindow : Window, IDisposable
     private void RegisterHotkeys()
     {
         if (_hwnd == IntPtr.Zero) return;
-        for (int id = 1; id <= 3; id++)
+        for (int id = 1; id <= 4; id++)
         {
             try { NativeMethods.UnregisterHotKey(_hwnd, id); } catch { }
         }
@@ -1565,6 +2316,11 @@ public partial class BarWindow : Window, IDisposable
             NativeMethods.RegisterHotKey(_hwnd, 2, m2 | NativeMethods.MOD_NOREPEAT, v2);
         if (TryParseHotkey(_cfg.HotkeyTimer, out uint m3, out uint v3))
             NativeMethods.RegisterHotKey(_hwnd, 3, m3 | NativeMethods.MOD_NOREPEAT, v3);
+        if (TryParseHotkey(_cfg.HotkeySearch, out uint m4, out uint v4))
+        {
+            bool ok = NativeMethods.RegisterHotKey(_hwnd, 4, m4 | NativeMethods.MOD_NOREPEAT, v4);
+            if (!ok) Log.Debug("Search hotkey registration failed", ("hotkey", _cfg.HotkeySearch));
+        }
     }
 
     /// <summary>"Ctrl+Alt+Space" → (modifier flags, virtual-key code).</summary>
@@ -1589,7 +2345,12 @@ public partial class BarWindow : Window, IDisposable
         }
 
         var key = parts[^1];
-        if (key.Equals("Space", StringComparison.OrdinalIgnoreCase)) { vk = 0x20; return true; }
+        if (key.Equals("Space", StringComparison.OrdinalIgnoreCase))
+        {
+            if (mods == 0) return false;
+            vk = 0x20;
+            return true;
+        }
         if (key.Length == 1)
         {
             char c = char.ToUpperInvariant(key[0]);
@@ -2034,6 +2795,7 @@ public partial class BarWindow : Window, IDisposable
     /// </summary>
     private void UpdateCollapsed()
     {
+        if (_actionSuccessTimer?.IsEnabled == true) return;
         var cfg = App.Settings?.Current ?? _cfg;
         string? value = null;
 
@@ -2055,9 +2817,9 @@ public partial class BarWindow : Window, IDisposable
             SetOrb(IcStopwatch);
             value = StopwatchService.FormatMs(sel);
         }
-        else if (_lastMedia is { } m && cfg.CollapsedMediaArt)
+        else if (_lastMedia is { } m && !string.IsNullOrWhiteSpace(m.Title) && cfg.CollapsedMediaArt)
         {
-            CollapsedTitle.Text = string.IsNullOrWhiteSpace(m.Title) ? "Playing" : m.Title;
+            CollapsedTitle.Text = m.Title;
             ShowDisc(m);
         }
         else
@@ -2088,13 +2850,34 @@ public partial class BarWindow : Window, IDisposable
         OrbGlyph.Visibility = Visibility.Visible;
     }
 
-    private void ShowDisc(MediaInfo m)
+    private void ShowDisc(MediaInfo? m)
     {
+        if (m is null || string.IsNullOrWhiteSpace(m.Title))
+        {
+            SetOrb(IcDot);
+            SourceBadge.Visibility = Visibility.Collapsed;
+            return;
+        }
         OrbArt.Visibility = Visibility.Collapsed;
         OrbGlyph.Visibility = Visibility.Collapsed;
         var art = BytesToImage(m.ArtworkBytes);
+        if (art is null)
+        {
+            Color dom = m.DominantColor ?? Color.FromRgb(0x0A, 0x84, 0xFF);
+            art = AppIconHelper.CreateGradientDisc(dom, 122);
+        }
         OrbDisc.SetArtwork(art, m.IsPlaying);
         OrbDisc.Visibility = Visibility.Visible;
+
+        if (m.SourceAppIconBytes is not null)
+        {
+            SourceBadgeIcon.Source = AppIconHelper.BytesToBitmap(m.SourceAppIconBytes);
+            SourceBadge.Visibility = _islandState != IslandVisualState.Collapsed ? Visibility.Visible : Visibility.Collapsed;
+        }
+        else
+        {
+            SourceBadge.Visibility = Visibility.Collapsed;
+        }
     }
 
     private BitmapSource? BytesToImage(byte[]? bytes)
@@ -2117,7 +2900,7 @@ public partial class BarWindow : Window, IDisposable
         catch { return null; }
     }
 
-    private static string FormatTime(TimeSpan t) => t.TotalHours >= 1
+    internal static string FormatTime(TimeSpan t) => t.TotalHours >= 1
         ? $"{(int)t.TotalHours}:{t.Minutes:00}:{t.Seconds:00}"
         : $"{(int)t.TotalMinutes}:{t.Seconds:00}";
 
@@ -2174,7 +2957,23 @@ public partial class BarWindow : Window, IDisposable
 
     private void OnPlayPauseClick(object sender, RoutedEventArgs e)
     {
-        try { _ = App.Media?.PlayPauseAsync(); } catch { }
+        try
+        {
+            if (_lastMedia is not null && !string.IsNullOrWhiteSpace(_lastMedia.Title))
+            {
+                bool nextPlaying = !_lastMedia.IsPlaying;
+                _lastMedia = _lastMedia with { IsPlaying = nextPlaying };
+                HoverPlayGlyph.Text = nextPlaying ? IcPause : IcPlay;
+                HoverEq.Running = nextPlaying;
+                HoverEq.Visibility = Visibility.Visible;
+                if (nextPlaying && _islandState != IslandVisualState.Collapsed)
+                    _spectrum.Start();
+                else
+                    _spectrum.Stop();
+            }
+            _ = App.Media?.PlayPauseAsync();
+        }
+        catch { }
     }
 
     private void OnNextClick(object sender, RoutedEventArgs e)
@@ -2233,6 +3032,818 @@ public partial class BarWindow : Window, IDisposable
         var now = DateTime.Now;
         CollapsedClock.Text = now.ToString("HH:mm");
         CollapsedDate.Text = now.ToString("ddd d MMM");
+    }
+
+    // ---------------------------------------------------------------- search bar with tab commands
+
+    public void ToggleSearch()
+    {
+        if (_islandState == IslandVisualState.Search)
+            CloseSearch();
+        else
+            OpenSearch();
+    }
+
+    public void OpenSearch()
+    {
+        _prevForegroundHwnd = NativeMethods.GetForegroundWindow();
+        EnsureOnCursorMonitor();
+        SetIslandState(IslandVisualState.Search, IslandMetric.None, force: true);
+
+        double targetW = Math.Min(660.0, _winW * 0.94);
+        AnimateIsland(targetW, 58.0);
+
+        SearchInput.Text = "";
+        SearchGhostText.Inlines.Clear();
+        _ghostApp = null;
+        _ghostRemainder = "";
+        _searchResults.Clear();
+        SearchResultsList.Children.Clear();
+        SearchResultsSection.Visibility = Visibility.Collapsed;
+        SearchResultsScroll.Height = double.NaN;
+        _selectedResultIndex = -1;
+        _armedRiskyCommand = false;
+        _armedCommandTitle = "";
+        RemoveAppTag();
+
+        AppDiscoveryService.Instance.RefreshInBackground();
+
+        Activate();
+        SearchInput.Focus();
+    }
+
+    public void CloseSearch()
+    {
+        _searchCts?.Cancel();
+        _searchCts = null;
+        _searchResults.Clear();
+        SearchResultsList.Children.Clear();
+        SearchResultsSection.Visibility = Visibility.Collapsed;
+        SearchResultsScroll.Height = double.NaN;
+        SearchGhostText.Inlines.Clear();
+        _ghostApp = null;
+        _ghostRemainder = "";
+        _selectedResultIndex = -1;
+        _armedRiskyCommand = false;
+        _armedCommandTitle = "";
+        RemoveAppTag();
+
+        SetIslandState(IslandVisualState.Collapsed, IslandMetric.None, force: true);
+
+        if (_prevForegroundHwnd != IntPtr.Zero)
+        {
+            NativeMethods.SetForegroundWindow(_prevForegroundHwnd);
+            _prevForegroundHwnd = IntPtr.Zero;
+        }
+    }
+
+    private void EnsureOnCursorMonitor()
+    {
+        NativeMethods.GetCursorPos(out var pt);
+        var monitors = NativeMethods.GetMonitors();
+        if (monitors.Count == 0) return;
+        var mon = monitors.FirstOrDefault(m =>
+            pt.X >= m.Bounds.Left && pt.X < m.Bounds.Right &&
+            pt.Y >= m.Bounds.Top && pt.Y < m.Bounds.Bottom) ?? monitors[0];
+
+        double scale = 1.0;
+        try
+        {
+            if (NativeMethods.GetDpiForMonitor(mon.Handle, NativeMethods.MDT_EFFECTIVE_DPI, out uint dpiX, out _) == 0)
+                scale = dpiX / 96.0;
+        }
+        catch { }
+
+        int workW = mon.WorkArea.Right - mon.WorkArea.Left;
+        int workH = mon.WorkArea.Bottom - mon.WorkArea.Top;
+        _winW = workW / scale;
+        _winH = workH / scale;
+
+        Width = _winW;
+        Height = _winH;
+        NativeMethods.SetWindowPos(_hwnd, NativeMethods.HWND_TOPMOST,
+            mon.WorkArea.Left, mon.WorkArea.Top,
+            workW, workH,
+            NativeMethods.SWP_NOACTIVATE);
+    }
+
+    private void ActivateAppTag(AppInfo app)
+    {
+        _activeTag = app;
+        SearchAppTagName.Text = app.Name;
+        if (app.Icon != null)
+        {
+            SearchAppTagIcon.Source = app.Icon;
+            SearchAppTagIcon.Visibility = Visibility.Visible;
+            SearchAppTagLetter.Visibility = Visibility.Collapsed;
+        }
+        else
+        {
+            SearchAppTagLetter.Text = app.Name.Length > 0 ? char.ToUpperInvariant(app.Name[0]).ToString() : "•";
+            SearchAppTagLetter.Visibility = Visibility.Visible;
+            SearchAppTagIcon.Visibility = Visibility.Collapsed;
+        }
+        SearchAppTag.Visibility = Visibility.Visible;
+
+        SearchInput.Text = "";
+        SearchPlaceholder.Text = GetPlaceholderForApp(app);
+        SearchPlaceholder.Visibility = Visibility.Visible;
+        SearchGhostText.Inlines.Clear();
+        _ghostApp = null;
+        _ghostRemainder = "";
+
+        // Empty input with active tag displays only the search bar
+        SearchResultsSection.Visibility = Visibility.Collapsed;
+        SearchResultsList.Children.Clear();
+        _searchResults.Clear();
+        _selectedResultIndex = -1;
+        AnimateIslandHeight(58.0);
+    }
+
+    private void RemoveAppTag()
+    {
+        _activeTag = null;
+        SearchAppTag.Visibility = Visibility.Collapsed;
+        SearchAppTagIcon.Source = null;
+        SearchPlaceholder.Text = "Search apps, files, commands...";
+    }
+
+    private static string GetPlaceholderForApp(AppInfo app)
+    {
+        string name = app.Name.ToLowerInvariant();
+        if (name.Contains("chrome") || name.Contains("edge") || name.Contains("firefox") || name.Contains("browser"))
+            return "Search Google or enter URL...";
+        if (name.Contains("terminal") || name.Contains("powershell") || name.Contains("cmd"))
+            return "Run command or script...";
+        if (name.Contains("code") || name.Contains("visual studio"))
+            return "Open folder or file...";
+        if (name.Contains("spotify") || name.Contains("music"))
+            return "Search songs, albums or commands...";
+        if (name.Contains("explorer") || name.Contains("files"))
+            return "Open folder or path...";
+        return "Type a command...";
+    }
+
+    private void OnSearchInputChanged(object sender, TextChangedEventArgs e)
+    {
+        if (_islandState != IslandVisualState.Search) return;
+
+        string text = SearchInput.Text;
+        SearchPlaceholder.Visibility = string.IsNullOrEmpty(text) ? Visibility.Visible : Visibility.Collapsed;
+        _armedRiskyCommand = false;
+        _armedCommandTitle = "";
+
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            SearchGhostText.Inlines.Clear();
+            _ghostApp = null;
+            _ghostRemainder = "";
+            _searchCts?.Cancel();
+            _searchCts = null;
+            _searchResults.Clear();
+            _selectedResultIndex = -1;
+            SearchResultsList.Children.Clear();
+            SearchResultsSection.Visibility = Visibility.Collapsed;
+            SearchResultsScroll.Height = double.NaN;
+            AnimateIslandHeight(58.0);
+            return;
+        }
+
+        UpdateSearchResults(text);
+    }
+
+    private void OnSearchInputPreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (_islandState != IslandVisualState.Search) return;
+
+        if (e.Key == Key.Escape)
+        {
+            e.Handled = true;
+            CloseSearch();
+            return;
+        }
+
+        if (e.Key == Key.Down)
+        {
+            e.Handled = true;
+            _armedRiskyCommand = false;
+            _armedCommandTitle = "";
+            if (_searchResults.Count > 0)
+            {
+                _selectedResultIndex = (_selectedResultIndex + 1) % _searchResults.Count;
+                UpdateRowSelections();
+                ScrollSelectedIntoView();
+            }
+            return;
+        }
+
+        if (e.Key == Key.Up)
+        {
+            e.Handled = true;
+            _armedRiskyCommand = false;
+            _armedCommandTitle = "";
+            if (_searchResults.Count > 0)
+            {
+                _selectedResultIndex = (_selectedResultIndex - 1 + _searchResults.Count) % _searchResults.Count;
+                UpdateRowSelections();
+                ScrollSelectedIntoView();
+            }
+            return;
+        }
+
+        if (e.Key == Key.Tab)
+        {
+            e.Handled = true;
+            if (_ghostApp != null)
+            {
+                ActivateAppTag(_ghostApp);
+                return;
+            }
+            if (_selectedResultIndex >= 0 && _selectedResultIndex < _searchResults.Count)
+            {
+                var sel = _searchResults[_selectedResultIndex];
+                if (sel.Category == SearchCategory.Apps && !string.IsNullOrEmpty(sel.AppId))
+                {
+                    var app = AppDiscoveryService.Instance.GetApps().FirstOrDefault(a => a.AppId.Equals(sel.AppId, StringComparison.OrdinalIgnoreCase));
+                    if (app != null)
+                    {
+                        ActivateAppTag(app);
+                        return;
+                    }
+                }
+            }
+            return;
+        }
+
+        if (e.Key == Key.Back && string.IsNullOrEmpty(SearchInput.Text) && _activeTag != null)
+        {
+            e.Handled = true;
+            string restored = _activeTag.Name;
+            RemoveAppTag();
+            SearchInput.Text = restored;
+            SearchInput.CaretIndex = restored.Length;
+            return;
+        }
+
+        if (e.Key == Key.Enter)
+        {
+            e.Handled = true;
+            if (_selectedResultIndex >= 0 && _selectedResultIndex < _searchResults.Count)
+            {
+                ExecuteResult(_searchResults[_selectedResultIndex]);
+            }
+            else if (_searchResults.Count > 0)
+            {
+                ExecuteResult(_searchResults[0]);
+            }
+            else if (!string.IsNullOrWhiteSpace(SearchInput.Text))
+            {
+                ExecuteWebSearch(SearchInput.Text.Trim());
+            }
+            return;
+        }
+    }
+
+    private void UpdateSearchResults(string text)
+    {
+        string query = text.Trim();
+        _searchResults.Clear();
+
+        if (_activeTag != null)
+        {
+            SearchGhostText.Inlines.Clear();
+            _ghostApp = null;
+            _ghostRemainder = "";
+
+            var scoped = AppCommandRegistry.GetScopedCommands(_activeTag, query);
+            _searchResults.AddRange(scoped);
+            _selectedResultIndex = _searchResults.Count > 0 ? 0 : -1;
+            RenderResultRows();
+            return;
+        }
+
+        // 1. Ghost completion & Apps
+        var allApps = AppDiscoveryService.Instance.GetApps();
+        AppInfo? topPrefixApp = null;
+        var matchedApps = new List<(AppInfo App, int Score, List<int> MatchedIndices)>();
+
+        foreach (var app in allApps)
+        {
+            var match = FuzzyMatcher.Match(app.Name, query, app.LaunchCount);
+            if (!match.Matched)
+            {
+                foreach (var alias in app.Aliases)
+                {
+                    var aliasMatch = FuzzyMatcher.Match(alias, query, app.LaunchCount);
+                    if (aliasMatch.Matched && aliasMatch.Score > match.Score)
+                    {
+                        match = aliasMatch;
+                    }
+                }
+            }
+
+            if (match.Matched)
+            {
+                matchedApps.Add((app, match.Score, match.MatchedIndices));
+            }
+
+            if (topPrefixApp == null && app.Name.StartsWith(query, StringComparison.OrdinalIgnoreCase))
+            {
+                topPrefixApp = app;
+            }
+        }
+
+        // Update Ghost text
+        if (topPrefixApp != null && topPrefixApp.Name.Length > text.Length)
+        {
+            _ghostApp = topPrefixApp;
+            _ghostRemainder = topPrefixApp.Name.Substring(text.Length);
+            SearchGhostText.Inlines.Clear();
+            SearchGhostText.Inlines.Add(new Run(text) { Foreground = Brushes.Transparent });
+            SearchGhostText.Inlines.Add(new Run(_ghostRemainder) { Foreground = new SolidColorBrush(Color.FromArgb(90, 255, 255, 255)) });
+        }
+        else
+        {
+            SearchGhostText.Inlines.Clear();
+            _ghostApp = null;
+            _ghostRemainder = "";
+        }
+
+        // Priority 1: Calculator / Converter
+        var (evalOk, evalRes, evalSub) = ExpressionEvaluator.TryEvaluate(query);
+        if (evalOk)
+        {
+            string capturedRes = evalRes;
+            _searchResults.Add(new SearchResult
+            {
+                Title = evalRes,
+                Subtitle = evalSub,
+                Category = SearchCategory.Calculator,
+                FallbackLetter = "=",
+                FallbackColor = Color.FromRgb(0x2F, 0xD2, 0xB0),
+                KeyboardHint = "Enter copy",
+                Action = () =>
+                {
+                    try
+                    {
+                        Clipboard.SetText(capturedRes);
+                        ShowActionSuccess($"✓ Copied {capturedRes}");
+                    }
+                    catch { }
+                }
+            });
+        }
+
+        // Priority 2: Apps, up to 4
+        matchedApps.Sort((a, b) => b.Score.CompareTo(a.Score));
+        foreach (var (app, score, indices) in matchedApps.Take(4))
+        {
+            var capturedApp = app;
+            _searchResults.Add(new SearchResult
+            {
+                Title = app.Name,
+                Subtitle = app.ExePath,
+                Category = SearchCategory.Apps,
+                Icon = app.Icon,
+                FallbackLetter = app.Name.Length > 0 ? char.ToUpperInvariant(app.Name[0]).ToString() : "A",
+                KeyboardHint = "Tab commands \u00B7 Enter open",
+                Score = score,
+                MatchedIndices = indices,
+                AppId = app.AppId,
+                ExePath = app.ExePath,
+                Action = () =>
+                {
+                    try
+                    {
+                        AppDiscoveryService.Instance.RecordLaunch(capturedApp.AppId);
+                        Process.Start(new ProcessStartInfo(capturedApp.ExePath) { UseShellExecute = true });
+                        ShowActionSuccess($"✓ Opened {capturedApp.Name}");
+                    }
+                    catch { }
+                }
+            });
+        }
+
+        // Priority 3: Commands, up to 3
+        var sysCmds = GetSystemCommands(query);
+        _searchResults.AddRange(sysCmds.Take(3));
+
+        // Priority 5: Web Search fallback
+        _searchResults.Add(new SearchResult
+        {
+            Title = $"Search Google for \"{query}\"",
+            Subtitle = "Open in default browser",
+            Category = SearchCategory.Web,
+            FallbackLetter = "G",
+            FallbackColor = Color.FromRgb(0x42, 0x85, 0xF4),
+            KeyboardHint = "Enter",
+            Action = () => ExecuteWebSearch(query)
+        });
+
+        _selectedResultIndex = _searchResults.Count > 0 ? 0 : -1;
+        RenderResultRows();
+
+        // Priority 4: Files from Windows Search index (up to 3, async with debounce)
+        _searchCts?.Cancel();
+        _searchCts = new CancellationTokenSource();
+        var token = _searchCts.Token;
+        _ = Task.Run(async () =>
+        {
+            var files = await WindowsSearchService.SearchFilesAsync(query, token);
+            if (token.IsCancellationRequested || files.Count == 0) return;
+
+            _ = Dispatcher.BeginInvoke(() =>
+            {
+                if (token.IsCancellationRequested || _islandState != IslandVisualState.Search) return;
+
+                int insertIdx = _searchResults.FindIndex(r => r.Category == SearchCategory.Web);
+                if (insertIdx < 0) insertIdx = _searchResults.Count;
+
+                foreach (var f in files.Take(3))
+                {
+                    _searchResults.Insert(insertIdx++, f);
+                }
+                RenderResultRows();
+            });
+        });
+    }
+
+    private List<SearchResult> GetSystemCommands(string query)
+    {
+        var list = new List<(SearchResult Item, int Score)>();
+        var candidates = new (string Title, string Subtitle, bool IsRisky, Action Action)[]
+        {
+            ("Lock PC", "Lock Windows workstation", false, () => { try { Process.Start(new ProcessStartInfo("rundll32.exe", "user32.dll,LockWorkStation") { UseShellExecute = true }); ShowActionSuccess("✓ Locked PC"); } catch { } }),
+            ("Sleep", "Put computer to sleep", false, () => { try { Process.Start(new ProcessStartInfo("rundll32.exe", "powrprof.dll,SetSuspendState 0,1,0") { UseShellExecute = true }); ShowActionSuccess("✓ Sleep"); } catch { } }),
+            ("Restart", "Restart computer", true, () => { try { Process.Start(new ProcessStartInfo("shutdown.exe", "/r /t 0") { UseShellExecute = true, CreateNoWindow = true }); ShowActionSuccess("✓ Restarting..."); } catch { } }),
+            ("Shut Down", "Turn off computer", true, () => { try { Process.Start(new ProcessStartInfo("shutdown.exe", "/s /t 0") { UseShellExecute = true, CreateNoWindow = true }); ShowActionSuccess("✓ Shutting down..."); } catch { } }),
+            ("Task Manager", "View running processes and performance", false, () => { try { Process.Start(new ProcessStartInfo("taskmgr.exe") { UseShellExecute = true }); ShowActionSuccess("✓ Opened Task Manager"); } catch { } }),
+            ("Windows Settings", "Open system settings", false, () => { try { Process.Start(new ProcessStartInfo("ms-settings:") { UseShellExecute = true }); ShowActionSuccess("✓ Opened Settings"); } catch { } }),
+            ("Terminal", "Open Windows Terminal", false, () => { try { Process.Start(new ProcessStartInfo("wt.exe") { UseShellExecute = true }); ShowActionSuccess("✓ Opened Terminal"); } catch { } }),
+        };
+
+        foreach (var (title, subtitle, isRisky, action) in candidates)
+        {
+            var match = FuzzyMatcher.Match(title, query);
+            if (match.Matched)
+            {
+                list.Add((new SearchResult
+                {
+                    Title = title,
+                    Subtitle = subtitle,
+                    Category = SearchCategory.Commands,
+                    FallbackLetter = title[0].ToString(),
+                    FallbackColor = Color.FromRgb(0x8A, 0x5C, 0xF6),
+                    IsRisky = isRisky,
+                    KeyboardHint = isRisky ? "Enter again to confirm" : "Enter",
+                    Score = match.Score,
+                    MatchedIndices = match.MatchedIndices,
+                    Action = action
+                }, match.Score));
+            }
+        }
+
+        list.Sort((a, b) => b.Score.CompareTo(a.Score));
+        return list.Select(x => x.Item).ToList();
+    }
+
+    private void ExecuteWebSearch(string query)
+    {
+        try
+        {
+            string url = $"https://www.google.com/search?q={Uri.EscapeDataString(query)}";
+            Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+            ShowActionSuccess("✓ Searched Google");
+        }
+        catch { }
+        CloseSearch();
+    }
+
+    private void ExecuteResult(SearchResult result)
+    {
+        if (result.IsRisky)
+        {
+            if (!_armedRiskyCommand || _armedCommandTitle != result.Title)
+            {
+                _armedRiskyCommand = true;
+                _armedCommandTitle = result.Title;
+                UpdateRowSelections();
+                return;
+            }
+        }
+
+        _armedRiskyCommand = false;
+        _armedCommandTitle = "";
+
+        try
+        {
+            result.Action?.Invoke();
+        }
+        catch (Exception ex)
+        {
+            Log.Debug("Failed to execute search result", ("error", ex.Message));
+        }
+
+        CloseSearch();
+    }
+
+    private void RenderResultRows()
+    {
+        if (_searchResults.Count == 0)
+        {
+            SearchResultsSection.Visibility = Visibility.Collapsed;
+            SearchResultsList.Children.Clear();
+            SearchResultsScroll.Height = double.NaN;
+            AnimateIslandHeight(58.0);
+            return;
+        }
+
+        SearchResultsSection.Visibility = Visibility.Visible;
+        SearchResultsList.Children.Clear();
+
+        var groups = _searchResults.GroupBy(r => r.Category);
+        int itemIndex = 0;
+        foreach (var group in groups)
+        {
+            string headerTitle = group.Key switch
+            {
+                SearchCategory.Calculator => "CALCULATOR",
+                SearchCategory.Apps => "APPLICATIONS",
+                SearchCategory.Commands => "COMMANDS",
+                SearchCategory.Files => "FILES",
+                SearchCategory.Web => "WEB SEARCH",
+                _ => group.Key.ToString().ToUpperInvariant()
+            };
+
+            var headerBorder = new Border
+            {
+                Height = 22,
+                Margin = new Thickness(8, itemIndex == 0 ? 2 : 6, 8, 2)
+            };
+            var headerText = new TextBlock
+            {
+                Text = headerTitle,
+                FontSize = 10,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = (Brush)FindResource("WdbTextMutedBrush"),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            headerBorder.Child = headerText;
+            SearchResultsList.Children.Add(headerBorder);
+
+            foreach (var item in group)
+            {
+                int currentIndex = itemIndex++;
+                var rowBorder = CreateResultRowBorder(item, currentIndex);
+                SearchResultsList.Children.Add(rowBorder);
+            }
+        }
+
+        SearchResultsSection.UpdateLayout();
+        double desiredH = SearchResultsList.ActualHeight;
+        if (desiredH <= 0) desiredH = _searchResults.Count * 44 + 40;
+        double scrollH = Math.Min(330, desiredH + 10);
+        SearchResultsScroll.Height = scrollH;
+        double targetIslandH = 58 + 1 + scrollH + 16;
+        AnimateIslandHeight(targetIslandH);
+    }
+
+    private Border CreateResultRowBorder(SearchResult item, int index)
+    {
+        bool isSel = index == _selectedResultIndex;
+        var rowBorder = new Border
+        {
+            Height = 44,
+            CornerRadius = new CornerRadius(8),
+            Background = isSel ? new SolidColorBrush(Color.FromArgb(26, 255, 255, 255)) : Brushes.Transparent,
+            Margin = new Thickness(0, 1, 0, 1),
+            Padding = new Thickness(10, 0, 12, 0),
+            Tag = index,
+            Cursor = Cursors.Hand
+        };
+
+        var grid = new Grid { VerticalAlignment = VerticalAlignment.Center };
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+        // 1. Icon (28px rounded)
+        var iconBorder = new Border
+        {
+            Width = 28,
+            Height = 28,
+            CornerRadius = new CornerRadius(7),
+            Margin = new Thickness(0, 0, 10, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+            ClipToBounds = true
+        };
+
+        if (item.Icon != null)
+        {
+            iconBorder.Child = new Image
+            {
+                Source = item.Icon,
+                Width = 22,
+                Height = 22,
+                Stretch = Stretch.Uniform,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+        }
+        else
+        {
+            iconBorder.Background = new SolidColorBrush(item.FallbackColor ?? Color.FromRgb(70, 70, 80));
+            iconBorder.Child = new TextBlock
+            {
+                Text = item.FallbackLetter ?? "•",
+                FontSize = 13,
+                FontWeight = FontWeights.Bold,
+                Foreground = Brushes.White,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+        }
+        Grid.SetColumn(iconBorder, 0);
+        grid.Children.Add(iconBorder);
+
+        // 2. Title & Subtitle
+        var textStack = new StackPanel
+        {
+            Orientation = Orientation.Vertical,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+
+        var titleBlock = new TextBlock
+        {
+            FontSize = 14,
+            FontWeight = FontWeights.SemiBold,
+            TextTrimming = TextTrimming.CharacterEllipsis
+        };
+        RenderHighlightedText(titleBlock, item.Title, item.MatchedIndices);
+        textStack.Children.Add(titleBlock);
+
+        var subtitleBlock = new TextBlock
+        {
+            FontSize = 11,
+            FontFamily = new FontFamily("Consolas, Cascadia Code, monospace"),
+            Foreground = (Brush)FindResource("WdbTextMutedBrush"),
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            Text = item.Subtitle
+        };
+        textStack.Children.Add(subtitleBlock);
+
+        Grid.SetColumn(textStack, 1);
+        grid.Children.Add(textStack);
+
+        // 3. Keyboard Hint (Selected row only)
+        var hintBlock = new TextBlock
+        {
+            FontSize = 11,
+            FontFamily = new FontFamily("Consolas, Cascadia Code, monospace"),
+            Foreground = (Brush)FindResource("WdbTextMutedBrush"),
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(10, 0, 0, 0),
+            Text = GetItemHint(item),
+            Visibility = isSel ? Visibility.Visible : Visibility.Collapsed
+        };
+        Grid.SetColumn(hintBlock, 2);
+        grid.Children.Add(hintBlock);
+
+        rowBorder.Child = grid;
+
+        rowBorder.MouseEnter += (s, e) =>
+        {
+            if (s is Border b && b.Tag is int idx)
+            {
+                _selectedResultIndex = idx;
+                _armedRiskyCommand = false;
+                _armedCommandTitle = "";
+                UpdateRowSelections();
+            }
+        };
+
+        rowBorder.MouseDown += (s, e) =>
+        {
+            if (e.ChangedButton == MouseButton.Left)
+            {
+                e.Handled = true;
+                ExecuteResult(item);
+            }
+        };
+
+        return rowBorder;
+    }
+
+    private string GetItemHint(SearchResult item)
+    {
+        if (item.IsRisky)
+        {
+            if (_armedRiskyCommand && _armedCommandTitle == item.Title)
+                return "Enter again to confirm";
+            return "Enter";
+        }
+        if (item.Category == SearchCategory.Apps)
+            return "Tab commands \u00B7 Enter open";
+        return item.KeyboardHint ?? "Enter";
+    }
+
+    private void RenderHighlightedText(TextBlock tb, string fullText, List<int>? matchedIndices)
+    {
+        tb.Inlines.Clear();
+        if (matchedIndices == null || matchedIndices.Count == 0)
+        {
+            tb.Inlines.Add(new Run(fullText) { Foreground = (Brush)FindResource("WdbTextBrush") });
+            return;
+        }
+
+        var matchSet = new HashSet<int>(matchedIndices);
+        var accentBrush = (Brush)FindResource("WdbAccentBrush");
+        var textBrush = (Brush)FindResource("WdbTextBrush");
+
+        int i = 0;
+        while (i < fullText.Length)
+        {
+            bool isMatch = matchSet.Contains(i);
+            int start = i;
+            while (i < fullText.Length && matchSet.Contains(i) == isMatch)
+            {
+                i++;
+            }
+            string part = fullText.Substring(start, i - start);
+            if (isMatch)
+            {
+                tb.Inlines.Add(new Run(part)
+                {
+                    Foreground = accentBrush,
+                    FontWeight = FontWeights.Bold
+                });
+            }
+            else
+            {
+                tb.Inlines.Add(new Run(part)
+                {
+                    Foreground = textBrush
+                });
+            }
+        }
+    }
+
+    private void UpdateRowSelections()
+    {
+        foreach (UIElement child in SearchResultsList.Children)
+        {
+            if (child is Border b && b.Tag is int idx)
+            {
+                bool isSel = idx == _selectedResultIndex;
+                b.Background = isSel ? new SolidColorBrush(Color.FromArgb(26, 255, 255, 255)) : Brushes.Transparent;
+                if (b.Child is Grid grid && grid.Children.Count >= 3 && grid.Children[2] is TextBlock hintBlock)
+                {
+                    hintBlock.Visibility = isSel ? Visibility.Visible : Visibility.Collapsed;
+                    if (isSel && idx >= 0 && idx < _searchResults.Count)
+                    {
+                        hintBlock.Text = GetItemHint(_searchResults[idx]);
+                    }
+                }
+            }
+        }
+    }
+
+    private void ScrollSelectedIntoView()
+    {
+        foreach (UIElement child in SearchResultsList.Children)
+        {
+            if (child is Border b && b.Tag is int idx && idx == _selectedResultIndex)
+            {
+                b.BringIntoView();
+                break;
+            }
+        }
+    }
+
+    private void AnimateIslandHeight(double targetH)
+    {
+        if (_cfg.ReduceMotion)
+        {
+            ApplyH(targetH);
+            return;
+        }
+        _anim.Animate("h", _currentH, targetH, ApplyH);
+    }
+
+    private void ShowActionSuccess(string message)
+    {
+        _actionSuccessTimer?.Stop();
+        CollapsedTitle.Text = message;
+        _actionSuccessTimer ??= new DispatcherTimer { Interval = TimeSpan.FromSeconds(2.6) };
+        _actionSuccessTimer.Tick -= OnActionSuccessTick;
+        _actionSuccessTimer.Tick += OnActionSuccessTick;
+        _actionSuccessTimer.Start();
+    }
+
+    private void OnActionSuccessTick(object? sender, EventArgs e)
+    {
+        _actionSuccessTimer?.Stop();
+        UpdateCollapsed();
     }
 
 }

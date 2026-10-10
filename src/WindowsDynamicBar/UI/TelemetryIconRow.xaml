@@ -9,7 +9,7 @@
     <WrapPanel Width="175" HorizontalAlignment="Center" VerticalAlignment="Center">
 
         <Grid x:Name="CpuCell" Width="46" Height="46" Margin="0,0,10.5,10.5" Background="Transparent" Cursor="Hand">
-            <local:RingGauge x:Name="CpuRing" Thickness="2.6" />
+            <local:RingGauge x:Name="CpuRing" Thickness="3.0" />
             <Border x:Name="CpuBorder" Width="38" Height="38" CornerRadius="19"
                     HorizontalAlignment="Center" VerticalAlignment="Center"
                     Background="{DynamicResource WdbDimBrush}"
@@ -24,7 +24,7 @@
         </Grid>
 
         <Grid x:Name="GpuCell" Width="46" Height="46" Margin="0,0,10.5,10.5" Background="Transparent" Cursor="Hand">
-            <local:RingGauge x:Name="GpuRing" Thickness="2.6" />
+            <local:RingGauge x:Name="GpuRing" Thickness="3.0" />
             <Border x:Name="GpuBorder" Width="38" Height="38" CornerRadius="19"
                     HorizontalAlignment="Center" VerticalAlignment="Center"
                     Background="{DynamicResource WdbDimBrush}"
@@ -39,7 +39,7 @@
         </Grid>
 
         <Grid x:Name="RamCell" Width="46" Height="46" Margin="0,0,10.5,10.5" Background="Transparent" Cursor="Hand">
-            <local:RingGauge x:Name="RamRing" Thickness="2.6" />
+            <local:RingGauge x:Name="RamRing" Thickness="3.0" />
             <Border x:Name="RamBorder" Width="38" Height="38" CornerRadius="19"
                     HorizontalAlignment="Center" VerticalAlignment="Center"
                     Background="{DynamicResource WdbDimBrush}"
@@ -54,7 +54,7 @@
         </Grid>
 
         <Grid x:Name="MirrorCell" Width="46" Height="46" Margin="0,0,10.5,10.5" Background="Transparent" Cursor="Hand">
-            <local:RingGauge x:Name="MirrorRing" Thickness="2.6" RingColor="#E5484D" />
+            <local:RingGauge x:Name="MirrorRing" Thickness="3.0" RingColor="#E5484D" />
             <Border x:Name="MirrorBorder" Width="38" Height="38" CornerRadius="19"
                     HorizontalAlignment="Center" VerticalAlignment="Center"
                     Background="{DynamicResource WdbDimBrush}"
@@ -69,7 +69,7 @@
         </Grid>
 
         <Grid x:Name="NetCell" Width="46" Height="46" Margin="0,0,10.5,10.5" Background="Transparent" Cursor="Hand">
-            <local:RingGauge x:Name="NetRing" Thickness="2.6" RingColor="#6FA8DC" />
+            <local:RingGauge x:Name="NetRing" Thickness="3.0" RingColor="#6FA8DC" />
             <Border x:Name="NetBorder" Width="38" Height="38" CornerRadius="19"
                     HorizontalAlignment="Center" VerticalAlignment="Center"
                     Background="{DynamicResource WdbDimBrush}"
@@ -84,7 +84,7 @@
         </Grid>
 
         <Grid x:Name="WeatherCell" Width="46" Height="46" Margin="0,0,10.5,0" Background="Transparent" Cursor="Hand">
-            <local:RingGauge x:Name="WeatherRing" Thickness="2.6" RingColor="#E8B04B" />
+            <local:RingGauge x:Name="WeatherRing" Thickness="3.0" RingColor="#E8B04B" />
             <Border x:Name="WeatherBorder" Width="38" Height="38" CornerRadius="19"
                     HorizontalAlignment="Center" VerticalAlignment="Center"
                     Background="{DynamicResource WdbDimBrush}"

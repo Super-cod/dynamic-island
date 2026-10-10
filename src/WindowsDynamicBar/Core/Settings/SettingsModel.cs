@@ -76,6 +76,7 @@ public sealed class SettingsModel
     public string HotkeyToggle { get; set; } = "Ctrl+Alt+Space";
     public string HotkeyMedia { get; set; } = "Ctrl+Alt+M";
     public string HotkeyTimer { get; set; } = "Ctrl+Alt+T";
+    public string HotkeySearch { get; set; } = "Ctrl+Space";
 
     // ---- AI (disabled by default) ----
     public bool AiEnabled { get; set; } = false;
