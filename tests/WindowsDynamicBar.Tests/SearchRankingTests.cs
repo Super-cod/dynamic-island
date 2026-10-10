@@ -1,4 +1,6 @@
 using WindowsDynamicBar.Core.Search;
+using WindowsDynamicBar.Core.Media;
+using System.IO;
 
 namespace WindowsDynamicBar.Tests;
 
@@ -21,6 +23,33 @@ internal static partial class Program
         Run("Compose: weak matches cut below a strong top hit", TestComposeCutsNoise);
         Run("Compose: web row last and only as a fallback", TestComposeWebRow);
         Run("File filter: hidden app/dependency folders", TestFileFolderFilter);
+        Run("Artwork filter: app logo (transparent corners) is not cover art", TestArtworkLogoFilter);
+    }
+
+    private static byte[] Png(int w, int h, bool transparentCorners)
+    {
+        var px = new byte[w * h * 4];
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+            {
+                int i = (y * w + x) * 4;
+                bool corner = transparentCorners && (x < 8 || x >= w - 8) && (y < 8 || y >= h - 8);
+                px[i] = 200; px[i + 1] = 60; px[i + 2] = 40; px[i + 3] = corner ? (byte)0 : (byte)255;
+            }
+        var bmp = System.Windows.Media.Imaging.BitmapSource.Create(w, h, 96, 96, System.Windows.Media.PixelFormats.Bgra32, null, px, w * 4);
+        var enc = new System.Windows.Media.Imaging.PngBitmapEncoder();
+        enc.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bmp));
+        using var ms = new MemoryStream();
+        enc.Save(ms);
+        return ms.ToArray();
+    }
+
+    private static void TestArtworkLogoFilter()
+    {
+        Assert(AppIconHelper.IsArtworkTinyOrAppIcon(Png(256, 256, true), null), "square logo with transparent corners rejected");
+        Assert(!AppIconHelper.IsArtworkTinyOrAppIcon(Png(300, 300, false), null), "opaque square album art kept (Spotify)");
+        Assert(!AppIconHelper.IsArtworkTinyOrAppIcon(Png(320, 180, false), null), "opaque 16:9 video thumbnail kept (YouTube)");
+        Assert(AppIconHelper.IsArtworkTinyOrAppIcon(Png(32, 32, false), null), "tiny image rejected");
     }
 
     /// <summary>A Start menu like a real one: apps plus the usual junk shortcuts.</summary>

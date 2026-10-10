@@ -12,6 +12,7 @@ public partial class BarWindow
 {
     private static readonly Stopwatch TraceClock = Stopwatch.StartNew();
     private long _traceLastFrameMs = -1;
+    private bool _traceMusicBranch;
 
     [Conditional("DEBUG")]
     private void SearchTrace(string evt, params (string Key, object? Value)[] props)

@@ -3582,7 +3582,13 @@ public partial class BarWindow : Window, IDisposable
         var cfg = _cfg;   // kept in sync by ApplySettingsUi; Settings.Current deep-clones
         string? value = null;
 
-        if (IsMusicPlaying())
+        bool musicNow = IsMusicPlaying();
+        if (musicNow != _traceMusicBranch)
+        {
+            _traceMusicBranch = musicNow;
+            SearchTrace("collapsed shows", ("music", musicNow), ("timer", _lastTimer?.State), ("title", _lastMedia?.Title));
+        }
+        if (musicNow)
         {
             var m = _lastMedia ?? App.Media?.Current;
             if (m is not null)

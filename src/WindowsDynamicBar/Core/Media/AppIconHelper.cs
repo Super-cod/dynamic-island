@@ -288,6 +288,11 @@ public static class AppIconHelper
             if (frame.PixelWidth < minDimension || frame.PixelHeight < minDimension)
                 return true;
 
+            // A square image with fully transparent corners is an app logo, not cover art: browsers
+            // (Chrome) hand out their own icon as the thumbnail until a video's artwork is published.
+            if (frame.PixelWidth == frame.PixelHeight && HasTransparentCorners(frame))
+                return true;
+
             // Check if identical to app icon
             if (appIconBytes is not null && appIconBytes.Length > 0)
             {
@@ -308,6 +313,19 @@ public static class AppIconHelper
         }
 
         return false;
+    }
+
+    private static bool HasTransparentCorners(BitmapSource frame)
+    {
+        var bgra = new FormatConvertedBitmap(frame, PixelFormats.Bgra32, null, 0);
+        int w = bgra.PixelWidth, h = bgra.PixelHeight;
+        var px = new byte[4];
+        foreach (var (x, y) in new[] { (0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1) })
+        {
+            bgra.CopyPixels(new Int32Rect(x, y, 1, 1), px, 4, 0);
+            if (px[3] != 0) return false;
+        }
+        return true;
     }
 
     public static byte[]? BitmapSourceToBytes(BitmapSource bitmap)

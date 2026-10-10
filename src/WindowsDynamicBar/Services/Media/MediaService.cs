@@ -34,6 +34,14 @@ public sealed class MediaService : IDisposable
     private byte[]? _lastArtwork;
     private string? _lastKey;
     private string? _lastArtworkKey;
+    private int _buildGen;
+    private byte[]? _prevTrackArt;          // artwork of the track before the current one
+    private string _prevTrackAlbum = "";
+    private string _lastAlbum = "";
+    private DateTime _artPendingUntil;      // new track's artwork not confirmed yet
+    private static readonly TimeSpan ArtSettleWindow = TimeSpan.FromSeconds(6);
+    private int _noMediaToken;
+    private static readonly TimeSpan SessionGapGrace = TimeSpan.FromSeconds(2.5);
     private byte[]? _dominantFor;          // artwork the cached dominant colour was computed from
     private Color _dominantCached;
     private MediaInfo? _lastEmitted;
@@ -84,7 +92,7 @@ public sealed class MediaService : IDisposable
             _manager.SessionsChanged -= OnSessionsChanged;
             _manager.CurrentSessionChanged -= OnCurrentSessionChanged;
         }
-        HookSession(null);   // unhooks the session, stops the poll, emits "no media"
+        HookSession(null, immediate: true);   // unhooks the session, stops the poll, emits "no media"
         _manager = null;
     }
 
@@ -175,7 +183,7 @@ public sealed class MediaService : IDisposable
         HookSession(PickBestSession());
     }
 
-    private void HookSession(GlobalSystemMediaTransportControlsSession? session)
+    private void HookSession(GlobalSystemMediaTransportControlsSession? session, bool immediate = false)
     {
         if (_current is not null)
         {
@@ -184,14 +192,18 @@ public sealed class MediaService : IDisposable
             _current.TimelinePropertiesChanged -= OnTimeline;
         }
         _current = session;
+        int token = Interlocked.Increment(ref _noMediaToken);   // a new session cancels a pending "no media"
         if (_current is null)
         {
             _timelineTimer?.Stop();
-            _lastKey = null;
-            _lastArtwork = null;
-            _lastArtworkKey = null;
-            _dominantFor = null;
-            Emit(new MediaInfo("", "", "", "", false, TimeSpan.Zero, TimeSpan.Zero, null, 0));
+            if (immediate || _lastEmitted is null || string.IsNullOrEmpty(_lastEmitted.AppId)) { ClearToNoMedia(); return; }
+            // Chrome drops and recreates its media session between YouTube videos. Keep the current
+            // track (and the previous-artwork memory) through that gap; only a lasting gap is "no media".
+            MediaTrace("session gone, waiting");
+            _ = Task.Delay(SessionGapGrace).ContinueWith(_ =>
+            {
+                if (token == Volatile.Read(ref _noMediaToken) && _current is null) ClearToNoMedia();
+            }, TaskScheduler.Default);
             return;
         }
         _current.MediaPropertiesChanged += OnMediaProperties;
@@ -199,6 +211,16 @@ public sealed class MediaService : IDisposable
         _current.TimelinePropertiesChanged += OnTimeline;
         _ = RefreshAsync(showEvent: true);
         StartTimelineTimer();
+    }
+
+    private void ClearToNoMedia()
+    {
+        _lastKey = null;
+        _lastArtwork = null;
+        _lastArtworkKey = null;
+        _artPendingUntil = DateTime.MinValue;
+        _dominantFor = null;
+        Emit(new MediaInfo("", "", "", "", false, TimeSpan.Zero, TimeSpan.Zero, null, 0));
     }
 
     private async void OnMediaProperties(GlobalSystemMediaTransportControlsSession s, MediaPropertiesChangedEventArgs e)
@@ -270,35 +292,65 @@ public sealed class MediaService : IDisposable
 
     private async Task<MediaInfo?> BuildInfoAsync()
     {
-        if (_current is null) return null;
+        var session = _current;
+        if (session is null) return null;
+        // Events and the 1 s poll overlap; only the newest build may emit, so an older in-flight
+        // read can never put the previous track's metadata or artwork back on screen.
+        int gen = Interlocked.Increment(ref _buildGen);
         try
         {
-            var props = await _current.TryGetMediaPropertiesAsync();
-            var playback = _current.GetPlaybackInfo();
-            var timeline = _current.GetTimelineProperties();
+            var props = await session.TryGetMediaPropertiesAsync();
+            if (gen != Volatile.Read(ref _buildGen) || !ReferenceEquals(session, _current)) return null;
+
+            var playback = session.GetPlaybackInfo();
+            var timeline = session.GetTimelineProperties();
             bool playing = playback?.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing;
 
-            var identity = AppIconHelper.ResolveAppIdentity(_current.SourceAppUserModelId);
+            var identity = AppIconHelper.ResolveAppIdentity(session.SourceAppUserModelId);
 
             byte[]? art = _lastArtwork;
-            string artKey = $"{props.Title}|{props.Artist}|{_current.SourceAppUserModelId}";
+            string artKey = $"{props.Title}|{props.Artist}|{session.SourceAppUserModelId}";
             bool keyChanged = artKey != _lastArtworkKey;
-            if (keyChanged || art is null)
+            if (keyChanged)
             {
-                var fetched = await TryGetArtworkAsync();
+                // Browsers (YouTube) publish the new title before the new thumbnail: for a few
+                // seconds the previous track's artwork is treated as "not available yet".
+                _prevTrackArt = _lastArtwork ?? _prevTrackArt;
+                _prevTrackAlbum = _lastAlbum;
+                _artPendingUntil = DateTime.UtcNow + ArtSettleWindow;
+            }
+            bool pending = DateTime.UtcNow < _artPendingUntil;
+            if (keyChanged || art is null || pending)
+            {
+                // Thumbnail from the SAME properties snapshot as the title (no second, newer read).
+                var fetched = await TryGetArtworkAsync(props);
+                if (gen != Volatile.Read(ref _buildGen)) return null;
                 if (fetched is not null && AppIconHelper.IsArtworkTinyOrAppIcon(fetched, identity.IconBytes, 64))
                 {
                     // Do not show tiny artwork or app icon on disc
                     fetched = null;
                 }
 
+                bool sameAlbum = !string.IsNullOrEmpty(props.AlbumTitle) && props.AlbumTitle == _prevTrackAlbum;
+                if (fetched is not null && pending && !sameAlbum && SameBytes(fetched, _prevTrackArt))
+                    fetched = null;                               // still the old track's thumbnail
+                else if (fetched is not null)
+                    _artPendingUntil = DateTime.MinValue;         // new artwork confirmed
+                if (fetched is not null && SameBytes(fetched, _lastArtwork))
+                    fetched = _lastArtwork;                       // unchanged: keep the reference (no UI churn)
+
                 if (fetched is not null || keyChanged)
                 {
+                    if (!keyChanged && !ReferenceEquals(fetched, _lastArtwork)) MediaTrace("artwork arrived", ("title", props.Title));
                     _lastArtwork = fetched;
                     _lastArtworkKey = artKey;
                 }
                 art = _lastArtwork;
             }
+            _lastAlbum = props.AlbumTitle ?? "";
+            MediaTrace(keyChanged ? "track changed" : "build", ("title", props.Title), ("playing", playing),
+                ("art", art is null ? "none" : Convert.ToHexString(System.Security.Cryptography.SHA1.HashData(art))[..8]),
+                ("pending", pending));
 
             var duration = timeline.EndTime - timeline.StartTime;
             var position = timeline.Position - timeline.StartTime;
@@ -361,11 +413,17 @@ public sealed class MediaService : IDisposable
         return Math.Abs((next.Position - expected).TotalSeconds) > 1.5;
     }
 
-    private async Task<byte[]?> TryGetArtworkAsync()
+    private static bool SameBytes(byte[]? a, byte[]? b) =>
+        a is not null && b is not null && (ReferenceEquals(a, b) || a.AsSpan().SequenceEqual(b));
+
+    [Conditional("DEBUG")]
+    private static void MediaTrace(string evt, params (string Key, object? Value)[] props) =>
+        Log.Info("[media-trace] " + evt, props);
+
+    private static async Task<byte[]?> TryGetArtworkAsync(GlobalSystemMediaTransportControlsSessionMediaProperties props)
     {
         try
         {
-            var props = await _current!.TryGetMediaPropertiesAsync();
             var thumb = props.Thumbnail;
             if (thumb is null) return null;
             using var stream = await thumb.OpenReadAsync();
