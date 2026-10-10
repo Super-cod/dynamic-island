@@ -69,7 +69,7 @@ public sealed class TimerService : IDisposable
             _notified = false;
         }
         Persist();
-        _tick.Change(TimeSpan.Zero, TimeSpan.FromMilliseconds(250));
+        _tick.Change(TimeSpan.Zero, TimeSpan.FromMilliseconds(100));
         Emit();
         if (!announce) return;
         var duration = remaining;
@@ -101,7 +101,7 @@ public sealed class TimerService : IDisposable
             _state = TimerState.Running;
         }
         Persist();
-        _tick.Change(TimeSpan.Zero, TimeSpan.FromMilliseconds(250));
+        _tick.Change(TimeSpan.Zero, TimeSpan.FromMilliseconds(100));
         Emit();
     }
 
@@ -158,8 +158,10 @@ public sealed class TimerService : IDisposable
 
     public static string Format(TimeSpan ts)
     {
-        if (ts.TotalHours >= 1) return $"{(int)ts.TotalHours:D2}:{ts.Minutes:D2}:{ts.Seconds:D2}";
-        return $"{(int)ts.TotalMinutes:D2}:{ts.Seconds:D2}";
+        if (ts < TimeSpan.Zero) ts = TimeSpan.Zero;
+        var r = TimeSpan.FromSeconds(Math.Ceiling(ts.TotalSeconds));
+        if (r.TotalHours >= 1) return $"{(int)r.TotalHours:D2}:{r.Minutes:D2}:{r.Seconds:D2}";
+        return $"{(int)r.TotalMinutes:D2}:{r.Seconds:D2}";
     }
 
     private void Emit() => TimerChanged?.Invoke(Current);

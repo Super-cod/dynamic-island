@@ -16,9 +16,11 @@ public static class IslandStateMachine
     /// <param name="pointerInside">True while the pointer is anywhere in the island hover region.</param>
     /// <param name="metricUnderPointer">Metric whose icon is hovered, or None.</param>
     /// <param name="collapseElapsed">True once the leave-delay has elapsed (pointer has left the region).</param>
+    /// <param name="hoverPreview">True if hover preview is enabled; false if click mode is active.</param>
     public static (IslandVisualState State, IslandMetric Metric) Resolve(
         IslandVisualState current, IslandMetric currentMetric,
-        bool pointerInside, IslandMetric metricUnderPointer, bool collapseElapsed)
+        bool pointerInside, IslandMetric metricUnderPointer, bool collapseElapsed,
+        bool hoverPreview = true)
     {
         if (!pointerInside)
         {
@@ -27,17 +29,17 @@ public static class IslandStateMachine
             return (current, current is IslandVisualState.Detail ? currentMetric : IslandMetric.None);
         }
 
-        if (metricUnderPointer != IslandMetric.None)
+        if (metricUnderPointer != IslandMetric.None && hoverPreview)
         {
-            // Hovering an icon always opens (or switches) the detail panel for that metric.
+            // Hovering an icon opens the detail panel only when button hover preview is enabled.
             return (IslandVisualState.Detail, metricUnderPointer);
         }
 
-        // Inside the region but not on an icon: while a panel is open the pointer may be over
-        // the graph/stats — keep the panel open (moving icon -> panel must not close it).
+        // Inside the region: while a panel is open, keep the panel open.
         if (current == IslandVisualState.Detail)
             return (IslandVisualState.Detail, currentMetric);
 
+        // Hovering inside the dynamic island expands it to show the icon row.
         return (IslandVisualState.Expanded, IslandMetric.None);
     }
 

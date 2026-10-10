@@ -34,7 +34,8 @@
                             <ColumnDefinition Width="*" />
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
-                        <Border CornerRadius="4" Background="#FF101410" BorderBrush="#334A5A3E" BorderThickness="1" Height="24">
+                        <Border x:Name="CustomBorder" CornerRadius="4" Background="#FF101410" BorderBrush="#334A5A3E" BorderThickness="1" Height="24"
+                                Cursor="IBeam" MouseLeftButtonDown="OnCustomBorderMouseDown">
                             <Grid>
                                 <TextBlock x:Name="CustomHint" Text="custom: 90s, 12 min, 1h" Margin="7,0,0,0"
                                            VerticalAlignment="Center" FontFamily="Cascadia Mono, Consolas, Courier New"
@@ -42,16 +43,27 @@
                                 <TextBox x:Name="CustomBox" Background="Transparent" BorderThickness="0" Margin="4,0"
                                          VerticalAlignment="Center" FontFamily="Cascadia Mono, Consolas, Courier New"
                                          FontSize="10.5" Foreground="#E8E8DC" CaretBrush="#8AB478"
-                                         TextChanged="OnCustomChanged" PreviewKeyDown="OnCustomKeyDown" />
+                                         TextChanged="OnCustomChanged" PreviewKeyDown="OnCustomKeyDown"
+                                         PreviewMouseDown="OnCustomBoxPreviewMouseDown"
+                                         GotFocus="OnCustomBoxGotFocus" />
                             </Grid>
                         </Border>
-                        <Border x:Name="StartStop" Grid.Column="1" Margin="8,0,0,0" CornerRadius="4" Height="24"
-                                Padding="12,0" BorderThickness="1" BorderBrush="#8AB478" Cursor="Hand"
-                                Background="#FF000000" MouseLeftButtonUp="OnStartStopClick">
-                            <TextBlock x:Name="StartStopText" VerticalAlignment="Center"
-                                       FontFamily="Cascadia Mono, Consolas, Courier New" FontSize="10.5"
-                                       Foreground="#8AB478" />
-                        </Border>
+                        <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="8,0,0,0">
+                            <Border x:Name="PauseBtn" Margin="0,0,6,0" CornerRadius="4" Height="24"
+                                    Padding="10,0" BorderThickness="1" BorderBrush="#E8B04B" Cursor="Hand"
+                                    Background="#FF000000" Visibility="Collapsed" MouseLeftButtonUp="OnPauseClick">
+                                <TextBlock x:Name="PauseText" VerticalAlignment="Center"
+                                           FontFamily="Cascadia Mono, Consolas, Courier New" FontSize="10.5"
+                                           Foreground="#E8B04B" Text="pause" />
+                            </Border>
+                            <Border x:Name="StartStop" CornerRadius="4" Height="24"
+                                    Padding="12,0" BorderThickness="1" BorderBrush="#8AB478" Cursor="Hand"
+                                    Background="#FF000000" MouseLeftButtonUp="OnStartStopClick">
+                                <TextBlock x:Name="StartStopText" VerticalAlignment="Center"
+                                           FontFamily="Cascadia Mono, Consolas, Courier New" FontSize="10.5"
+                                           Foreground="#8AB478" Text="start" />
+                            </Border>
+                        </StackPanel>
                     </Grid>
                     <TextBlock x:Name="ErrorText" Margin="0,5,0,0" FontFamily="Cascadia Mono, Consolas, Courier New"
                                FontSize="10" Foreground="#D98A5B" />

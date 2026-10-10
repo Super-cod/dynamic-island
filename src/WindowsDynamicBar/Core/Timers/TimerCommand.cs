@@ -66,9 +66,14 @@ public static partial class TimerCommand
     }
 
     /// <summary>"10:00" for under an hour, "1:30:00" above.</summary>
-    public static string Format(TimeSpan d) => d.TotalHours >= 1
-        ? $"{(int)d.TotalHours}:{d.Minutes:D2}:{d.Seconds:D2}"
-        : $"{(int)d.TotalMinutes:D2}:{d.Seconds:D2}";
+    public static string Format(TimeSpan d)
+    {
+        if (d < TimeSpan.Zero) d = TimeSpan.Zero;
+        var r = TimeSpan.FromSeconds(Math.Ceiling(d.TotalSeconds));
+        return r.TotalHours >= 1
+            ? $"{(int)r.TotalHours}:{r.Minutes:D2}:{r.Seconds:D2}"
+            : $"{(int)r.TotalMinutes:D2}:{r.Seconds:D2}";
+    }
 
     /// <summary>Text for the dot-matrix countdown (4 digits + colon): "mm:ss", or "h:mm" from 1 hour.</summary>
     public static string DotText(TimeSpan remaining)

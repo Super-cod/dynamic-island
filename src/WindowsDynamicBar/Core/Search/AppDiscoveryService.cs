@@ -1,9 +1,12 @@
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.ComTypes;
+using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Media.Imaging;
 using WindowsDynamicBar.Core.Logging;
@@ -11,6 +14,11 @@ using WindowsDynamicBar.Core.Media;
 
 namespace WindowsDynamicBar.Core.Search;
 
+/// <summary>
+/// Start-menu app index for the search bar. Discovery (directory walk, shortcut resolution, icon
+/// extraction) only ever runs on a background thread; <see cref="GetApps"/> returns the in-memory
+/// snapshot and never blocks. The bar pre-loads it at startup, so keystrokes only rank memory.
+/// </summary>
 public sealed class AppDiscoveryService
 {
     private static readonly Lazy<AppDiscoveryService> Lazy = new(() => new AppDiscoveryService());
@@ -19,46 +27,56 @@ public sealed class AppDiscoveryService
     private readonly object _sync = new();
     private List<AppInfo> _apps = new();
     private Dictionary<string, int> _launchCounts = new(StringComparer.OrdinalIgnoreCase);
-    private bool _initialized;
+    private Dictionary<string, DateTime> _lastUsed = new(StringComparer.OrdinalIgnoreCase);
+    private int _refreshing;   // 1 while a background discovery runs
 
-    private readonly string _statsPath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "WindowsDynamicBar", "search_stats.json");
+    private static readonly string StatsDir = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "WindowsDynamicBar");
+    private readonly string _statsPath = Path.Combine(StatsDir, "search_stats.json");
+    private readonly string _recentPath = Path.Combine(StatsDir, "search_recent.json");
+
+    /// <summary>True once the first background discovery has finished.</summary>
+    public bool IsLoaded { get; private set; }
+
+    /// <summary>Raised (worker thread) after the first discovery finishes.</summary>
+    public event Action? Loaded;
 
     private AppDiscoveryService()
     {
         LoadStats();
     }
 
+    /// <summary>Snapshot of the index (empty until the first background load completes).</summary>
     public IReadOnlyList<AppInfo> GetApps()
     {
-        lock (_sync)
-        {
-            if (!_initialized)
-            {
-                _apps = DiscoverAppsInternal();
-                _initialized = true;
-            }
-            return _apps.ToList();
-        }
+        lock (_sync) return _apps;
     }
 
+    /// <summary>Re-scan on a worker thread. A scan already in flight is not duplicated.</summary>
     public void RefreshInBackground()
     {
+        if (Interlocked.Exchange(ref _refreshing, 1) == 1) return;
         Task.Run(() =>
         {
             try
             {
                 var discovered = DiscoverAppsInternal();
+                bool first;
                 lock (_sync)
                 {
                     _apps = discovered;
-                    _initialized = true;
+                    first = !IsLoaded;
+                    IsLoaded = true;
                 }
+                if (first) Loaded?.Invoke();
             }
             catch (Exception ex)
             {
-                Log.Debug("App discovery background refresh failed", ("error", ex.Message));
+                Log.Warning("App discovery failed", ("error", ex.Message));
+            }
+            finally
+            {
+                Volatile.Write(ref _refreshing, 0);
             }
         });
     }
@@ -69,11 +87,13 @@ public sealed class AppDiscoveryService
         lock (_sync)
         {
             _launchCounts[appIdOrName] = _launchCounts.GetValueOrDefault(appIdOrName, 0) + 1;
+            _lastUsed[appIdOrName] = DateTime.UtcNow;
             var app = _apps.FirstOrDefault(a => a.AppId.Equals(appIdOrName, StringComparison.OrdinalIgnoreCase) ||
                                                 a.Name.Equals(appIdOrName, StringComparison.OrdinalIgnoreCase));
             if (app is not null)
             {
                 app.LaunchCount = _launchCounts[appIdOrName];
+                app.LastUsedUtc = _lastUsed[appIdOrName];
             }
             SaveStats();
         }
@@ -89,31 +109,39 @@ public sealed class AppDiscoveryService
 
     private void LoadStats()
     {
+        _launchCounts = ReadJson<int>(_statsPath);
+        _lastUsed = ReadJson<DateTime>(_recentPath);
+    }
+
+    private static Dictionary<string, T> ReadJson<T>(string path)
+    {
+        var empty = new Dictionary<string, T>(StringComparer.OrdinalIgnoreCase);
+        if (!File.Exists(path)) return empty;
         try
         {
-            if (File.Exists(_statsPath))
-            {
-                string json = File.ReadAllText(_statsPath);
-                var dict = JsonSerializer.Deserialize<Dictionary<string, int>>(json);
-                if (dict is not null)
-                {
-                    _launchCounts = new Dictionary<string, int>(dict, StringComparer.OrdinalIgnoreCase);
-                }
-            }
+            var dict = JsonSerializer.Deserialize<Dictionary<string, T>>(File.ReadAllText(path));
+            return dict is null ? empty : new Dictionary<string, T>(dict, StringComparer.OrdinalIgnoreCase);
         }
-        catch { }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            Log.Debug("Search stats unreadable; starting fresh", ("path", path), ("error", ex.Message));
+            return empty;
+        }
     }
 
     private void SaveStats()
     {
         try
         {
-            string dir = Path.GetDirectoryName(_statsPath)!;
-            if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
-            string json = JsonSerializer.Serialize(_launchCounts, new JsonSerializerOptions { WriteIndented = true });
-            File.WriteAllText(_statsPath, json);
+            Directory.CreateDirectory(StatsDir);
+            var opts = new JsonSerializerOptions { WriteIndented = true };
+            File.WriteAllText(_statsPath, JsonSerializer.Serialize(_launchCounts, opts));
+            File.WriteAllText(_recentPath, JsonSerializer.Serialize(_lastUsed, opts));
         }
-        catch { }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Log.Debug("Search stats not saved", ("error", ex.Message));
+        }
     }
 
     private List<AppInfo> DiscoverAppsInternal()
@@ -127,17 +155,22 @@ public sealed class AppDiscoveryService
         ScanStartMenuDirectory(Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu), result);
         ScanStartMenuDirectory(Environment.GetFolderPath(Environment.SpecialFolder.StartMenu), result);
 
-        // Apply launch counts & aliases
+        // Apply launch counts, last-used times & aliases
         foreach (var app in result.Values)
         {
             if (_launchCounts.TryGetValue(app.AppId, out int cnt) || _launchCounts.TryGetValue(app.Name, out cnt))
-            {
                 app.LaunchCount = cnt;
-            }
+            if (_lastUsed.TryGetValue(app.AppId, out var lu) || _lastUsed.TryGetValue(app.Name, out lu))
+                app.LastUsedUtc = lu;
             AssignKnownAliases(app);
         }
 
-        return result.Values.OrderByDescending(a => a.LaunchCount).ThenBy(a => a.Name).ToList();
+        // Duplicate shortcuts of one app (same target exe): keep the most used, then the shortest name.
+        return result.Values
+            .GroupBy(a => string.IsNullOrEmpty(a.TargetPath) ? a.ExePath : a.TargetPath!, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.OrderByDescending(a => a.LaunchCount).ThenBy(a => a.Name.Length).First())
+            .OrderByDescending(a => a.LaunchCount).ThenBy(a => a.Name)
+            .ToList();
     }
 
     private void AddKnownCoreApps(Dictionary<string, AppInfo> result)
@@ -150,6 +183,7 @@ public sealed class AppDiscoveryService
             {
                 Name = name,
                 ExePath = exe,
+                TargetPath = exe,
                 AppId = appId,
                 Icon = icon,
                 Aliases = aliases.ToList()
@@ -164,9 +198,16 @@ public sealed class AppDiscoveryService
         if (File.Exists(chromePath))
             Add("Google Chrome", chromePath, "chrome", new[] { "chrome", "google chrome", "browser" });
 
-        // Terminal / PowerShell
+        // Windows Terminal when installed (wt.exe app-execution alias), else Windows PowerShell.
+        string wt = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), @"Microsoft\WindowsApps\wt.exe");
         string pwsh = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell\\v1.0\\powershell.exe");
-        Add("Terminal", pwsh, "terminal", new[] { "term", "cmd", "powershell", "windows terminal" });
+        if (File.Exists(wt))
+            Add("Terminal", wt, "terminal", new[] { "term", "windows terminal", "wt" });
+        else
+            Add("Windows PowerShell", pwsh, "terminal", new[] { "term", "powershell", "terminal" });
+
+        // Settings is a packaged app (no Start-menu .lnk); its URI is the launch target.
+        Add("Settings", "ms-settings:", "ms-settings", new[] { "windows settings" });
 
         // VS Code
         string codePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), @"Programs\Microsoft VS Code\Code.exe");
@@ -187,69 +228,91 @@ public sealed class AppDiscoveryService
 
     private void ScanStartMenuDirectory(string basePath, Dictionary<string, AppInfo> result)
     {
+        string progDir = Path.Combine(basePath, "Programs");
+        if (!Directory.Exists(progDir)) progDir = basePath;
+        if (!Directory.Exists(progDir)) return;
+
+        string[] lnkFiles;
+        try { lnkFiles = Directory.GetFiles(progDir, "*.lnk", SearchOption.AllDirectories); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Log.Debug("Start menu scan failed", ("dir", progDir), ("error", ex.Message));
+            return;
+        }
+
+        foreach (var lnk in lnkFiles)
+        {
+            string name = Path.GetFileNameWithoutExtension(lnk);
+            if (result.ContainsKey(name)) continue;
+            string? target = ShellLink.ResolveTarget(lnk);
+            if (AppFilters.IsJunk(name, target)) continue;
+
+            var info = new AppInfo
+            {
+                Name = name,
+                ExePath = lnk,
+                TargetPath = target,
+                AppId = lnk,
+                Icon = AppIconHelper.ExtractIconFromFile(lnk),
+            };
+            AssignKnownAliases(info);
+            result[name] = info;
+        }
+    }
+
+    /// <summary>Common short names launchers accept ("ff" for Firefox, "code" for VS Code).</summary>
+    public static void AssignKnownAliases(AppInfo app)
+    {
+        void Alias(params string[] names)
+        {
+            foreach (var n in names)
+                if (!app.Aliases.Contains(n)) app.Aliases.Add(n);
+        }
+
+        string n = app.Name.ToLowerInvariant();
+        if (n.Contains("chrome")) Alias("chrome", "google chrome");
+        else if (n.Contains("firefox")) Alias("ff", "firefox");
+        else if (n.Contains("microsoft edge")) Alias("edge");
+        else if (n.Contains("command prompt")) Alias("cmd");
+        else if (n.Contains("terminal") || n.Contains("powershell")) Alias("term");
+        else if (n.Contains("visual studio code") || n.Contains("vscode") || n.Contains("vs code")) Alias("vscode", "vs code", "code");
+        else if (n.Contains("spotify")) Alias("spotify");
+        else if (n.Contains("explorer")) Alias("files", "file explorer");
+    }
+}
+
+/// <summary>Resolves a .lnk to its target path via the shell's IShellLink (worker thread).</summary>
+internal static class ShellLink
+{
+    public static string? ResolveTarget(string lnkPath)
+    {
+        object? obj = null;
         try
         {
-            string progDir = Path.Combine(basePath, "Programs");
-            if (!Directory.Exists(progDir)) progDir = basePath;
-            if (!Directory.Exists(progDir)) return;
-
-            var lnkFiles = Directory.GetFiles(progDir, "*.lnk", SearchOption.AllDirectories);
-            foreach (var lnk in lnkFiles)
-            {
-                string name = Path.GetFileNameWithoutExtension(lnk);
-                if (IsIgnoredShortcut(name)) continue;
-                if (result.ContainsKey(name)) continue;
-
-                BitmapSource? icon = AppIconHelper.ExtractIconFromFile(lnk);
-
-                var info = new AppInfo
-                {
-                    Name = name,
-                    ExePath = lnk,
-                    AppId = lnk,
-                    Icon = icon,
-                };
-                AssignKnownAliases(info);
-                result[name] = info;
-            }
+            obj = new CShellLink();
+            ((IPersistFile)obj).Load(lnkPath, 0 /* STGM_READ */);
+            var sb = new StringBuilder(520);
+            ((IShellLinkW)obj).GetPath(sb, sb.Capacity, IntPtr.Zero, 0);
+            string target = sb.ToString();
+            return target.Length > 0 ? target : null;   // MSI-advertised shortcuts have no plain path
         }
-        catch { }
+        catch (COMException ex)
+        {
+            Log.Debug("Shortcut target unresolved", ("lnk", lnkPath), ("hr", ex.HResult));
+            return null;
+        }
+        finally
+        {
+            if (obj is not null) Marshal.ReleaseComObject(obj);
+        }
     }
 
-    private static bool IsIgnoredShortcut(string name)
-    {
-        string lower = name.ToLowerInvariant();
-        return lower.Contains("uninstall") || lower.Contains("read me") || lower.Contains("help") || lower.Contains("website");
-    }
+    [ComImport, Guid("00021401-0000-0000-C000-000000000046")]
+    private class CShellLink { }
 
-    private static void AssignKnownAliases(AppInfo app)
+    [ComImport, InterfaceType(ComInterfaceType.InterfaceIsIUnknown), Guid("000214F9-0000-0000-C000-000000000046")]
+    private interface IShellLinkW
     {
-        string n = app.Name.ToLowerInvariant();
-        if (n.Contains("chrome") && !app.Aliases.Contains("chrome"))
-        {
-            app.Aliases.Add("chrome");
-            app.Aliases.Add("google chrome");
-        }
-        else if ((n.Contains("terminal") || n.Contains("powershell") || n.Contains("cmd")) && !app.Aliases.Contains("term"))
-        {
-            app.Aliases.Add("term");
-            app.Aliases.Add("cmd");
-            app.Aliases.Add("powershell");
-        }
-        else if (n.Contains("visual studio code") || n.Contains("vscode") || n.Contains("vs code"))
-        {
-            if (!app.Aliases.Contains("vscode")) app.Aliases.Add("vscode");
-            if (!app.Aliases.Contains("vs code")) app.Aliases.Add("vs code");
-            if (!app.Aliases.Contains("code")) app.Aliases.Add("code");
-        }
-        else if (n.Contains("spotify") && !app.Aliases.Contains("spotify"))
-        {
-            app.Aliases.Add("spotify");
-        }
-        else if (n.Contains("explorer") && !app.Aliases.Contains("files"))
-        {
-            app.Aliases.Add("files");
-            app.Aliases.Add("file explorer");
-        }
+        void GetPath([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszFile, int cch, IntPtr pfd, uint fFlags);
     }
 }

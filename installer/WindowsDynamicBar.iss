@@ -52,3 +52,24 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
+
+[UninstallDelete]
+Type: filesandordirs; Name: "{app}"
+
+[Code]
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  UserDataDir: String;
+begin
+  if CurUninstallStep = usPostUninstall then
+  begin
+    UserDataDir := ExpandConstant('{userappdata}\WindowsDynamicBar');
+    if DirExists(UserDataDir) then
+    begin
+      if MsgBox('Do you also want to remove all saved settings, clipboard history, and local cached data?', mbConfirmation, MB_YESNO) = IDYES then
+      begin
+        DelTree(UserDataDir, True, True, True);
+      end;
+    end;
+  end;
+end;

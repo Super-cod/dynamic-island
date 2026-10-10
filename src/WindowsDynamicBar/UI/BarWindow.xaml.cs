@@ -165,7 +165,6 @@ public partial class BarWindow : Window, IDisposable
     // ---- Island Search Bar state ----
     private IntPtr _prevForegroundHwnd;
     private AppInfo? _activeTag;
-    private AppInfo? _ghostApp;
     private string _ghostRemainder = "";
     private readonly List<SearchResult> _searchResults = new();
     private int _selectedResultIndex = -1;
@@ -199,6 +198,7 @@ public partial class BarWindow : Window, IDisposable
     private IslandVisualState _islandState = IslandVisualState.Collapsed;
     private IslandMetric _activeMetric = IslandMetric.None;
     private readonly DispatcherTimer _collapseDelay = new() { Interval = TimeSpan.FromMilliseconds(250) };
+    private readonly DispatcherTimer _hoverCheckTimer = new() { Interval = TimeSpan.FromMilliseconds(100) };
     private bool _islandHovering;
     private bool _pinned;   // detail panel open: stays open regardless of hover until toggled off
     private double _winW = 520;
@@ -250,6 +250,8 @@ public partial class BarWindow : Window, IDisposable
     private string _eventLineKey = "";
     private bool _focusWasRunning;
     private TimeSpan _focusLastRemaining;
+    private uint _msgTaskbarCreated;
+    private DispatcherTimer? _displayChangeDebounceTimer;
 
     public BarWindow()
     {
@@ -293,9 +295,21 @@ public partial class BarWindow : Window, IDisposable
         WindowSwitcherService.Instance.Refreshed += OnWindowListRefreshed;
         TimerPanelComponent.StartRequested += OnTimerStartRequested;
         TimerPanelComponent.StopRequested += OnTimerStopRequested;
+        TimerPanelComponent.PauseRequested += OnTimerPauseRequested;
+        TimerPanelComponent.ResumeRequested += OnTimerResumeRequested;
+        EventManager.RegisterClassHandler(typeof(TextBox), UIElement.PreviewMouseDownEvent,
+            new MouseButtonEventHandler((s, _) =>
+            {
+                if (s is TextBox tb && Window.GetWindow(tb) is BarWindow win)
+                {
+                    win.Activate();
+                    tb.Focus();
+                }
+            }));
         NetPanelComponent.TestToggleRequested += OnNetTestToggle;
         MirrorPanelComponent.CameraStateChanged += OnMirrorCameraStateChanged;
         _collapseDelay.Tick += OnCollapseDelayTick;
+        _hoverCheckTimer.Tick += OnHoverCheckTick;
 
         ProgressTrack.SizeChanged += (_, _) => SyncFills();
         VolumeHudBar.Scrub += OnVolumeHudScrub;
@@ -345,6 +359,7 @@ public partial class BarWindow : Window, IDisposable
 
         ApplySettingsUi(_cfg);
         Subscribe();
+        InitSearch();
 
         SourceInitialized += (_, _) => OnSourceInitialized();
         Log.Debug("BarWindow constructed");
@@ -358,6 +373,7 @@ public partial class BarWindow : Window, IDisposable
             Damping = Math.Max(4, cfg.SpringDamping),
         };
         a.AnimationCompleted += OnAnimationsSettled;
+        a.AnimationCompleted += () => { SearchTrace("animation completed"); _traceLastFrameMs = -1; };
         return a;
     }
 
@@ -372,7 +388,11 @@ public partial class BarWindow : Window, IDisposable
                 App.Bus.EventRaised += OnBusEvent;
                 App.Bus.Idle += OnBusIdle;
             }
-            if (App.Media is not null) App.Media.MediaChanged += OnMediaChanged;
+            if (App.Media is not null)
+            {
+                App.Media.MediaChanged += OnMediaChanged;
+                _lastMedia = App.Media.Current;
+            }
             if (App.Timer is not null) App.Timer.TimerChanged += OnTimerChanged;
             if (App.Stopwatch is not null) App.Stopwatch.StopwatchChanged += OnStopwatchChanged;
             if (App.Focus is not null) App.Focus.FocusChanged += OnFocusChanged;
@@ -416,6 +436,12 @@ public partial class BarWindow : Window, IDisposable
         _src = HwndSource.FromHwnd(_hwnd);
         _src?.AddHook(WndProc);
 
+        // Apply WS_EX_NOACTIVATE so the pill does not steal focus when it appears
+        IntPtr exStyle = NativeMethods.GetWindowLongPtr(_hwnd, NativeMethods.GWL_EXSTYLE);
+        NativeMethods.SetWindowLongPtr(_hwnd, NativeMethods.GWL_EXSTYLE, new IntPtr(exStyle.ToInt64() | NativeMethods.WS_EX_NOACTIVATE));
+
+        _msgTaskbarCreated = NativeMethods.RegisterWindowMessage("TaskbarCreated");
+
         RegisterHotkeys();
         try { App.Clipboard?.Attach(_hwnd); } catch { }
         StartBatteryNotifications();
@@ -430,6 +456,7 @@ public partial class BarWindow : Window, IDisposable
     {
         EnsureWeather();
         UpdateCollapsed();
+        Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, PrewarmSearch);
     }
 
     private void OnClosed(object? sender, EventArgs e) => Dispose();
@@ -450,7 +477,10 @@ public partial class BarWindow : Window, IDisposable
         WindowSwitcherService.Instance.Refreshed -= OnWindowListRefreshed;
         TimerPanelComponent.StartRequested -= OnTimerStartRequested;
         TimerPanelComponent.StopRequested -= OnTimerStopRequested;
+        TimerPanelComponent.PauseRequested -= OnTimerPauseRequested;
+        TimerPanelComponent.ResumeRequested -= OnTimerResumeRequested;
         try { _collapseDelay.Stop(); } catch { }
+        try { _hoverCheckTimer.Stop(); } catch { }
         try { _clockTimer.Stop(); } catch { }
         try { _layoutTween.Dispose(); _hueTween.Dispose(); _pulseTween.Dispose(); } catch { }
         try { _timelineTimer.Stop(); } catch { }
@@ -488,11 +518,21 @@ public partial class BarWindow : Window, IDisposable
                 handled = true;
                 return HitTest(lParam);
 
+            case NativeMethods.WM_MOUSEACTIVATE:
+                if (_islandState is IslandVisualState.Detail or IslandVisualState.Search)
+                {
+                    handled = true;
+                    return new IntPtr(NativeMethods.MA_ACTIVATE);
+                }
+                break;
+
             case NativeMethods.WM_HOTKEY:
                 handled = true;
                 int id = wParam.ToInt32();
+                if (id == 4) SearchTrace("hotkey received");
                 Dispatcher.BeginInvoke(() =>
                 {
+                    if (id == 4) SearchTrace("hotkey dispatched");
                     switch (id)
                     {
                         case 1: Toggle(); break;
@@ -533,10 +573,36 @@ public partial class BarWindow : Window, IDisposable
                 break;
 
             case NativeMethods.WM_DISPLAYCHANGE:
+                if (_displayChangeDebounceTimer is null)
+                {
+                    _displayChangeDebounceTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
+                    _displayChangeDebounceTimer.Tick += (_, _) =>
+                    {
+                        _displayChangeDebounceTimer.Stop();
+                        Reposition();
+                    };
+                }
+                _displayChangeDebounceTimer.Stop();
+                _displayChangeDebounceTimer.Start();
+                break;
+
             case NativeMethods.WM_POWERBROADCAST:
                 Dispatcher.BeginInvoke(Reposition);
                 break;
         }
+
+        if (_msgTaskbarCreated != 0 && (uint)msg == _msgTaskbarCreated)
+        {
+            Dispatcher.BeginInvoke(() =>
+            {
+                App.Tray?.RecreateIcon();
+                Reposition();
+                NativeMethods.SetWindowPos(_hwnd, NativeMethods.HWND_TOPMOST, 0, 0, 0, 0,
+                    NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
+            });
+            return IntPtr.Zero;
+        }
+
         return IntPtr.Zero;
     }
 
@@ -640,7 +706,7 @@ public partial class BarWindow : Window, IDisposable
     /// <summary>Animations settled: once search is fully closed, give back the tall window.</summary>
     private void OnAnimationsSettled()
     {
-        if (_islandState != IslandVisualState.Search && _tallWindow) SetTallWindow(false);
+        if (_islandState != IslandVisualState.Search && _searchPhase == SearchPhase.Closed && _tallWindow) SetTallWindow(false);
     }
 
     private double CurrentDpi() =>
@@ -650,7 +716,7 @@ public partial class BarWindow : Window, IDisposable
 
     private void RefreshBlur()
     {
-        if (!_blurOn || _hwnd == IntPtr.Zero) return;
+        if (!_blurOn || _blurSuspended || _hwnd == IntPtr.Zero) return;
         double scale = CurrentDpi();
         double l = Pill.Margin.Left * scale;
         double t = _currentTop * scale;
@@ -672,6 +738,11 @@ public partial class BarWindow : Window, IDisposable
         double targetR = _currentCornerRadius;
         double r = Math.Max(0, Math.Min(targetR, minDim / 2));
         Pill.CornerRadius = new CornerRadius(r);
+        // Content clip = the inner rounded shape (inside the 1 px border).
+        double inner = Math.Max(0, r - 1);
+        _pillClip.Rect = new Rect(0, 0, Math.Max(0, _currentW - 2), Math.Max(0, _currentH - 2));
+        _pillClip.RadiusX = inner;
+        _pillClip.RadiusY = inner;
         RefreshBlur();
     }
 
@@ -687,6 +758,7 @@ public partial class BarWindow : Window, IDisposable
 
     private void ApplyH(double v)
     {
+        SearchTraceFrame();
         v = Math.Max(10, v);
         _currentH = v;
         Pill.Height = v;
@@ -800,6 +872,7 @@ public partial class BarWindow : Window, IDisposable
         _delays.Add(RunAfter(40, () =>
             Fade(ExpandedHost, 1, 120)));
 
+        ClaimGeometryForSpring(reveal: false);
         _anim.Animate("w", _currentW, w, ApplyW);
         _anim.Animate("h", _currentH, h, ApplyH);
         SyncFills();
@@ -811,6 +884,8 @@ public partial class BarWindow : Window, IDisposable
         _expanded = false;
         _idleCollapse.Stop();
         CancelDelays();
+        VolumeHudGlow.Visibility = Visibility.Collapsed;
+        VolumeHudGlowStop.Color = Colors.Transparent;
 
         Fade(ExpandedHost, 0, 110, () =>
         {
@@ -826,6 +901,7 @@ public partial class BarWindow : Window, IDisposable
 
         double w = CollapsedW;
         double h = CollapsedH;
+        ClaimGeometryForSpring(reveal: false);
         _anim.Animate("w", _currentW, w, ApplyW);
         _anim.Animate("h", _currentH, h, ApplyH);
         UpdateCollapsed();
@@ -893,9 +969,13 @@ public partial class BarWindow : Window, IDisposable
         if (!force && state == _islandState && metric == _activeMetric) return;
 
         bool sameState = state == _islandState;
+        var prevState = _islandState;
         _islandState = state;
         _activeMetric = metric;
+        if (prevState == IslandVisualState.Search && state != IslandVisualState.Search) LeaveSearchMode(state);
         _collapseDelay.Stop();
+        VolumeHudGlow.Visibility = Visibility.Collapsed;
+        VolumeHudGlowStop.Color = Colors.Transparent;
 
         // Privacy: the mirror camera is released the moment it is no longer the active metric
         // (hovering another icon, collapsing, switching panels). Starting it only ever happens
@@ -910,6 +990,11 @@ public partial class BarWindow : Window, IDisposable
             SwitchPanel();
             UpdatePanelContent();
             AnimateIsland(DetailWidth(), MeasureIslandHeight());
+            if (metric == IslandMetric.Timer)
+            {
+                Activate();
+                Dispatcher.BeginInvoke(DispatcherPriority.Input, () => TimerPanelComponent.FocusCustom());
+            }
             return;
         }
 
@@ -917,15 +1002,18 @@ public partial class BarWindow : Window, IDisposable
         {
             case IslandVisualState.Collapsed:
                 _pinned = false;
+                _hoverCheckTimer.Stop();
                 IconRow.SetPage(0, instant: true);
                 IconRow.SuspendPulse();
-                HideIslandContent();
+                // Closing the search bar: the pill's own content returns only after the morph lands.
+                HideIslandContent(revealCollapsed: _searchPhase != SearchPhase.Closing);
                 AnimateIsland(CollapsedW, CollapsedH);
                 MorphDisc(DiscCollapsed);
                 break;
 
             case IslandVisualState.Expanded:
                 EnsureTelemetry();
+                _hoverCheckTimer.Start();
                 ShowIslandContent(withPanel: false);
                 AnimateIsland(IslandOpenW, MeasureIslandHeight());
                 MorphDisc(DiscExpanded);
@@ -933,16 +1021,30 @@ public partial class BarWindow : Window, IDisposable
 
             case IslandVisualState.Detail:
                 EnsureTelemetry();
+                if (!_pinned) _hoverCheckTimer.Start(); else _hoverCheckTimer.Stop();
                 ShowIslandContent(withPanel: true);
                 IconRow.SetActive(metric);
                 SwitchPanel();   // entering Detail from Expanded must show the metric's panel too
                 UpdatePanelContent();
                 AnimateIsland(DetailWidth(), MeasureIslandHeight());
                 MorphDisc(DiscExpanded);
+                if (metric == IslandMetric.Timer)
+                {
+                    Activate();
+                    Dispatcher.BeginInvoke(DispatcherPriority.Input, () => TimerPanelComponent.FocusCustom());
+                }
                 break;
 
             case IslandVisualState.Search:
+                // Only one view is visible: everything else is Collapsed (cannot show through or take space).
                 _pinned = false;
+                _hoverCheckTimer.Stop();
+                _expanded = false;
+                _idleCollapse.Stop();
+                CancelDelays();   // no pending fade may bring another view back while searching
+                ExpandedHost.Visibility = Visibility.Collapsed;
+                ExpandedHost.Opacity = 0;
+                WarningStrip.Visibility = Visibility.Collapsed;
                 CollapsedPanel.Visibility = Visibility.Collapsed;
                 CollapsedPanel.Opacity = 0;
                 OrbHost.Visibility = Visibility.Collapsed;
@@ -956,12 +1058,12 @@ public partial class BarWindow : Window, IDisposable
                     panel.IsHitTestVisible = false;
                 }
                 SearchHost.Visibility = Visibility.Visible;
-                SearchHost.Opacity = 1;
                 break;
         }
         SyncTimelineTimer();
         // Reduce Motion applies geometry instantly, so no "settled" event will follow.
-        if (state != IslandVisualState.Search && (_cfg.ReduceMotion || !_anim.IsAnimating)) SetTallWindow(false);
+        if (state != IslandVisualState.Search && _searchPhase == SearchPhase.Closed && (_cfg.ReduceMotion || !_anim.IsAnimating))
+            SetTallWindow(false);
     }
 
     private void RenderTelemetry(TelemetryDetailPanel panel, IslandMetric metric)
@@ -1009,6 +1111,15 @@ public partial class BarWindow : Window, IDisposable
 
     private void AnimateIsland(double w, double h)
     {
+        if (_searchPhase == SearchPhase.Closing && _islandState == IslandVisualState.Collapsed)
+        {
+            // The search bar is morphing back to the pill: (re)target that one morph.
+            MorphSearch(w, h, PillTop, CollapsedRadius, ScaledMs(SearchCloseMs), OnSearchClosed);
+            return;
+        }
+        ClaimGeometryForSpring(reveal: false);
+        if (_islandState == IslandVisualState.Search) return;   // the search morph owns the geometry
+
         double targetTop = _islandState == IslandVisualState.Search ? Math.Round(_winH * 0.22) : PillTop;
         double targetR = _islandState == IslandVisualState.Search ? 29 : (_islandState != IslandVisualState.Collapsed ? 36 : CollapsedRadius);
 
@@ -1142,12 +1253,15 @@ public partial class BarWindow : Window, IDisposable
         Fade(show, 1, 160);
     }
 
-    private void HideIslandContent()
+    private void HideIslandContent(bool revealCollapsed = true)
     {
         ExpandedHost.Visibility = Visibility.Collapsed;
         ExpandedHost.Opacity = 0;
-        SearchHost.Visibility = Visibility.Collapsed;
-        SearchHost.Opacity = 0;
+        if (_searchPhase != SearchPhase.Closing)   // a closing search bar fades itself out
+        {
+            SearchHost.Visibility = Visibility.Collapsed;
+            SearchHost.Opacity = 0;
+        }
         IconRow.SetActive(IslandMetric.None);
         foreach (UIElement panel in AllPanels)
         {
@@ -1162,10 +1276,13 @@ public partial class BarWindow : Window, IDisposable
         _netMonitor?.Stop();
         _weather?.Stop();
         MirrorPanelComponent.StopCamera();
-        CollapsedPanel.Visibility = Visibility.Visible;
-        OrbHost.Visibility = Visibility.Visible;
-        Fade(CollapsedPanel, 1, 160);
-        Fade(OrbHost, 1, 160);
+        if (revealCollapsed)
+        {
+            CollapsedPanel.Visibility = Visibility.Visible;
+            OrbHost.Visibility = Visibility.Visible;
+            Fade(CollapsedPanel, 1, 160);
+            Fade(OrbHost, 1, 160);
+        }
         UpdateIslandContent();
     }
 
@@ -1222,7 +1339,7 @@ public partial class BarWindow : Window, IDisposable
             _ => _idleMode ? IdleClock.Accent(_todHue) : dominant,
         };
         AlbumRadialGlowStop.Color = Color.FromArgb(38, glow.R, glow.G, glow.B);
-        AlbumRadialGlow.Opacity = _islandState != IslandVisualState.Collapsed ? 1.0 : 0.0;
+        AlbumRadialGlow.Opacity = _islandState is IslandVisualState.Expanded or IslandVisualState.Detail ? 1.0 : 0.0;
         PillShadow.Color = _islandState != IslandVisualState.Collapsed ? glow : Colors.Black;
 
         ShowDisc(m);
@@ -1745,8 +1862,12 @@ public partial class BarWindow : Window, IDisposable
 
             if (shouldShow)
             {
-                WarningStrip.Visibility = Visibility.Visible;
-                Fade(WarningStrip, 1, 200);
+                // While the search bar is up the strip waits; FinishSearchClose brings it back.
+                if (_islandState != IslandVisualState.Search && _searchPhase == SearchPhase.Closed)
+                {
+                    WarningStrip.Visibility = Visibility.Visible;
+                    Fade(WarningStrip, 1, 200);
+                }
             }
             else
             {
@@ -2165,6 +2286,60 @@ public partial class BarWindow : Window, IDisposable
         UpdateIconRowValues();
     }
 
+    private bool IsPointerOverIsland()
+    {
+        try
+        {
+            if (!IsVisible || Pill == null || !Pill.IsVisible) return false;
+            if (Pill.IsMouseOver) return true;
+
+            if (NativeMethods.GetCursorPos(out var pt))
+            {
+                var screenPoint = Pill.PointToScreen(new Point(0, 0));
+                double dpi = CurrentDpi();
+                double left = screenPoint.X;
+                double top = screenPoint.Y;
+                double right = left + Pill.ActualWidth * dpi;
+                double bottom = top + Pill.ActualHeight * dpi;
+
+                return pt.X >= (left - 4) && pt.X <= (right + 4) &&
+                       pt.Y >= (top - 4) && pt.Y <= (bottom + 4);
+            }
+        }
+        catch { }
+        return false;
+    }
+
+    private void OnHoverCheckTick(object? sender, EventArgs e)
+    {
+        if (_islandState == IslandVisualState.Search || _islandState == IslandVisualState.Collapsed)
+        {
+            _hoverCheckTimer.Stop();
+            return;
+        }
+        if (_expanded) return;
+        if (_pinned && _islandState == IslandVisualState.Detail) return;
+
+        bool pointerOver = IsPointerOverIsland();
+        if (!pointerOver)
+        {
+            _islandHovering = false;
+            if (!_collapseDelay.IsEnabled)
+            {
+                _collapseDelay.Stop();
+                _collapseDelay.Start();
+            }
+        }
+        else
+        {
+            _islandHovering = true;
+            if (_collapseDelay.IsEnabled)
+            {
+                _collapseDelay.Stop();
+            }
+        }
+    }
+
     /// <summary>Mouse entered the island region (pill + icons + panel).</summary>
     private void OnIslandMouseEnter(object sender, MouseEventArgs e)
     {
@@ -2184,8 +2359,9 @@ public partial class BarWindow : Window, IDisposable
         }
 
         var (state, metric) = IslandStateMachine.Resolve(
-            _islandState, _activeMetric, pointerInside: true, IslandMetric.None, collapseElapsed: false);
+            _islandState, _activeMetric, pointerInside: true, IslandMetric.None, collapseElapsed: false, _cfg.HoverPreview);
         SetIslandState(state, metric);
+        if (_islandState == IslandVisualState.Expanded) _hoverCheckTimer.Start();
     }
 
     /// <summary>Mouse left the island region entirely (grace timer defers collapse).</summary>
@@ -2194,7 +2370,7 @@ public partial class BarWindow : Window, IDisposable
         if (_islandState == IslandVisualState.Search) return;
         _islandHovering = false;
         if (_expanded) return;
-        if (_pinned) return;   // clicked open: hover-leave must not collapse it
+        if (_pinned && _islandState == IslandVisualState.Detail) return;
         _collapseDelay.Stop();
         _collapseDelay.Start();
     }
@@ -2203,7 +2379,12 @@ public partial class BarWindow : Window, IDisposable
     {
         if (_islandState == IslandVisualState.Search) return;
         _collapseDelay.Stop();
-        if (_expanded || _pinned) return;
+        if (_expanded || (_pinned && _islandState == IslandVisualState.Detail)) return;
+
+        if (!IsPointerOverIsland())
+        {
+            _islandHovering = false;
+        }
 
         // Still inside the island but no icon is hovered: close the extended panel but keep the
         // island in its hover (Expanded) form, since the pointer is still over the island.
@@ -2216,7 +2397,7 @@ public partial class BarWindow : Window, IDisposable
 
         if (App.Bus?.Active is not null) return;
         var (state, metric) = IslandStateMachine.Resolve(
-            _islandState, _activeMetric, pointerInside: false, IslandMetric.None, collapseElapsed: true);
+            _islandState, _activeMetric, pointerInside: false, IslandMetric.None, collapseElapsed: true, _cfg.HoverPreview);
         SetIslandState(state, metric);
         try { if (App.Telemetry is { IsActive: true }) App.Telemetry.Deactivate(); } catch { }
     }
@@ -2229,6 +2410,16 @@ public partial class BarWindow : Window, IDisposable
         {
             _pinned = false;
             SetIslandState(IslandVisualState.Expanded, IslandMetric.None, force: true);
+            if (!IsPointerOverIsland())
+            {
+                _islandHovering = false;
+                _collapseDelay.Stop();
+                _collapseDelay.Start();
+            }
+            else
+            {
+                _hoverCheckTimer.Start();
+            }
         }
         UpdateIconRowValues();
     }
@@ -2240,6 +2431,7 @@ public partial class BarWindow : Window, IDisposable
 
     private void OnIconMetricHovered(IslandMetric metric)
     {
+        if (!_cfg.HoverPreview) return;
         if (_islandState == IslandVisualState.Search) return;
         if (!HasPanel(metric)) return;
         if (_expanded || _pinned) return;   // pinned panel ignores hover until clicked again
@@ -2249,6 +2441,7 @@ public partial class BarWindow : Window, IDisposable
 
     private void OnIconMetricUnhovered()
     {
+        if (!_cfg.HoverPreview) return;
         if (_islandState == IslandVisualState.Search) return;
         if (_pinned) return;   // pinned panel ignores hover until clicked again
         // Leaving an icon closes the extended panel after a short grace (so moving between icons
@@ -2281,7 +2474,18 @@ public partial class BarWindow : Window, IDisposable
         // Click the active (pinned) icon again -> close the extended canvas.
         if (_pinned && _activeMetric == metric)
         {
-            SetIslandState(IslandVisualState.Collapsed, IslandMetric.None, force: true);
+            _pinned = false;
+            SetIslandState(IslandVisualState.Expanded, IslandMetric.None, force: true);
+            if (!IsPointerOverIsland())
+            {
+                _islandHovering = false;
+                _collapseDelay.Stop();
+                _collapseDelay.Start();
+            }
+            else
+            {
+                _hoverCheckTimer.Start();
+            }
             return;
         }
         // Otherwise click opens the metric's canvas and pins it open.
@@ -2349,6 +2553,21 @@ public partial class BarWindow : Window, IDisposable
                     _shown = evt;   // the open island (timer card, ring, Focus button) shows the countdown
                     return;
                 }
+
+                // The search bar is never replaced by an incoming card.
+                if (_islandState == IslandVisualState.Search)
+                {
+                    _shown = evt;
+                    return;
+                }
+            }
+
+            // If music is playing, starting or running a timer must not expand over or interfere with the music disc
+            if ((evt.Kind is BarEventKind.Timer or BarEventKind.Focus) && IsMusicPlaying())
+            {
+                _shown = evt;
+                UpdateCollapsed();
+                return;
             }
 
             // Refresh in place when the same widget is already on screen.
@@ -2403,6 +2622,8 @@ public partial class BarWindow : Window, IDisposable
     private void OnBusIdle()
     {
         _shown = null;
+        VolumeHudGlow.Visibility = Visibility.Collapsed;
+        VolumeHudGlowStop.Color = Colors.Transparent;
         UpdateCollapsed();
         if (_expanded) Collapse();
     }
@@ -2443,7 +2664,7 @@ public partial class BarWindow : Window, IDisposable
         bool finishedNow = info.State == TimerState.Finished && prev?.State == TimerState.Running;
         if (second != _timerUiSecond || info.State != prev?.State)
         {
-            _timerUiSecond = second;
+            _timerUiSecond = info.State == TimerState.Running ? second : -1;
             try { Dispatcher.BeginInvoke(() => OnTimerUi(info, finishedNow)); }
             catch (TaskCanceledException) { /* dispatcher shutting down */ }
         }
@@ -2456,6 +2677,7 @@ public partial class BarWindow : Window, IDisposable
     private void OnStopwatchChanged(StopwatchInfo info)
     {
         _lastStopwatch = info;
+        try { Dispatcher.BeginInvoke(() => { if (_islandState == IslandVisualState.Collapsed || !_expanded) UpdateCollapsed(); }); } catch { }
         RerenderCurrent(BarEventKind.Stopwatch, () => BarEvent.Create(
             BarEventKind.Stopwatch, "Stopwatch", StopwatchService.FormatMs(info.Elapsed),
             valueText: StopwatchService.FormatMs(info.Elapsed), payload: info, priority: 60,
@@ -2611,6 +2833,7 @@ public partial class BarWindow : Window, IDisposable
             // Only re-size a collapsed pill; an open island keeps its geometry.
             if (sizeChanged && !_expanded && _islandState == IslandVisualState.Collapsed)
             {
+                ClaimGeometryForSpring(reveal: true);
                 _anim.Animate("w", _currentW, CollapsedW, ApplyW);
                 _anim.Animate("h", _currentH, CollapsedH, ApplyH);
             }
@@ -2648,13 +2871,14 @@ public partial class BarWindow : Window, IDisposable
     }
 
     /// <summary>True when the event originated inside an interactive control (slider/button/thumb)
-    /// that owns its own pointer gesture.</summary>
-    private static bool IsInteractiveSource(object? source)
+    /// or inside the active detail panel, owning its own pointer gesture.</summary>
+    private bool IsInteractiveSource(object? source)
     {
         var d = source as DependencyObject;
         while (d is not null and not Window)
         {
             if (d is Slider or ButtonBase or Thumb or TextBox or ScrollViewer) return true;
+            if (_islandState == IslandVisualState.Detail && ActivePanel is { } ap && ReferenceEquals(d, ap)) return true;
             d = d is Visual or System.Windows.Media.Media3D.Visual3D
                 ? VisualTreeHelper.GetParent(d)
                 : LogicalTreeHelper.GetParent(d);
@@ -2696,12 +2920,21 @@ public partial class BarWindow : Window, IDisposable
         // Clicking the open (pinned) canvas closes it.
         if (_pinned)
         {
+            _pinned = false;
             SetIslandState(IslandVisualState.Collapsed, IslandMetric.None, force: true);
             return;
         }
-        // While the island is open the pill is an interactive surface, not the volume card toggle.
-        if (_islandState != IslandVisualState.Collapsed) return;
-        Toggle();
+        if (_islandState == IslandVisualState.Collapsed)
+        {
+            Toggle();
+            return;
+        }
+        if (_islandState == IslandVisualState.Expanded)
+        {
+            _pinned = false;
+            SetIslandState(IslandVisualState.Collapsed, IslandMetric.None, force: true);
+            return;
+        }
     }
 
     private void OnPillMouseWheel(object sender, MouseWheelEventArgs e)
@@ -2727,9 +2960,12 @@ public partial class BarWindow : Window, IDisposable
 
     private void OnDeactivated(object? sender, EventArgs e)
     {
+        SearchTrace("deactivated", ("phase", _searchPhase), ("hadFocus", _searchHadFocus));
         if (_islandState == IslandVisualState.Search)
         {
-            CloseSearch();
+            // Click-outside closes only a fully open bar that has had focus; OnSearchOpened
+            // re-checks once Opening finishes.
+            if (_searchPhase == SearchPhase.Open && _searchHadFocus) CloseSearch();
             return;
         }
         // The clipboard card opened by its hotkey closes when the user clicks elsewhere.
@@ -2737,6 +2973,12 @@ public partial class BarWindow : Window, IDisposable
         {
             _clipByHotkey = false;
             _clipPasteTarget = IntPtr.Zero;
+            _pinned = false;
+            SetIslandState(IslandVisualState.Collapsed, IslandMetric.None, force: true);
+            return;
+        }
+        if (!_cfg.HoverPreview && _islandState is IslandVisualState.Expanded or IslandVisualState.Detail)
+        {
             _pinned = false;
             SetIslandState(IslandVisualState.Collapsed, IslandMetric.None, force: true);
             return;
@@ -2760,6 +3002,13 @@ public partial class BarWindow : Window, IDisposable
                 CloseSearch();
                 return;
             }
+            if (_islandState is IslandVisualState.Detail or IslandVisualState.Expanded)
+            {
+                e.Handled = true;
+                _pinned = false;
+                SetIslandState(IslandVisualState.Collapsed, IslandMetric.None, force: true);
+                return;
+            }
             if (_expanded)
             {
                 e.Handled = true;
@@ -2776,7 +3025,7 @@ public partial class BarWindow : Window, IDisposable
         if (!IsVisible && _cfg.BarEnabled) Show();
         _userDismissed = false;
 
-        if (App.Bus?.Active is BarEvent active)
+        if (App.Bus?.Active is BarEvent active && !((active.Kind is BarEventKind.Timer or BarEventKind.Focus) && IsMusicPlaying()))
         {
             _shown = active;
             RenderEvent(active);
@@ -2784,12 +3033,15 @@ public partial class BarWindow : Window, IDisposable
             return;
         }
 
-        // Quick panel priority: running timer → media (playing or paused) → stopwatch → timer → volume.
-        if (_lastTimer is { State: TimerState.Running } tActive && tActive.Remaining > TimeSpan.Zero)
+        // Quick panel priority: running timer (if music not playing) → media (playing or paused) → stopwatch → timer → volume.
+        if (!IsMusicPlaying() && _lastTimer is { State: TimerState.Running } tActive && tActive.Remaining > TimeSpan.Zero)
             _shown = BarEvent.Create(BarEventKind.Timer, tActive.Label, TimerService.Format(tActive.Remaining),
                 value: tActive.Progress, valueText: TimerService.Format(tActive.Remaining), payload: tActive, priority: 60);
         else if (_lastMedia is { } m && !string.IsNullOrWhiteSpace(m.Title))
             _shown = BarEvent.Create(BarEventKind.Media, m.Title, m.Artist, payload: m, priority: 60);
+        else if (_lastTimer is { State: TimerState.Running } tRunning && tRunning.Remaining > TimeSpan.Zero)
+            _shown = BarEvent.Create(BarEventKind.Timer, tRunning.Label, TimerService.Format(tRunning.Remaining),
+                value: tRunning.Progress, valueText: TimerService.Format(tRunning.Remaining), payload: tRunning, priority: 60);
         else if (_lastStopwatch is { } sw && sw.Elapsed > TimeSpan.Zero)
             _shown = BarEvent.Create(BarEventKind.Stopwatch, "Stopwatch",
                 StopwatchService.FormatMs(sw.Elapsed), valueText: StopwatchService.FormatMs(sw.Elapsed),
@@ -2846,7 +3098,7 @@ public partial class BarWindow : Window, IDisposable
                       NativeMethods.IsWindowFullscreen(NativeMethods.GetForegroundWindow());
             bool wantVisible = cfg.BarEnabled && !fs;
             if (wantVisible && !IsVisible) Show();
-            else if (!wantVisible && IsVisible) Hide();
+            else if (!wantVisible && IsVisible && _searchPhase == SearchPhase.Closed) Hide();   // never under an open search bar
         }
         catch { }
     }
@@ -2916,6 +3168,7 @@ public partial class BarWindow : Window, IDisposable
         HeaderRow.Visibility = Visibility.Visible;
         VolumeHudRow.Visibility = Visibility.Collapsed;
         VolumeHudGlow.Visibility = Visibility.Collapsed;
+        VolumeHudGlowStop.Color = Colors.Transparent;
         BarsRow.Visibility = Visibility.Collapsed;
         SetBars(0);
         SysMonRow.Visibility = Visibility.Collapsed;
@@ -3057,10 +3310,9 @@ public partial class BarWindow : Window, IDisposable
             VolumeHudValue.Foreground = HudValueBrush;
         }
 
-        // Accent wash behind the whole pill, brightness scaled by the level (mirrors the reference).
-        byte a = (byte)Math.Round(0x61 * (muted ? 0.0 : 0.35 + level * 0.65));
-        VolumeHudGlowStop.Color = Color.FromArgb(a, accent.R, accent.G, accent.B);
-        VolumeHudGlow.Visibility = Visibility.Visible;
+        // Keep the island background clean: do not leak accent wash onto the island pill.
+        VolumeHudGlow.Visibility = Visibility.Collapsed;
+        VolumeHudGlowStop.Color = Colors.Transparent;
     }
 
     private void TriggerLevelNudge()
@@ -3068,6 +3320,7 @@ public partial class BarWindow : Window, IDisposable
         if (_cfg.ReduceMotion) return;
         double targetW = Math.Clamp(TargetWidth(_shown?.Kind ?? BarEventKind.Volume), 120, MaxPillW);
         // Elastic spring nudge: small impulse expands width momentarily (+160 velocity) and bounces back
+        ClaimGeometryForSpring(reveal: false);
         _anim.Animate("w", _currentW, targetW, ApplyW, velocity: 160);
         AnimateIconPop(VolumeHudIconScale);
     }
@@ -3325,40 +3578,68 @@ public partial class BarWindow : Window, IDisposable
     /// </summary>
     private void UpdateCollapsed()
     {
-        if (_actionSuccessTimer?.IsEnabled == true) return;
+        if (_actionSuccessTimer?.IsEnabled == true && _lastTimer?.State != TimerState.Running) return;
         var cfg = _cfg;   // kept in sync by ApplySettingsUi; Settings.Current deep-clones
         string? value = null;
 
-        if (_lastTimer is { State: TimerState.Running, Remaining: var rem } && rem > TimeSpan.Zero)
+        if (IsMusicPlaying())
         {
-            CollapsedTitle.Text = string.IsNullOrWhiteSpace(_lastTimer.Label) ? "Timer" : _lastTimer.Label;
-            SetOrb(IcTimer);
-            value = TimerService.Format(rem);
-        }
-        else if (_lastFocus is { Running: true, Remaining: var frem } && frem > TimeSpan.Zero)
-        {
-            CollapsedTitle.Text = "Focus";
-            SetOrb(IcFocus);
-            value = TimerService.Format(frem);
-        }
-        else if (_lastStopwatch is { Running: true, Elapsed: var sel })
-        {
-            CollapsedTitle.Text = "Stopwatch";
-            SetOrb(IcStopwatch);
-            value = StopwatchService.FormatMs(sel);
-        }
-        else if (_lastMedia is { } m && !string.IsNullOrWhiteSpace(m.Title) && cfg.CollapsedMediaArt)
-        {
-            CollapsedTitle.Text = m.Title;
-            ShowDisc(m);
+            var m = _lastMedia ?? App.Media?.Current;
+            if (m is not null)
+            {
+                CollapsedTitle.Text = string.IsNullOrWhiteSpace(m.Title) ? m.SourceAppName : m.Title;
+                if (cfg.CollapsedMediaArt)
+                    ShowDisc(m);
+                else
+                    SetOrb(IcDot);
+            }
+
+            if (_lastTimer is { State: TimerState.Running or TimerState.Paused, Remaining: var rem } && rem > TimeSpan.Zero)
+            {
+                value = TimerService.Format(rem);
+            }
+            else if (_lastFocus is { Running: true, Remaining: var frem } && frem > TimeSpan.Zero)
+            {
+                value = TimerService.Format(frem);
+            }
+            else if (_lastStopwatch is { Running: true, Elapsed: var sel })
+            {
+                value = StopwatchService.FormatMs(sel);
+            }
         }
         else
         {
-            // No placeholder: the music row is only shown while a media session exists.
-            CollapsedTitle.Text = HasMediaSession(_lastMedia)
-                ? (string.IsNullOrWhiteSpace(_lastMedia!.Title) ? _lastMedia.SourceAppName : _lastMedia.Title)
-                : "";
-            SetOrb(IcDot);
+            if (_lastTimer is { State: TimerState.Running or TimerState.Paused, Remaining: var rem } && rem > TimeSpan.Zero)
+            {
+                CollapsedTitle.Text = string.IsNullOrWhiteSpace(_lastTimer.Label) ? "Timer" : _lastTimer.Label;
+                SetOrb(IcTimer);
+                value = TimerService.Format(rem);
+            }
+            else if (_lastFocus is { Running: true, Remaining: var frem } && frem > TimeSpan.Zero)
+            {
+                CollapsedTitle.Text = "Focus";
+                SetOrb(IcFocus);
+                value = TimerService.Format(frem);
+            }
+            else if (_lastStopwatch is { Running: true, Elapsed: var sel })
+            {
+                CollapsedTitle.Text = "Stopwatch";
+                SetOrb(IcStopwatch);
+                value = StopwatchService.FormatMs(sel);
+            }
+            else if (_lastMedia is { } m && !string.IsNullOrWhiteSpace(m.Title) && cfg.CollapsedMediaArt)
+            {
+                CollapsedTitle.Text = m.Title;
+                ShowDisc(m);
+            }
+            else
+            {
+                // No placeholder: the music row is only shown while a media session exists.
+                CollapsedTitle.Text = HasMediaSession(_lastMedia)
+                    ? (string.IsNullOrWhiteSpace(_lastMedia!.Title) ? _lastMedia.SourceAppName : _lastMedia.Title)
+                    : "";
+                SetOrb(IcDot);
+            }
         }
         if (_idleMode) UpdateIdleCollapsed(DateTime.Now);
 
@@ -3389,7 +3670,7 @@ public partial class BarWindow : Window, IDisposable
 
     private void ShowDisc(MediaInfo? m)
     {
-        if (m is null || string.IsNullOrWhiteSpace(m.Title))
+        if (m is null || (string.IsNullOrWhiteSpace(m.Title) && string.IsNullOrWhiteSpace(m.SourceAppName)))
         {
             SetOrb(IcDot);
             SourceBadge.Visibility = Visibility.Collapsed;
@@ -3602,6 +3883,23 @@ public partial class BarWindow : Window, IDisposable
     private bool HasMediaSession(MediaInfo? m) => _cfg.FeatureMedia &&
         m is not null && (!string.IsNullOrWhiteSpace(m.Title) || !string.IsNullOrWhiteSpace(m.AppId));
 
+    private bool IsMusicPlaying()
+    {
+        if (!_cfg.FeatureMedia) return false;
+        if (_lastMedia is { IsPlaying: true }) return true;
+        if (App.Media is not null && App.Media.IsPlaying)
+        {
+            if (_lastMedia is null || !_lastMedia.IsPlaying)
+            {
+                var cur = App.Media.Current;
+                if (cur is not null) _lastMedia = cur;
+                else _ = App.Media.RefreshAsync(showEvent: false);
+            }
+            return true;
+        }
+        return false;
+    }
+
     /// <summary>12-hour clock? From the setting, or the Windows region format when it says System.</summary>
     private bool ResolveTwelveHour() => _cfg.ClockFormat switch
     {
@@ -3707,10 +4005,10 @@ public partial class BarWindow : Window, IDisposable
         IdleTime.Text = IdleClock.FormatTime(now, _twelveHour);
         IdleDate.Text = now.ToString("ddd, MMM d", CultureInfo.CurrentCulture);
         IdleDayBar.Fraction = IdleClock.DayFraction(now);
-        if (_actionSuccessTimer?.IsEnabled == true) return;   // chip is showing a confirmation
+        if (_actionSuccessTimer?.IsEnabled == true && _lastTimer?.State != TimerState.Running) return;   // chip is showing a confirmation
 
         string? chip = null;
-        if (_lastTimer is { State: TimerState.Running, Remaining: var trem } && trem > TimeSpan.Zero)
+        if (_lastTimer is { State: TimerState.Running or TimerState.Paused, Remaining: var trem } && trem > TimeSpan.Zero)
             chip = $"{(string.IsNullOrWhiteSpace(_lastTimer.Label) ? "Timer" : _lastTimer.Label)} {IdleClock.FormatCountdown(trem)}";
         else if (App.Focus?.Current is { Running: true } f)
             chip = $"Focus {IdleClock.FormatCountdown(f.Remaining)}";
@@ -3801,6 +4099,7 @@ public partial class BarWindow : Window, IDisposable
     private void OnTimerUi(TimerInfo info, bool finishedNow)
     {
         if (finishedNow) PulseIsland();   // once, scale 1 -> 1.03 -> 1 (skipped with Reduce Motion)
+        UpdateCollapsed();
         if (IslandExpandedHost.Visibility == Visibility.Visible)
         {
             UpdatePage2Rings();
@@ -3818,6 +4117,18 @@ public partial class BarWindow : Window, IDisposable
 
     private void OnTimerStopRequested() => App.Timer?.Cancel();
 
+    private void OnTimerPauseRequested()
+    {
+        try { App.Timer?.Pause(); }
+        catch (ObjectDisposedException) { /* shutting down */ }
+    }
+
+    private void OnTimerResumeRequested()
+    {
+        try { App.Timer?.Resume(); }
+        catch (ObjectDisposedException) { /* shutting down */ }
+    }
+
     /// <summary>Focus updates arrive on a worker thread (2 Hz). Detect a natural finish (countdown
     /// reached zero rather than the user stopping it) and pulse the island once.</summary>
     private void OnFocusUi(FocusInfo info)
@@ -3827,6 +4138,7 @@ public partial class BarWindow : Window, IDisposable
         _focusWasRunning = info.Running;
         _focusLastRemaining = info.Remaining;
         if (finished) PulseIsland();
+        UpdateCollapsed();
         if (_idleMode) RefreshIdle(DateTime.Now);
     }
 
@@ -3896,884 +4208,6 @@ public partial class BarWindow : Window, IDisposable
             AlbumRadialGlowStop.Color = Color.FromArgb(38, accent.R, accent.G, accent.B);
             PillShadow.Color = accent;
         }
-    }
-
-    // ---------------------------------------------------------------- search bar with tab commands
-
-    public void ToggleSearch()
-    {
-        if (_islandState == IslandVisualState.Search)
-            CloseSearch();
-        else
-            OpenSearch();
-    }
-
-    public void OpenSearch()
-    {
-        if (!_cfg.FeatureSearch) return;
-        _prevForegroundHwnd = NativeMethods.GetForegroundWindow();
-        EnsureOnCursorMonitor();
-        SetIslandState(IslandVisualState.Search, IslandMetric.None, force: true);
-
-        double targetW = Math.Min(660.0, _winW * 0.94);
-        AnimateIsland(targetW, 58.0);
-
-        SearchInput.Text = "";
-        SearchGhostText.Inlines.Clear();
-        _ghostApp = null;
-        _ghostRemainder = "";
-        _searchResults.Clear();
-        SearchResultsList.Children.Clear();
-        SearchResultsSection.Visibility = Visibility.Collapsed;
-        SearchResultsScroll.Height = double.NaN;
-        _selectedResultIndex = -1;
-        _armedRiskyCommand = false;
-        _armedCommandTitle = "";
-        RemoveAppTag();
-
-        AppDiscoveryService.Instance.RefreshInBackground();
-        WindowSwitcherService.Instance.RefreshInBackground(_hwnd);
-
-        Activate();
-        SearchInput.Focus();
-    }
-
-    public void CloseSearch()
-    {
-        _searchCts?.Cancel();
-        _searchCts = null;
-        _searchResults.Clear();
-        SearchResultsList.Children.Clear();
-        SearchResultsSection.Visibility = Visibility.Collapsed;
-        SearchResultsScroll.Height = double.NaN;
-        SearchGhostText.Inlines.Clear();
-        _ghostApp = null;
-        _ghostRemainder = "";
-        _selectedResultIndex = -1;
-        _armedRiskyCommand = false;
-        _armedCommandTitle = "";
-        RemoveAppTag();
-
-        SetIslandState(IslandVisualState.Collapsed, IslandMetric.None, force: true);
-
-        if (_prevForegroundHwnd != IntPtr.Zero)
-        {
-            NativeMethods.SetForegroundWindow(_prevForegroundHwnd);
-            _prevForegroundHwnd = IntPtr.Zero;
-        }
-    }
-
-    private void EnsureOnCursorMonitor()
-    {
-        NativeMethods.GetCursorPos(out var pt);
-        var monitors = NativeMethods.GetMonitors();
-        if (monitors.Count == 0) return;
-        var mon = monitors.FirstOrDefault(m =>
-            pt.X >= m.Bounds.Left && pt.X < m.Bounds.Right &&
-            pt.Y >= m.Bounds.Top && pt.Y < m.Bounds.Bottom) ?? monitors[0];
-
-        _tallWindow = true;
-        PlaceWindow(mon);
-    }
-
-    private void ActivateAppTag(AppInfo app)
-    {
-        _activeTag = app;
-        SearchAppTagName.Text = app.Name;
-        if (app.Icon != null)
-        {
-            SearchAppTagIcon.Source = app.Icon;
-            SearchAppTagIcon.Visibility = Visibility.Visible;
-            SearchAppTagLetter.Visibility = Visibility.Collapsed;
-        }
-        else
-        {
-            SearchAppTagLetter.Text = app.Name.Length > 0 ? char.ToUpperInvariant(app.Name[0]).ToString() : "•";
-            SearchAppTagLetter.Visibility = Visibility.Visible;
-            SearchAppTagIcon.Visibility = Visibility.Collapsed;
-        }
-        SearchAppTag.Visibility = Visibility.Visible;
-
-        SearchInput.Text = "";
-        SearchPlaceholder.Text = GetPlaceholderForApp(app);
-        SearchPlaceholder.Visibility = Visibility.Visible;
-        SearchGhostText.Inlines.Clear();
-        _ghostApp = null;
-        _ghostRemainder = "";
-
-        // Empty input with active tag displays only the search bar
-        SearchResultsSection.Visibility = Visibility.Collapsed;
-        SearchResultsList.Children.Clear();
-        _searchResults.Clear();
-        _selectedResultIndex = -1;
-        AnimateIslandHeight(58.0);
-    }
-
-    private void RemoveAppTag()
-    {
-        _activeTag = null;
-        SearchAppTag.Visibility = Visibility.Collapsed;
-        SearchAppTagIcon.Source = null;
-        SearchPlaceholder.Text = "Search apps, files, commands...";
-    }
-
-    private static string GetPlaceholderForApp(AppInfo app)
-    {
-        string name = app.Name.ToLowerInvariant();
-        if (name.Contains("chrome") || name.Contains("edge") || name.Contains("firefox") || name.Contains("browser"))
-            return "Search Google or enter URL...";
-        if (name.Contains("terminal") || name.Contains("powershell") || name.Contains("cmd"))
-            return "Run command or script...";
-        if (name.Contains("code") || name.Contains("visual studio"))
-            return "Open folder or file...";
-        if (name.Contains("spotify") || name.Contains("music"))
-            return "Search songs, albums or commands...";
-        if (name.Contains("explorer") || name.Contains("files"))
-            return "Open folder or path...";
-        return "Type a command...";
-    }
-
-    private void OnSearchInputChanged(object sender, TextChangedEventArgs e)
-    {
-        if (_islandState != IslandVisualState.Search) return;
-
-        string text = SearchInput.Text;
-        SearchPlaceholder.Visibility = string.IsNullOrEmpty(text) ? Visibility.Visible : Visibility.Collapsed;
-        _armedRiskyCommand = false;
-        _armedCommandTitle = "";
-
-        if (string.IsNullOrWhiteSpace(text))
-        {
-            SearchGhostText.Inlines.Clear();
-            _ghostApp = null;
-            _ghostRemainder = "";
-            _searchCts?.Cancel();
-            _searchCts = null;
-            _searchResults.Clear();
-            _selectedResultIndex = -1;
-            SearchResultsList.Children.Clear();
-            SearchResultsSection.Visibility = Visibility.Collapsed;
-            SearchResultsScroll.Height = double.NaN;
-            AnimateIslandHeight(58.0);
-            return;
-        }
-
-        UpdateSearchResults(text);
-    }
-
-    private void OnSearchInputPreviewKeyDown(object sender, KeyEventArgs e)
-    {
-        if (_islandState != IslandVisualState.Search) return;
-
-        if (e.Key == Key.Escape)
-        {
-            e.Handled = true;
-            CloseSearch();
-            return;
-        }
-
-        if (e.Key == Key.Down)
-        {
-            e.Handled = true;
-            _armedRiskyCommand = false;
-            _armedCommandTitle = "";
-            if (_searchResults.Count > 0)
-            {
-                _selectedResultIndex = (_selectedResultIndex + 1) % _searchResults.Count;
-                UpdateRowSelections();
-                ScrollSelectedIntoView();
-            }
-            return;
-        }
-
-        if (e.Key == Key.Up)
-        {
-            e.Handled = true;
-            _armedRiskyCommand = false;
-            _armedCommandTitle = "";
-            if (_searchResults.Count > 0)
-            {
-                _selectedResultIndex = (_selectedResultIndex - 1 + _searchResults.Count) % _searchResults.Count;
-                UpdateRowSelections();
-                ScrollSelectedIntoView();
-            }
-            return;
-        }
-
-        if (e.Key == Key.Tab)
-        {
-            e.Handled = true;
-            if (_ghostApp != null)
-            {
-                ActivateAppTag(_ghostApp);
-                return;
-            }
-            if (_selectedResultIndex >= 0 && _selectedResultIndex < _searchResults.Count)
-            {
-                var sel = _searchResults[_selectedResultIndex];
-                if (sel.Category == SearchCategory.Apps && !string.IsNullOrEmpty(sel.AppId))
-                {
-                    var app = AppDiscoveryService.Instance.GetApps().FirstOrDefault(a => a.AppId.Equals(sel.AppId, StringComparison.OrdinalIgnoreCase));
-                    if (app != null)
-                    {
-                        ActivateAppTag(app);
-                        return;
-                    }
-                }
-            }
-            return;
-        }
-
-        if (e.Key == Key.Back && string.IsNullOrEmpty(SearchInput.Text) && _activeTag != null)
-        {
-            e.Handled = true;
-            string restored = _activeTag.Name;
-            RemoveAppTag();
-            SearchInput.Text = restored;
-            SearchInput.CaretIndex = restored.Length;
-            return;
-        }
-
-        if (e.Key == Key.Enter)
-        {
-            e.Handled = true;
-            if (_selectedResultIndex >= 0 && _selectedResultIndex < _searchResults.Count)
-            {
-                ExecuteResult(_searchResults[_selectedResultIndex]);
-            }
-            else if (_searchResults.Count > 0)
-            {
-                ExecuteResult(_searchResults[0]);
-            }
-            else if (!string.IsNullOrWhiteSpace(SearchInput.Text))
-            {
-                ExecuteWebSearch(SearchInput.Text.Trim());
-            }
-            return;
-        }
-    }
-
-    private void UpdateSearchResults(string text)
-    {
-        string query = text.Trim();
-        _searchResults.Clear();
-
-        if (_activeTag != null)
-        {
-            SearchGhostText.Inlines.Clear();
-            _ghostApp = null;
-            _ghostRemainder = "";
-
-            var scoped = AppCommandRegistry.GetScopedCommands(_activeTag, query);
-            _searchResults.AddRange(scoped);
-            _selectedResultIndex = _searchResults.Count > 0 ? 0 : -1;
-            RenderResultRows();
-            return;
-        }
-
-        // "w " prefix: only windows (an empty filter lists all, most recently used first).
-        if (text.StartsWith("w ", StringComparison.OrdinalIgnoreCase))
-        {
-            SearchGhostText.Inlines.Clear();
-            _ghostApp = null;
-            _ghostRemainder = "";
-            AddWindowResults(text[2..].Trim(), max: 12);
-            _selectedResultIndex = _searchResults.Count > 0 ? 0 : -1;
-            RenderResultRows();
-            return;
-        }
-
-        // 1. Ghost completion & Apps
-        var allApps = AppDiscoveryService.Instance.GetApps();
-        AppInfo? topPrefixApp = null;
-        var matchedApps = new List<(AppInfo App, int Score, List<int> MatchedIndices)>();
-
-        foreach (var app in allApps)
-        {
-            var match = FuzzyMatcher.Match(app.Name, query, app.LaunchCount);
-            if (!match.Matched)
-            {
-                foreach (var alias in app.Aliases)
-                {
-                    var aliasMatch = FuzzyMatcher.Match(alias, query, app.LaunchCount);
-                    if (aliasMatch.Matched && aliasMatch.Score > match.Score)
-                    {
-                        match = aliasMatch;
-                    }
-                }
-            }
-
-            if (match.Matched)
-            {
-                matchedApps.Add((app, match.Score, match.MatchedIndices));
-            }
-
-            if (topPrefixApp == null && app.Name.StartsWith(query, StringComparison.OrdinalIgnoreCase))
-            {
-                topPrefixApp = app;
-            }
-        }
-
-        // Update Ghost text
-        if (topPrefixApp != null && topPrefixApp.Name.Length > text.Length)
-        {
-            _ghostApp = topPrefixApp;
-            _ghostRemainder = topPrefixApp.Name.Substring(text.Length);
-            SearchGhostText.Inlines.Clear();
-            SearchGhostText.Inlines.Add(new Run(text) { Foreground = Brushes.Transparent });
-            SearchGhostText.Inlines.Add(new Run(_ghostRemainder) { Foreground = new SolidColorBrush(Color.FromArgb(90, 255, 255, 255)) });
-        }
-        else
-        {
-            SearchGhostText.Inlines.Clear();
-            _ghostApp = null;
-            _ghostRemainder = "";
-        }
-
-        // Priority 0: "timer 10 min" / "timer 90s" starts the one timer
-        if (_cfg.FeatureTimers && TimerCommand.TryParseSearch(query, out var timerDuration))
-        {
-            var d = timerDuration;
-            _searchResults.Add(new SearchResult
-            {
-                Title = $"Start timer {TimerCommand.Format(d)}",
-                Subtitle = "Countdown in the island",
-                Category = SearchCategory.Commands,
-                FallbackLetter = "\u23F1",
-                FallbackColor = Color.FromRgb(0xE8, 0xB0, 0x4B),
-                KeyboardHint = "Enter",
-                Action = () =>
-                {
-                    App.Timer?.Start(d, "Timer");
-                    ShowActionSuccess($"Timer {TimerCommand.Format(d)}");
-                },
-            });
-        }
-
-        // Priority 1: Calculator / Converter
-        var (evalOk, evalRes, evalSub) = ExpressionEvaluator.TryEvaluate(query);
-        if (evalOk)
-        {
-            string capturedRes = evalRes;
-            _searchResults.Add(new SearchResult
-            {
-                Title = evalRes,
-                Subtitle = evalSub,
-                Category = SearchCategory.Calculator,
-                FallbackLetter = "=",
-                FallbackColor = Color.FromRgb(0x2F, 0xD2, 0xB0),
-                KeyboardHint = "Enter copy",
-                Action = () =>
-                {
-                    try
-                    {
-                        Clipboard.SetText(capturedRes);
-                        ShowActionSuccess($"✓ Copied {capturedRes}");
-                    }
-                    catch { }
-                }
-            });
-        }
-
-        // Priority 2: Apps, up to 4
-        matchedApps.Sort((a, b) => b.Score.CompareTo(a.Score));
-        foreach (var (app, score, indices) in matchedApps.Take(4))
-        {
-            var capturedApp = app;
-            _searchResults.Add(new SearchResult
-            {
-                Title = app.Name,
-                Subtitle = app.ExePath,
-                Category = SearchCategory.Apps,
-                Icon = app.Icon,
-                FallbackLetter = app.Name.Length > 0 ? char.ToUpperInvariant(app.Name[0]).ToString() : "A",
-                KeyboardHint = "Tab commands \u00B7 Enter open",
-                Score = score,
-                MatchedIndices = indices,
-                AppId = app.AppId,
-                ExePath = app.ExePath,
-                Action = () =>
-                {
-                    try
-                    {
-                        AppDiscoveryService.Instance.RecordLaunch(capturedApp.AppId);
-                        Process.Start(new ProcessStartInfo(capturedApp.ExePath) { UseShellExecute = true });
-                        ShowActionSuccess($"✓ Opened {capturedApp.Name}");
-                    }
-                    catch { }
-                }
-            });
-        }
-
-        // Priority 2b: open windows, up to 4 (from the list cached when the bar opened)
-        if (query.Length > 0) AddWindowResults(query, max: 4);
-
-        // Priority 3: Commands, up to 3
-        var sysCmds = GetSystemCommands(query);
-        _searchResults.AddRange(sysCmds.Take(3));
-
-        // Priority 5: Web Search fallback
-        _searchResults.Add(new SearchResult
-        {
-            Title = $"Search Google for \"{query}\"",
-            Subtitle = "Open in default browser",
-            Category = SearchCategory.Web,
-            FallbackLetter = "G",
-            FallbackColor = Color.FromRgb(0x42, 0x85, 0xF4),
-            KeyboardHint = "Enter",
-            Action = () => ExecuteWebSearch(query)
-        });
-
-        _selectedResultIndex = _searchResults.Count > 0 ? 0 : -1;
-        RenderResultRows();
-
-        // Priority 4: Files from Windows Search index (up to 3, async with debounce)
-        _searchCts?.Cancel();
-        _searchCts = new CancellationTokenSource();
-        var token = _searchCts.Token;
-        _ = Task.Run(async () =>
-        {
-            var files = await WindowsSearchService.SearchFilesAsync(query, token);
-            if (token.IsCancellationRequested || files.Count == 0) return;
-
-            _ = Dispatcher.BeginInvoke(() =>
-            {
-                if (token.IsCancellationRequested || _islandState != IslandVisualState.Search) return;
-
-                int insertIdx = _searchResults.FindIndex(r => r.Category == SearchCategory.Web);
-                if (insertIdx < 0) insertIdx = _searchResults.Count;
-
-                foreach (var f in files.Take(3))
-                {
-                    _searchResults.Insert(insertIdx++, f);
-                }
-                RenderResultRows();
-            });
-        });
-    }
-
-    private void AddWindowResults(string query, int max)
-    {
-        var svc = WindowSwitcherService.Instance;
-        foreach (var (w, score, indices) in svc.Match(query, max))
-        {
-            var target = w.Handle;
-            _searchResults.Add(new SearchResult
-            {
-                Title = w.Title,
-                Subtitle = w.ProcessName,
-                Category = SearchCategory.Windows,
-                Icon = svc.CachedIcon(w),
-                FallbackLetter = w.ProcessName.Length > 0 ? char.ToUpperInvariant(w.ProcessName[0]).ToString() : "W",
-                FallbackColor = Color.FromRgb(0x5E, 0x81, 0xAC),
-                KeyboardHint = "Switch",
-                Score = score,
-                MatchedIndices = indices,
-                WindowHandle = target,
-                Action = () =>
-                {
-                    // CloseSearch would hand focus back to the previous window; switch afterwards instead.
-                    _prevForegroundHwnd = IntPtr.Zero;
-                    Dispatcher.BeginInvoke(DispatcherPriority.Background, () =>
-                    {
-                        if (!WindowActivation.BringToFront(target)) ShowActionSuccess("Could not switch to that window");
-                    });
-                },
-            });
-        }
-    }
-
-    /// <summary>The cached window list arrived after the bar opened: refresh the visible results.</summary>
-    private void OnWindowListRefreshed()
-    {
-        try
-        {
-            Dispatcher.BeginInvoke(() =>
-            {
-                if (_islandState == IslandVisualState.Search && _activeTag is null) UpdateSearchResults(SearchInput.Text);
-            });
-        }
-        catch (TaskCanceledException) { /* dispatcher shutting down */ }
-    }
-
-    private List<SearchResult> GetSystemCommands(string query)
-    {
-        var list = new List<(SearchResult Item, int Score)>();
-        var candidates = new (string Title, string Subtitle, bool IsRisky, Action Action)[]
-        {
-            ("Lock PC", "Lock Windows workstation", false, () => { try { Process.Start(new ProcessStartInfo("rundll32.exe", "user32.dll,LockWorkStation") { UseShellExecute = true }); ShowActionSuccess("✓ Locked PC"); } catch { } }),
-            ("Sleep", "Put computer to sleep", false, () => { try { Process.Start(new ProcessStartInfo("rundll32.exe", "powrprof.dll,SetSuspendState 0,1,0") { UseShellExecute = true }); ShowActionSuccess("✓ Sleep"); } catch { } }),
-            ("Restart", "Restart computer", true, () => { try { Process.Start(new ProcessStartInfo("shutdown.exe", "/r /t 0") { UseShellExecute = true, CreateNoWindow = true }); ShowActionSuccess("✓ Restarting..."); } catch { } }),
-            ("Shut Down", "Turn off computer", true, () => { try { Process.Start(new ProcessStartInfo("shutdown.exe", "/s /t 0") { UseShellExecute = true, CreateNoWindow = true }); ShowActionSuccess("✓ Shutting down..."); } catch { } }),
-            ("Task Manager", "View running processes and performance", false, () => { try { Process.Start(new ProcessStartInfo("taskmgr.exe") { UseShellExecute = true }); ShowActionSuccess("✓ Opened Task Manager"); } catch { } }),
-            ("Windows Settings", "Open system settings", false, () => { try { Process.Start(new ProcessStartInfo("ms-settings:") { UseShellExecute = true }); ShowActionSuccess("✓ Opened Settings"); } catch { } }),
-            ("Terminal", "Open Windows Terminal", false, () => { try { Process.Start(new ProcessStartInfo("wt.exe") { UseShellExecute = true }); ShowActionSuccess("✓ Opened Terminal"); } catch { } }),
-        };
-
-        foreach (var (title, subtitle, isRisky, action) in candidates)
-        {
-            var match = FuzzyMatcher.Match(title, query);
-            if (match.Matched)
-            {
-                list.Add((new SearchResult
-                {
-                    Title = title,
-                    Subtitle = subtitle,
-                    Category = SearchCategory.Commands,
-                    FallbackLetter = title[0].ToString(),
-                    FallbackColor = Color.FromRgb(0x8A, 0x5C, 0xF6),
-                    IsRisky = isRisky,
-                    KeyboardHint = isRisky ? "Enter again to confirm" : "Enter",
-                    Score = match.Score,
-                    MatchedIndices = match.MatchedIndices,
-                    Action = action
-                }, match.Score));
-            }
-        }
-
-        list.Sort((a, b) => b.Score.CompareTo(a.Score));
-        return list.Select(x => x.Item).ToList();
-    }
-
-    private void ExecuteWebSearch(string query)
-    {
-        try
-        {
-            string url = $"https://www.google.com/search?q={Uri.EscapeDataString(query)}";
-            Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
-            ShowActionSuccess("✓ Searched Google");
-        }
-        catch { }
-        CloseSearch();
-    }
-
-    private void ExecuteResult(SearchResult result)
-    {
-        if (result.IsRisky)
-        {
-            if (!_armedRiskyCommand || _armedCommandTitle != result.Title)
-            {
-                _armedRiskyCommand = true;
-                _armedCommandTitle = result.Title;
-                UpdateRowSelections();
-                return;
-            }
-        }
-
-        _armedRiskyCommand = false;
-        _armedCommandTitle = "";
-
-        try
-        {
-            result.Action?.Invoke();
-        }
-        catch (Exception ex)
-        {
-            Log.Debug("Failed to execute search result", ("error", ex.Message));
-        }
-
-        CloseSearch();
-    }
-
-    private void RenderResultRows()
-    {
-        if (_searchResults.Count == 0)
-        {
-            SearchResultsSection.Visibility = Visibility.Collapsed;
-            SearchResultsList.Children.Clear();
-            SearchResultsScroll.Height = double.NaN;
-            AnimateIslandHeight(58.0);
-            return;
-        }
-
-        SearchResultsSection.Visibility = Visibility.Visible;
-        SearchResultsList.Children.Clear();
-
-        var groups = _searchResults.GroupBy(r => r.Category);
-        int itemIndex = 0;
-        foreach (var group in groups)
-        {
-            string headerTitle = group.Key switch
-            {
-                SearchCategory.Calculator => "CALCULATOR",
-                SearchCategory.Apps => "APPLICATIONS",
-                SearchCategory.Commands => "COMMANDS",
-                SearchCategory.Windows => "WINDOWS",
-                SearchCategory.Files => "FILES",
-                SearchCategory.Web => "WEB SEARCH",
-                _ => group.Key.ToString().ToUpperInvariant()
-            };
-
-            var headerBorder = new Border
-            {
-                Height = 22,
-                Margin = new Thickness(8, itemIndex == 0 ? 2 : 6, 8, 2)
-            };
-            var headerText = new TextBlock
-            {
-                Text = headerTitle,
-                FontSize = 10,
-                FontWeight = FontWeights.SemiBold,
-                Foreground = (Brush)FindResource("WdbTextMutedBrush"),
-                VerticalAlignment = VerticalAlignment.Center
-            };
-            headerBorder.Child = headerText;
-            SearchResultsList.Children.Add(headerBorder);
-
-            foreach (var item in group)
-            {
-                int currentIndex = itemIndex++;
-                var rowBorder = CreateResultRowBorder(item, currentIndex);
-                SearchResultsList.Children.Add(rowBorder);
-            }
-        }
-
-        SearchResultsSection.UpdateLayout();
-        double desiredH = SearchResultsList.ActualHeight;
-        if (desiredH <= 0) desiredH = _searchResults.Count * 44 + 40;
-        double scrollH = Math.Min(330, desiredH + 10);
-        SearchResultsScroll.Height = scrollH;
-        double targetIslandH = 58 + 1 + scrollH + 16;
-        AnimateIslandHeight(targetIslandH);
-    }
-
-    private Border CreateResultRowBorder(SearchResult item, int index)
-    {
-        bool isSel = index == _selectedResultIndex;
-        var rowBorder = new Border
-        {
-            Height = 44,
-            CornerRadius = new CornerRadius(8),
-            Background = isSel ? new SolidColorBrush(Color.FromArgb(26, 255, 255, 255)) : Brushes.Transparent,
-            Margin = new Thickness(0, 1, 0, 1),
-            Padding = new Thickness(10, 0, 12, 0),
-            Tag = index,
-            Cursor = Cursors.Hand
-        };
-
-        var grid = new Grid { VerticalAlignment = VerticalAlignment.Center };
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-
-        // 1. Icon (28px rounded)
-        var iconBorder = new Border
-        {
-            Width = 28,
-            Height = 28,
-            CornerRadius = new CornerRadius(7),
-            Margin = new Thickness(0, 0, 10, 0),
-            VerticalAlignment = VerticalAlignment.Center,
-            ClipToBounds = true
-        };
-
-        if (item.Icon != null)
-        {
-            iconBorder.Child = new Image
-            {
-                Source = item.Icon,
-                Width = 22,
-                Height = 22,
-                Stretch = Stretch.Uniform,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center
-            };
-        }
-        else
-        {
-            iconBorder.Background = new SolidColorBrush(item.FallbackColor ?? Color.FromRgb(70, 70, 80));
-            iconBorder.Child = new TextBlock
-            {
-                Text = item.FallbackLetter ?? "•",
-                FontSize = 13,
-                FontWeight = FontWeights.Bold,
-                Foreground = Brushes.White,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center
-            };
-        }
-        Grid.SetColumn(iconBorder, 0);
-        grid.Children.Add(iconBorder);
-
-        // 2. Title & Subtitle
-        var textStack = new StackPanel
-        {
-            Orientation = Orientation.Vertical,
-            VerticalAlignment = VerticalAlignment.Center
-        };
-
-        var titleBlock = new TextBlock
-        {
-            FontSize = 14,
-            FontWeight = FontWeights.SemiBold,
-            TextTrimming = TextTrimming.CharacterEllipsis
-        };
-        RenderHighlightedText(titleBlock, item.Title, item.MatchedIndices);
-        textStack.Children.Add(titleBlock);
-
-        var subtitleBlock = new TextBlock
-        {
-            FontSize = 11,
-            FontFamily = new FontFamily("Consolas, Cascadia Code, monospace"),
-            Foreground = (Brush)FindResource("WdbTextMutedBrush"),
-            TextTrimming = TextTrimming.CharacterEllipsis,
-            Text = item.Subtitle
-        };
-        textStack.Children.Add(subtitleBlock);
-
-        Grid.SetColumn(textStack, 1);
-        grid.Children.Add(textStack);
-
-        // 3. Keyboard Hint (Selected row only)
-        var hintBlock = new TextBlock
-        {
-            FontSize = 11,
-            FontFamily = new FontFamily("Consolas, Cascadia Code, monospace"),
-            Foreground = (Brush)FindResource("WdbTextMutedBrush"),
-            VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(10, 0, 0, 0),
-            Text = GetItemHint(item),
-            Visibility = isSel ? Visibility.Visible : Visibility.Collapsed
-        };
-        Grid.SetColumn(hintBlock, 2);
-        grid.Children.Add(hintBlock);
-
-        rowBorder.Child = grid;
-
-        rowBorder.MouseEnter += (s, e) =>
-        {
-            if (s is Border b && b.Tag is int idx)
-            {
-                _selectedResultIndex = idx;
-                _armedRiskyCommand = false;
-                _armedCommandTitle = "";
-                UpdateRowSelections();
-            }
-        };
-
-        rowBorder.MouseDown += (s, e) =>
-        {
-            if (e.ChangedButton == MouseButton.Left)
-            {
-                e.Handled = true;
-                ExecuteResult(item);
-            }
-        };
-
-        return rowBorder;
-    }
-
-    private string GetItemHint(SearchResult item)
-    {
-        if (item.IsRisky)
-        {
-            if (_armedRiskyCommand && _armedCommandTitle == item.Title)
-                return "Enter again to confirm";
-            return "Enter";
-        }
-        if (item.Category == SearchCategory.Apps)
-            return "Tab commands \u00B7 Enter open";
-        return item.KeyboardHint ?? "Enter";
-    }
-
-    private void RenderHighlightedText(TextBlock tb, string fullText, List<int>? matchedIndices)
-    {
-        tb.Inlines.Clear();
-        if (matchedIndices == null || matchedIndices.Count == 0)
-        {
-            tb.Inlines.Add(new Run(fullText) { Foreground = (Brush)FindResource("WdbTextBrush") });
-            return;
-        }
-
-        var matchSet = new HashSet<int>(matchedIndices);
-        var accentBrush = (Brush)FindResource("WdbAccentBrush");
-        var textBrush = (Brush)FindResource("WdbTextBrush");
-
-        int i = 0;
-        while (i < fullText.Length)
-        {
-            bool isMatch = matchSet.Contains(i);
-            int start = i;
-            while (i < fullText.Length && matchSet.Contains(i) == isMatch)
-            {
-                i++;
-            }
-            string part = fullText.Substring(start, i - start);
-            if (isMatch)
-            {
-                tb.Inlines.Add(new Run(part)
-                {
-                    Foreground = accentBrush,
-                    FontWeight = FontWeights.Bold
-                });
-            }
-            else
-            {
-                tb.Inlines.Add(new Run(part)
-                {
-                    Foreground = textBrush
-                });
-            }
-        }
-    }
-
-    private void UpdateRowSelections()
-    {
-        foreach (UIElement child in SearchResultsList.Children)
-        {
-            if (child is Border b && b.Tag is int idx)
-            {
-                bool isSel = idx == _selectedResultIndex;
-                b.Background = isSel ? new SolidColorBrush(Color.FromArgb(26, 255, 255, 255)) : Brushes.Transparent;
-                if (b.Child is Grid grid && grid.Children.Count >= 3 && grid.Children[2] is TextBlock hintBlock)
-                {
-                    hintBlock.Visibility = isSel ? Visibility.Visible : Visibility.Collapsed;
-                    if (isSel && idx >= 0 && idx < _searchResults.Count)
-                    {
-                        hintBlock.Text = GetItemHint(_searchResults[idx]);
-                    }
-                }
-            }
-        }
-    }
-
-    private void ScrollSelectedIntoView()
-    {
-        foreach (UIElement child in SearchResultsList.Children)
-        {
-            if (child is Border b && b.Tag is int idx && idx == _selectedResultIndex)
-            {
-                b.BringIntoView();
-                break;
-            }
-        }
-    }
-
-    private void AnimateIslandHeight(double targetH)
-    {
-        if (_cfg.ReduceMotion)
-        {
-            ApplyH(targetH);
-            return;
-        }
-        _anim.Animate("h", _currentH, targetH, ApplyH);
-    }
-
-    private void ShowActionSuccess(string message)
-    {
-        _actionSuccessTimer?.Stop();
-        CollapsedTitle.Text = message;
-        if (_idleMode) { IdleChipText.Text = message; IdleChip.Visibility = Visibility.Visible; }
-        _actionSuccessTimer ??= new DispatcherTimer { Interval = TimeSpan.FromSeconds(2.6) };
-        _actionSuccessTimer.Tick -= OnActionSuccessTick;
-        _actionSuccessTimer.Tick += OnActionSuccessTick;
-        _actionSuccessTimer.Start();
-    }
-
-    private void OnActionSuccessTick(object? sender, EventArgs e)
-    {
-        _actionSuccessTimer?.Stop();
-        UpdateCollapsed();
     }
 
 }

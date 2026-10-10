@@ -47,10 +47,17 @@ public static class Log
 
     private static void OpenWriter_NoLock()
     {
-        _writer?.Dispose();
-        _logFile = Path.Combine(LogDirectory, $"wdb-{DateTime.Now:yyyyMMdd}.log");
-        var fs = new FileStream(_logFile, FileMode.Append, FileAccess.Write, FileShare.Read);
-        _writer = new StreamWriter(fs, Encoding.UTF8) { AutoFlush = true };
+        try
+        {
+            _writer?.Dispose();
+            _logFile = Path.Combine(LogDirectory, $"wdb-{DateTime.Now:yyyyMMdd}.log");
+            var fs = new FileStream(_logFile, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
+            _writer = new StreamWriter(fs, Encoding.UTF8) { AutoFlush = true };
+        }
+        catch
+        {
+            _writer = null;
+        }
     }
 
     public static void Debug(string message, params (string Key, object? Value)[] props) => Write(LogLevel.Debug, message, null, props);

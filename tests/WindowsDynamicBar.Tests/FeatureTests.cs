@@ -22,6 +22,7 @@ internal static partial class Program
         Run("Island layout: parse, dedupe, fallback", TestIslandLayout);
         Run("Timer command parsing (timer 10 min, 90s, 1h30m, 1:30)", TestTimerCommand);
         Run("TimerService counts down in real time (regression)", TestTimerAccuracy);
+        Run("TimerService pause, resume and cancel behavior", TestTimerPauseResume);
         Run("TimerService end time persisted and restored", TestTimerPersistence);
         Run("Battery warning: 5 s at <=15% on battery, released by charger or >20%", TestBatteryWarning);
         Run("Battery glyphs: levels and charging variants", TestBatteryGlyphs);
@@ -31,6 +32,9 @@ internal static partial class Program
         Run("Settings: v1 file migrates Reduce Motion", TestSettingsMigration);
         Run("Hotkeys: format, compare, duplicates", TestHotkeyHelpers);
         Run("SemVer comparison for updates", TestSemVer);
+        Run("FirstRunDone: property alias keeps backward compatibility", TestFirstRunDoneAlias);
+        Run("WindowSwitcher: fuzzy title and process matching", TestWindowSwitcherMatching);
+        Run("Fullscreen: invalid handles return false safely", TestFullscreenCheck);
     }
 
     private static string ScratchDir()
@@ -223,6 +227,31 @@ internal static partial class Program
         finally { File.Delete(path); }
     }
 
+    private static void TestTimerPauseResume()
+    {
+        string path = UseScratchState();
+        try
+        {
+            var bus = new WindowsDynamicBar.Core.Events.EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+            using var timer = new WindowsDynamicBar.Services.Timers.TimerService(bus, WindowsDynamicBar.Core.Settings.SettingsService.Instance);
+            timer.Start(TimeSpan.FromSeconds(5), "PauseTest");
+            Pump(250);
+            timer.Pause();
+            var paused = timer.Current;
+            AssertEq(WindowsDynamicBar.Services.Timers.TimerState.Paused, paused.State, "timer is paused");
+            var remPaused = paused.Remaining;
+            Pump(250);
+            AssertEq(remPaused, timer.Current.Remaining, "remaining time does not decrement while paused");
+            timer.Resume();
+            AssertEq(WindowsDynamicBar.Services.Timers.TimerState.Running, timer.Current.State, "timer resumed to running");
+            Pump(250);
+            Assert(timer.Current.Remaining < remPaused, "remaining time decrements after resume");
+            timer.Cancel();
+            AssertEq(WindowsDynamicBar.Services.Timers.TimerState.Idle, timer.Current.State, "cancel sets idle");
+        }
+        finally { File.Delete(path); }
+    }
+
     private static void TestTimerPersistence()
     {
         string path = UseScratchState();
@@ -396,5 +425,35 @@ internal static partial class Program
         Assert(MediaService.IsMeaningfulChange(a, a with { IsPlaying = false }), "pause is a change");
         Assert(MediaService.IsMeaningfulChange(a, a with { Title = "Other" }), "new title is a change");
         Assert(MediaService.IsMeaningfulChange(a, a with { ArtworkBytes = new byte[] { 1 } }), "new artwork is a change");
+    }
+
+    private static void TestFirstRunDoneAlias()
+    {
+        var model = new WindowsDynamicBar.Core.Settings.SettingsModel { FirstRunCompleted = false };
+        AssertEq(false, model.FirstRunDone, "FirstRunDone mirrors FirstRunCompleted false");
+        model.FirstRunDone = true;
+        AssertEq(true, model.FirstRunCompleted, "Setting FirstRunDone sets FirstRunCompleted true");
+    }
+
+    private static void TestWindowSwitcherMatching()
+    {
+        var w1 = new WindowsDynamicBar.Services.Search.WindowEntry(new IntPtr(1), "Visual Studio Code", "Code", "C:\\Code\\Code.exe", 0);
+        var w2 = new WindowsDynamicBar.Services.Search.WindowEntry(new IntPtr(2), "Windows Terminal", "wt", "C:\\wt.exe", 1);
+        var w3 = new WindowsDynamicBar.Services.Search.WindowEntry(new IntPtr(3), "Spotify Free", "Spotify", "C:\\Spotify.exe", 2);
+
+        // FuzzyMatcher scoring against title & process
+        var mCode = WindowsDynamicBar.Core.Search.FuzzyMatcher.Match(w1.Title, "code");
+        Assert(mCode.Matched, "code matches Visual Studio Code");
+
+        var mTerminal = WindowsDynamicBar.Core.Search.FuzzyMatcher.Match(w2.Title, "term");
+        Assert(mTerminal.Matched, "term matches Windows Terminal");
+
+        var mSpotify = WindowsDynamicBar.Core.Search.FuzzyMatcher.Match(w3.ProcessName, "spot");
+        Assert(mSpotify.Matched, "spot matches Spotify process name");
+    }
+
+    private static void TestFullscreenCheck()
+    {
+        Assert(!WindowsDynamicBar.Interop.NativeMethods.IsWindowFullscreen(IntPtr.Zero), "IntPtr.Zero is not fullscreen");
     }
 }

@@ -20,10 +20,12 @@ public partial class TimerDetailPanel : UserControl
     private static readonly Brush NameBrush = Frozen(Color.FromRgb(0xE6, 0xE0, 0xA8));
     private static readonly Brush MetricBrush = Frozen(Color.FromRgb(0x8A, 0xB4, 0x78));
     private static readonly Brush WarnBrush = Frozen(Color.FromRgb(0xD9, 0x8A, 0x5B));
+    private static readonly Brush AmberBrush = Frozen(Color.FromRgb(0xE8, 0xB0, 0x4B));
     private static readonly int[] PresetMinutes = { 5, 10, 25, 45 };
     private const double AmberHue = 38;
 
     private bool _running;
+    private bool _paused;
 
     public TimerDetailPanel()
     {
@@ -52,17 +54,47 @@ public partial class TimerDetailPanel : UserControl
     /// <summary>Start a countdown of this length.</summary>
     public event Action<TimeSpan>? StartRequested;
     public event Action? StopRequested;
+    public event Action? PauseRequested;
+    public event Action? ResumeRequested;
 
     public void Render(TimerInfo? info)
     {
         bool active = info is { State: TimerState.Running or TimerState.Paused } && info.Remaining > TimeSpan.Zero;
+        bool isPaused = info?.State == TimerState.Paused;
+        bool isRunning = info?.State == TimerState.Running;
         _running = active;
+        _paused = isPaused;
         var remaining = active ? info!.Remaining : TimeSpan.Zero;
-        Countdown.SetTime(TimerCommand.DotText(remaining), colonOn: true);
+        Countdown.SetTime(TimerCommand.DotText(remaining), colonOn: !isPaused || (DateTime.Now.Second % 2 == 0));
         Progress.Fraction = active ? info!.Progress : 0;
-        StartStopText.Text = active ? "stop" : "start";
-        StartStop.BorderBrush = active ? WarnBrush : MetricBrush;
-        StartStopText.Foreground = active ? WarnBrush : MetricBrush;
+
+        if (active)
+        {
+            PauseBtn.Visibility = Visibility.Visible;
+            if (isPaused)
+            {
+                PauseText.Text = "resume";
+                PauseBtn.BorderBrush = MetricBrush;
+                PauseText.Foreground = MetricBrush;
+            }
+            else
+            {
+                PauseText.Text = "pause";
+                PauseBtn.BorderBrush = AmberBrush;
+                PauseText.Foreground = AmberBrush;
+            }
+
+            StartStopText.Text = "stop";
+            StartStop.BorderBrush = WarnBrush;
+            StartStopText.Foreground = WarnBrush;
+        }
+        else
+        {
+            PauseBtn.Visibility = Visibility.Collapsed;
+            StartStopText.Text = "start";
+            StartStop.BorderBrush = MetricBrush;
+            StartStopText.Foreground = MetricBrush;
+        }
 
         StatusText.Text = info?.State switch
         {
@@ -87,10 +119,23 @@ public partial class TimerDetailPanel : UserControl
         if (sender is FrameworkElement { Tag: int minutes }) StartRequested?.Invoke(TimeSpan.FromMinutes(minutes));
     }
 
+    private void OnPauseClick(object sender, MouseButtonEventArgs e)
+    {
+        e.Handled = true;
+        if (_paused)
+        {
+            ResumeRequested?.Invoke();
+        }
+        else if (_running)
+        {
+            PauseRequested?.Invoke();
+        }
+    }
+
     private void OnStartStopClick(object sender, MouseButtonEventArgs e)
     {
         e.Handled = true;
-        if (_running) { StopRequested?.Invoke(); return; }
+        if (_running || _paused) { StopRequested?.Invoke(); return; }
         StartCustom();
     }
 
@@ -122,6 +167,33 @@ public partial class TimerDetailPanel : UserControl
         if (e.Key != Key.Enter) return;
         e.Handled = true;
         StartCustom();
+    }
+
+    private void OnCustomBorderMouseDown(object sender, MouseButtonEventArgs e)
+    {
+        e.Handled = true;
+        FocusCustom();
+    }
+
+    private void OnCustomBoxPreviewMouseDown(object sender, MouseButtonEventArgs e)
+    {
+        FocusCustom();
+    }
+
+    private void OnCustomBoxGotFocus(object sender, RoutedEventArgs e)
+    {
+        Window.GetWindow(this)?.Activate();
+    }
+
+    public void FocusCustom()
+    {
+        try
+        {
+            Window.GetWindow(this)?.Activate();
+            CustomBox.Focus();
+            Keyboard.Focus(CustomBox);
+        }
+        catch { }
     }
 
     private static SolidColorBrush Frozen(Color c)

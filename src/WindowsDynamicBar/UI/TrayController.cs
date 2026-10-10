@@ -46,50 +46,61 @@ public sealed class TrayController : IDisposable
     {
         _menu.Items.Clear();
 
-        var toggle = new ToolStripMenuItem($"Toggle bar\t({App.Settings?.Current.HotkeyToggle ?? "Ctrl+Alt+Space"})");
-        toggle.Click += (_, _) => App.Bar?.Toggle();
-        _menu.Items.Add(toggle);
+        var open = new ToolStripMenuItem("Open island");
+        open.Click += (_, _) => App.Bar?.Toggle();
+        _menu.Items.Add(open);
 
-        var gaming = new ToolStripMenuItem("Gaming mode")
-        {
-            CheckOnClick = true,
-            Checked = App.GamingMode,
-            ToolTipText = "While on, only critical alerts (battery, privacy, USB) open the bar",
-        };
-        gaming.CheckedChanged += (_, _) => App.GamingMode = gaming.Checked;
-        _menu.Items.Add(gaming);
-
-        var sysmon = new ToolStripMenuItem("System monitor")
-        {
-            CheckOnClick = true,
-            Checked = App.Settings?.Current.FeatureSystemMonitor ?? false,
-        };
-        sysmon.CheckedChanged += (_, _) =>
-        {
-            bool on = sysmon.Checked;
-            App.Settings?.Update(s => s.FeatureSystemMonitor = on);
-            try { if (on) App.SysMon?.Activate(); else App.SysMon?.Deactivate(); } catch { }
-        };
-        _menu.Items.Add(sysmon);
-
-        var barVisible = new ToolStripMenuItem("Show bar")
-        {
-            CheckOnClick = true,
-            Checked = App.Settings?.Current.BarEnabled ?? true,
-        };
-        barVisible.CheckedChanged += (_, _) =>
-        {
-            bool on = barVisible.Checked;
-            App.Settings?.Update(s => s.BarEnabled = on);
-            try { if (on) App.Bar?.Show(); else App.Bar?.Hide(); } catch { }
-        };
-        _menu.Items.Add(barVisible);
-
-        _menu.Items.Add(new ToolStripSeparator());
+        var search = new ToolStripMenuItem("Search");
+        search.Click += (_, _) => App.Bar?.OpenSearch();
+        _menu.Items.Add(search);
 
         var settings = new ToolStripMenuItem("Settings…");
         settings.Click += (_, _) => SettingsWindow.ShowSingleton();
         _menu.Items.Add(settings);
+
+        _menu.Items.Add(new ToolStripSeparator());
+
+        bool paused = !(App.Settings?.Current.BarEnabled ?? true);
+        var pauseIsland = new ToolStripMenuItem("Pause island")
+        {
+            CheckOnClick = true,
+            Checked = paused,
+            ToolTipText = "Hides the island while keeping the tray icon running",
+        };
+        pauseIsland.CheckedChanged += (_, _) =>
+        {
+            bool isPaused = pauseIsland.Checked;
+            App.Settings?.Update(s => s.BarEnabled = !isPaused);
+            try { if (isPaused) App.Bar?.Hide(); else App.Bar?.Show(); } catch { }
+        };
+        _menu.Items.Add(pauseIsland);
+
+        var dnd = new ToolStripMenuItem("Do Not Disturb")
+        {
+            CheckOnClick = true,
+            Checked = App.GamingMode,
+            ToolTipText = "Only critical alerts (battery, privacy) expand the island",
+        };
+        dnd.CheckedChanged += (_, _) => App.GamingMode = dnd.Checked;
+        _menu.Items.Add(dnd);
+
+        var updates = new ToolStripMenuItem("Check for updates…");
+        updates.Click += async (_, _) =>
+        {
+            try
+            {
+                string res = await App.CheckForUpdatesAsync(interactive: true);
+                if (!string.IsNullOrEmpty(res))
+                {
+                    _icon.ShowBalloonTip(3000, App.AppName, res, ToolTipIcon.Info);
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Error("Tray update check", ex);
+            }
+        };
+        _menu.Items.Add(updates);
 
         var logs = new ToolStripMenuItem("Open logs folder");
         logs.Click += (_, _) =>
@@ -103,22 +114,23 @@ public sealed class TrayController : IDisposable
         };
         _menu.Items.Add(logs);
 
-        var about = new ToolStripMenuItem($"About {App.AppName} {App.InfoVersion}");
-        about.Click += (_, _) =>
-        {
-            MessageBox.Show(
-                $"{App.AppName} {App.InfoVersion}\n\n" +
-                "A Dynamic-Island-style overlay for Windows 10/11.\n" +
-                "Local-only: no telemetry, no data leaves this PC.",
-                "About", MessageBoxButtons.OK, MessageBoxIcon.Information);
-        };
-        _menu.Items.Add(about);
-
         _menu.Items.Add(new ToolStripSeparator());
 
-        var exit = new ToolStripMenuItem("Exit");
-        exit.Click += (_, _) => System.Windows.Application.Current.Shutdown();
-        _menu.Items.Add(exit);
+        var quit = new ToolStripMenuItem("Quit");
+        quit.Click += (_, _) => System.Windows.Application.Current.Shutdown();
+        _menu.Items.Add(quit);
+    }
+
+    /// <summary>Re-creates the tray icon after explorer.exe restarts (TaskbarCreated).</summary>
+    public void RecreateIcon()
+    {
+        try
+        {
+            _icon.Visible = false;
+            _icon.Icon = LoadAppIcon();
+            _icon.Visible = true;
+        }
+        catch { }
     }
 
     /// <summary>Second instance connects here and asks the first one to toggle.</summary>

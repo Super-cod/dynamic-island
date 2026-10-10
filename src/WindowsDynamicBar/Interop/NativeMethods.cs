@@ -92,11 +92,16 @@ internal static class NativeMethods
         return list;
     }
 
-    // ---------- hit testing ----------
+    // ---------- hit testing / mouse activation ----------
     public const int WM_NCHITTEST = 0x0084;
     public const int HTCLIENT = 1;
     public const int HTTRANSPARENT = -1;
     public const int HTCAPTION = 2;
+    public const int WM_MOUSEACTIVATE = 0x0021;
+    public const int MA_ACTIVATE = 1;
+    public const int MA_ACTIVATEANDEAT = 2;
+    public const int MA_NOACTIVATE = 3;
+    public const int MA_NOACTIVATEANDEAT = 4;
 
     // ---------- clipboard listener ----------
     public const int WM_CLIPBOARDUPDATE = 0x031D;
@@ -148,11 +153,43 @@ internal static class NativeMethods
     [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT lpPoint);
 
     // ---------- fullscreen detection ----------
+    public enum QUERY_USER_NOTIFICATION_STATE
+    {
+        QUNS_NOT_PRESENT = 1,
+        QUNS_BUSY = 2,
+        QUNS_RUNNING_D3D_FULL_SCREEN = 3,
+        QUNS_PRESENTATION_MODE = 4,
+        QUNS_ACCEPTS_NOTIFICATIONS = 5,
+        QUNS_QUIET_TIME = 6,
+        QUNS_APP = 7
+    }
+
+    [DllImport("shell32.dll")]
+    public static extern int SHQueryUserNotificationState(out QUERY_USER_NOTIFICATION_STATE pquns);
+
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern uint RegisterWindowMessage(string lpString);
+
     public static bool IsWindowFullscreen(IntPtr hWnd)
     {
         if (hWnd == IntPtr.Zero || !IsWindowVisible(hWnd)) return false;
+
+        try
+        {
+            if (SHQueryUserNotificationState(out var state) == 0)
+            {
+                if (state is QUERY_USER_NOTIFICATION_STATE.QUNS_BUSY
+                    or QUERY_USER_NOTIFICATION_STATE.QUNS_RUNNING_D3D_FULL_SCREEN
+                    or QUERY_USER_NOTIFICATION_STATE.QUNS_PRESENTATION_MODE)
+                {
+                    return true;
+                }
+            }
+        }
+        catch { }
+
         var appRoot = GetAncestor(hWnd, 2 /*GA_ROOT*/);
-        if (appRoot != hWnd) { hWnd = appRoot; }
+        if (appRoot != hWnd && appRoot != IntPtr.Zero) { hWnd = appRoot; }
         if (!GetWindowRect(hWnd, out var rc)) return false;
         var pt = new POINT { X = (rc.Left + rc.Right) / 2, Y = (rc.Top + rc.Bottom) / 2 };
         IntPtr monitor = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
@@ -206,7 +243,7 @@ internal static class NativeMethods
     // ---------- WM_SETTINGCHANGE / power ----------
     public const int WM_SETTINGCHANGE = 0x001A;
     public const int WM_DISPLAYCHANGE = 0x007E;
-    public const int WM_POWERBROADCAST = 0x0021;
+    public const int WM_POWERBROADCAST = 0x0218;
     public const int PBT_APMRESUMEAUTOMATIC = 0x0012;
     public const int PBT_APMSUSPEND = 0x0004;
 }

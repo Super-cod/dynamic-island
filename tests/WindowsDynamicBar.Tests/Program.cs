@@ -75,6 +75,7 @@ internal static partial class Program
         Run("Idle countdown / until strings", TestIdleStrings);
         Run("DotFont renders HH:mm on a 27x7 grid", TestDotFont);
         RunFeatureTests();
+        RunSearchRankingTests();
 
         Console.WriteLine(new string('-', 46));
         Console.WriteLine($"passed: {_pass}   failed: {_fail}");
@@ -365,6 +366,8 @@ internal static partial class Program
     {
         AssertEq("01:05", TimerService.Format(TimeSpan.FromSeconds(65)), "65s");
         AssertEq("00:09", TimerService.Format(TimeSpan.FromSeconds(9)), "9s");
+        AssertEq("00:10", TimerService.Format(TimeSpan.FromSeconds(9.8)), "9.8s rounds up to 10s countdown");
+        AssertEq("00:01", TimerService.Format(TimeSpan.FromSeconds(0.2)), "0.2s rounds up to 1s countdown");
         AssertEq("01:01:01", TimerService.Format(TimeSpan.FromSeconds(3661)), "3661s");
         AssertEq("00:00", TimerService.Format(TimeSpan.Zero), "zero");
     }
@@ -684,6 +687,21 @@ internal static partial class Program
             IslandVisualState.Detail, IslandMetric.Gpu, true, IslandMetric.None, false);
         AssertEq(IslandVisualState.Detail, s5, "moving to panel keeps detail");
         AssertEq(IslandMetric.Gpu, m5, "gpu stays selected");
+
+        // Click mode (hoverPreview = false): dynamic island expands on hover, but button hover does NOT open detail panel
+        var (sc0, mc0) = IslandStateMachine.Resolve(
+            IslandVisualState.Collapsed, IslandMetric.None, true, IslandMetric.None, false, hoverPreview: false);
+        AssertEq(IslandVisualState.Expanded, sc0, "click mode: pointer inside dynamic island expands it");
+        AssertEq(IslandMetric.None, mc0, "click mode: no metric on hover");
+
+        var (sc1, mc1) = IslandStateMachine.Resolve(
+            IslandVisualState.Expanded, IslandMetric.None, true, IslandMetric.Cpu, false, hoverPreview: false);
+        AssertEq(IslandVisualState.Expanded, sc1, "click mode: hovering button (cpu) stays expanded, does not open detail");
+        AssertEq(IslandMetric.None, mc1, "click mode: button hover ignored");
+
+        // SettingsModel default: HoverPreview is false (Click mode by default)
+        var defaultCfg = new WindowsDynamicBar.Core.Settings.SettingsModel();
+        Assert(!defaultCfg.HoverPreview, "SettingsModel defaults to Click mode (HoverPreview = false)");
 
         // Round-trip metric keys.
         AssertEq("cpu", IslandStateMachine.MetricKey(IslandMetric.Cpu), "cpu key");

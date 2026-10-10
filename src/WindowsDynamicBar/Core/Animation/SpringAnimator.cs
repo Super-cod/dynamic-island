@@ -182,6 +182,8 @@ public sealed class TweenAnimation : IDisposable
 
     public void Stop() => _timer.Stop();
 
+    public bool IsRunning => _timer.IsEnabled;
+
     private void OnTick(object? sender, EventArgs e)
     {
         var elapsed = DateTime.UtcNow - _start;

@@ -74,6 +74,18 @@ public partial class App : System.Windows.Application
 
         Log.Init((LogLevel)cfg.LogLevel);
         _logReady = true;
+        AppDomain.CurrentDomain.UnhandledException += (_, args) =>
+        {
+            if (args.ExceptionObject is Exception ex)
+                Log.Error("Unhandled AppDomain exception", ex);
+            else
+                Log.Error("Unhandled AppDomain non-exception: " + args.ExceptionObject);
+        };
+        TaskScheduler.UnobservedTaskException += (_, args) =>
+        {
+            Log.Error("Unobserved task exception", args.Exception);
+            args.SetObserved();
+        };
         Log.Info("Windows Dynamic Bar starting", ("version", InfoVersion), ("pid", Environment.ProcessId));
 
         var sw = System.Diagnostics.Stopwatch.StartNew();

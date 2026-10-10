@@ -6,84 +6,74 @@
 
 ## Features
 
-- **Media player** — album art, progress scrubbing, prev/play/next (Windows Media Session)
-- **Volume & brightness** — drag sliders in the bar, or use your keyboard; device name shown
-- **Battery** — percentage, charging state, time remaining; alerts at ≤20 %
-- **Network** — SSID, connect/disconnect alerts, **real Wi-Fi signal bars from RSSI** (`wlanapi.dll`); no signal data available → no bars shown (never faked)
+- **Media player** — album art, progress scrubbing, prev/play/next (Windows Media Session) and synchronized lyrics
+- **Volume & brightness HUD** — live on-screen display when keys or sliders change
+- **Battery** — percentage chip on collapsed pill with charging bolt; warning strip at ≤15% when on battery
+- **Network** — SSID, connect/disconnect alerts, real Wi-Fi signal bars from RSSI (`wlanapi.dll`), network speed test
 - **Bluetooth** — device connect/disconnect alerts with device classification
-- **System monitor** — CPU / GPU / RAM live meters; **shows "N/A" when a counter is unavailable** (never a fake 0 %)
-- **Telemetry island** — hover the collapsed bar for a CPU / GPU / RAM rail; hover a circle to expand a live 30-second graph panel (the sampler only runs while hovered)
-- **Spinning media disc** — album art plays as a rotating CD/vinyl disc in the collapsed pill (decelerates to a stop when paused, crossfades between tracks, static under *Reduce motion*)
-- **Privacy indicators** — camera / microphone in use, with the app name when known
-- **Timers, stopwatch, focus sessions** — with full transport controls in the bar
-- **Downloads, USB, screenshots** — folder watchers raise quiet, dismissable alerts
-- **Notifications** — reads Windows notifications when packaged (MSIX); gracefully off otherwise
-- **Gaming mode** — tray toggle; only critical alerts (privacy, timers, USB, low battery) open the bar while you play
+- **System monitor** — CPU / GPU / RAM live meters and telemetry detail charts
+- **Clipboard history** — WM_CLIPBOARDUPDATE capture (no polling), limit 10–50 items, pinned items, DPAPI encryption, password manager exclusions
+- **Countdown timer & stopwatch** — presets, custom durations, dot-matrix countdown, search command integration
+- **Search & window switcher** — application launcher, file search, math evaluation, and "w " window switcher
+- **Quick toggles** — Wi-Fi, Bluetooth, microphone mute, dark mode, do not disturb
+- **First-run guide** — 4-step onboarding wizard for features, permissions, and shortcuts
+- **Multi-monitor & gaming mode** — Per-monitor DPI V2 aware, autohide in fullscreen games/videos
 
-## Getting started
-
-| Method | File |
-|---|---|
-| **Installer (recommended)** | `release\WindowsDynamicBar-Setup.exe` |
-| **Portable** | `release\WindowsDynamicBar.exe` (single file, no install) |
-
-Run once — a 3-step wizard lets you pick a theme and startup behavior.
+## Getting Started
 
 ### Hotkeys
 
 | Hotkey | Action |
 |---|---|
-| `Ctrl+Alt+Space` | Toggle the bar |
-| `Ctrl+Alt+M` | Show media player |
-| `Ctrl+Alt+T` | Start / show a 5-minute timer |
+| `Ctrl+Space` | Open Search launcher & Window Switcher |
+| `Ctrl+Alt+V` | Open Clipboard History |
+| `Ctrl+Alt+Space` | Toggle the island |
+| `Ctrl+Alt+M` | Open Media Player |
+| `Ctrl+Alt+T` | Start or show 5-minute timer |
 
-All hotkeys are rebindable in **Settings → General**.
+All hotkeys can be recorded and customized in **Settings → General** with real-time conflict detection.
 
-## Themes
+### Installation & Packaging
 
-**Dark** (default), **Light**, and **Translucent** (extra glassy), plus 9 accent colors — Settings → Appearance. The bar honors *Reduce motion* and a per-monitor DPI-aware anchor with drag-to-reposition.
+- **Installer (Inno Setup)**: `release\WindowsDynamicBar-Setup.exe` (per-user, no admin required, Start menu shortcut, clean uninstaller)
+- **Portable**: `release\WindowsDynamicBar.exe` / `release\WindowsDynamicBar-Portable-win-x64.zip`
 
-## Privacy
-
-No telemetry, no accounts, no network calls of any kind. Clipboard monitoring is **off by default** and records only the format of a copy — contents are never read or stored. See [docs/PRIVACY.md](docs/PRIVACY.md).
-
-## Building from source
-
+Run the release script to build, test, publish, and package:
 ```powershell
-# build (0 warnings, 0 errors expected)
-dotnet build WindowsDynamicBar.sln -c Debug -p:Platform=x64
-
-# tests (must print passed: 26, failed: 0)
-.\tests\WindowsDynamicBar.Tests\bin\x64\Debug\net8.0-windows10.0.19041.0\WindowsDynamicBar.Tests.exe
-
-# release publish (self-contained single file)
-dotnet publish src\WindowsDynamicBar\WindowsDynamicBar.csproj -c Release -r win-x64 `
-  --self-contained true -p:PublishSingleFile=true `
-  -p:IncludeNativeLibrariesForSelfExtract=true -p:Platform=x64
-
-# installer (Inno Setup 6)
-& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" installer\WindowsDynamicBar.iss
+.\build-release.ps1
 ```
 
-Requires: .NET SDK 8.0+, Windows 10 19041+ (x64). Full details in [docs/BUILD.md](docs/BUILD.md).
+#### Code Signing
+To sign the resulting binary with your Authenticode certificate:
+```powershell
+.\build-release.ps1 -CertPath "C:\path\to\certificate.pfx" -CertPassword "YourPassword"
+```
+Or set `$env:CODESIGN_CERT` and `$env:CODESIGN_PASSWORD`. If omitted, the build completes unsigned cleanly without errors.
+
+## Building from Source
+
+```powershell
+# Restore & build
+dotnet build -c Release
+
+# Run test suite
+dotnet run --project tests\WindowsDynamicBar.Tests\WindowsDynamicBar.Tests.csproj -c Release
+
+# Publish self-contained ReadyToRun x64
+dotnet publish src\WindowsDynamicBar\WindowsDynamicBar.csproj -c Release -r win-x64 --self-contained true -p:PublishReadyToRun=true -p:PublishTrimmed=false
+```
+
+Requires: .NET SDK 8.0+, Windows 10 19041+ (x64). Full developer guide in [DEVELOPMENT.md](DEVELOPMENT.md).
 
 ## Documentation
 
-| Doc | Contents |
+| Document | Contents |
 |---|---|
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Event pipeline, services, rendering model |
-| [docs/PRIVACY.md](docs/PRIVACY.md) | Exactly what is and is not collected |
-| [docs/BUILD.md](docs/BUILD.md) | Build, test, publish, installer, CI |
+| [DEVELOPMENT.md](DEVELOPMENT.md) | House rules, performance targets, and 10-minute soak test protocol |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System architecture, event pipeline, rendering model |
+| [docs/PRIVACY.md](docs/PRIVACY.md) | Local-only privacy policy, encryption, and data protection |
+| [docs/BUILD.md](docs/BUILD.md) | Build instructions and packaging details |
 | [docs/CHANGELOG.md](docs/CHANGELOG.md) | Release history |
-| [docs/PROJECT-STATUS.md](docs/PROJECT-STATUS.md) | Engineering status and roadmap |
-
-## Known limitations
-
-- **GPU %** requires Windows performance counters; when unavailable the bar shows **N/A** (a machine without PDH GPU counters — e.g. some VMs — will not show GPU usage).
-- **Wi-Fi bars** need `wlanapi.dll`; on Ethernet or when RSSI is unavailable the card shows connection status only.
-- **Brightness** controls internal panels via WMI; external monitors without DDC/CI are skipped.
-- **Notification listening** requires a packaged (MSIX/Store) install; the plain .exe cannot register for user notifications.
-- **Media control** follows the Windows Media Session (works with Spotify, Edge, foobar2000, etc.); apps that expose no session won't appear.
 
 ## License
 

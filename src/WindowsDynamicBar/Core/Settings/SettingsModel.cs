@@ -30,8 +30,15 @@ public sealed class SettingsModel
     public double AnimationSpeed { get; set; } = 1.0;    // multiplier
     public PerformanceMode PerformanceMode { get; set; } = PerformanceMode.Balanced;
     public bool FirstRunCompleted { get; set; } = false;
+
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool FirstRunDone
+    {
+        get => FirstRunCompleted;
+        set => FirstRunCompleted = value;
+    }
     public bool SingleClickExpands { get; set; } = false;
-    public bool HoverPreview { get; set; } = true;
+    public bool HoverPreview { get; set; } = false;
     public int CollapseDelayMs { get; set; } = 3500;
 
     // ---- Appearance ----

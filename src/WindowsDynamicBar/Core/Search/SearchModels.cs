@@ -41,5 +41,8 @@ public sealed class AppInfo
     public ImageSource? Icon { get; set; }
     public byte[]? IconBytes { get; set; }
     public int LaunchCount { get; set; }
+    public DateTime? LastUsedUtc { get; set; }
+    /// <summary>Resolved shortcut target (the .exe), used to hide duplicate shortcuts and helper/doc links.</summary>
+    public string? TargetPath { get; init; }
     public List<string> Aliases { get; init; } = new();
 }

@@ -336,6 +336,10 @@ public partial class SettingsWindow : Window
 
     private void PopulateIsland(SettingsModel s)
     {
+        Card("Interaction");
+        Row("Open panels on", "Choose whether clicking or hovering over buttons opens detail panels.",
+            Segments(new[] { "Click", "Hover to preview" }, s.HoverPreview ? 1 : 0, i => Set(x => x.HoverPreview = i == 1)));
+
         Card("Rings");
         var (p1, p2) = IslandLayout.FromSettings(s.IslandPage1, s.IslandPage2);
         Row("Page 1", "Up to 6 rings, in this order.", PageEditor(p1, p2, 0), wrapBelow: true);

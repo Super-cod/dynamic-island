@@ -42,6 +42,34 @@ public sealed class MediaService : IDisposable
 
     public event Action<MediaInfo>? MediaChanged;
 
+    public MediaInfo? Current => _lastEmitted;
+
+    public bool IsPlaying
+    {
+        get
+        {
+            if (!_started) return false;
+            if (_lastEmitted is { IsPlaying: true }) return true;
+            try
+            {
+                if (_current?.GetPlaybackInfo()?.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
+                    return true;
+                var sessions = GetSessions();
+                foreach (var s in sessions)
+                {
+                    try
+                    {
+                        if (s.GetPlaybackInfo()?.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
+                            return true;
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+            return false;
+        }
+    }
+
     public string? CurrentAppId => _current?.SourceAppUserModelId;
 
     public bool IsRunning => _started;
@@ -51,7 +79,11 @@ public sealed class MediaService : IDisposable
     {
         if (!_started) return;
         _started = false;
-        if (_manager is not null) _manager.SessionsChanged -= OnSessionsChanged;
+        if (_manager is not null)
+        {
+            _manager.SessionsChanged -= OnSessionsChanged;
+            _manager.CurrentSessionChanged -= OnCurrentSessionChanged;
+        }
         HookSession(null);   // unhooks the session, stops the poll, emits "no media"
         _manager = null;
     }
@@ -65,6 +97,7 @@ public sealed class MediaService : IDisposable
         {
             _manager = await GlobalSystemMediaTransportControlsSessionManager.RequestAsync();
             _manager.SessionsChanged += OnSessionsChanged;
+            _manager.CurrentSessionChanged += OnCurrentSessionChanged;
             HookSession(PickBestSession());
             _started = true;
             Log.Info("Media service started");
@@ -73,6 +106,12 @@ public sealed class MediaService : IDisposable
         {
             Log.Warning("SMTC unavailable", ("error", ex.Message));
         }
+    }
+
+    private void OnCurrentSessionChanged(GlobalSystemMediaTransportControlsSessionManager sender,
+        CurrentSessionChangedEventArgs args)
+    {
+        HookSession(PickBestSession());
     }
 
     public IReadOnlyList<GlobalSystemMediaTransportControlsSession> GetSessions()
@@ -94,10 +133,15 @@ public sealed class MediaService : IDisposable
             if (matched is not null) return matched;
         }
 
-        var playing = sessions.FirstOrDefault(s => s.GetPlaybackInfo()?.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing);
+        var playing = sessions.FirstOrDefault(s =>
+        {
+            try { return s.GetPlaybackInfo()?.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing; }
+            catch { return false; }
+        });
         if (playing is not null) return playing;
 
-        return _manager.GetCurrentSession() ?? sessions.FirstOrDefault();
+        try { return _manager.GetCurrentSession() ?? sessions.FirstOrDefault(); }
+        catch { return sessions.FirstOrDefault(); }
     }
 
     public void CycleSession()
@@ -173,10 +217,33 @@ public sealed class MediaService : IDisposable
         _timelineTimer ??= new DispatcherTimerRef();
         _timelineTimer.Start(TimeSpan.FromSeconds(1), async () =>
         {
-            if (_current is null) return;
-            var info = await BuildInfoAsync();
-            if (info is null || !IsMeaningfulChange(_lastEmitted, info)) return;
-            Emit(info);
+            try
+            {
+                if (_manager is not null)
+                {
+                    var best = PickBestSession();
+                    if (best is not null && best.SourceAppUserModelId != _current?.SourceAppUserModelId)
+                    {
+                        try
+                        {
+                            if (best.GetPlaybackInfo()?.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
+                            {
+                                HookSession(best);
+                                return;
+                            }
+                        }
+                        catch { }
+                    }
+                }
+                if (_current is null) return;
+                var info = await BuildInfoAsync();
+                if (info is null || !IsMeaningfulChange(_lastEmitted, info)) return;
+                Emit(info);
+            }
+            catch (Exception ex)
+            {
+                Log.Debug("Timeline poll error", ("error", ex.Message));
+            }
         });
     }
 
@@ -209,7 +276,7 @@ public sealed class MediaService : IDisposable
             var props = await _current.TryGetMediaPropertiesAsync();
             var playback = _current.GetPlaybackInfo();
             var timeline = _current.GetTimelineProperties();
-            bool playing = playback.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing;
+            bool playing = playback?.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing;
 
             var identity = AppIconHelper.ResolveAppIdentity(_current.SourceAppUserModelId);
 
@@ -238,7 +305,7 @@ public sealed class MediaService : IDisposable
             double progress = duration.TotalSeconds > 0
                 ? Math.Clamp(position.TotalSeconds / duration.TotalSeconds, 0, 1) : 0;
 
-            bool canSeek = playback.Controls?.IsPlaybackPositionEnabled ?? true;
+            bool canSeek = playback?.Controls?.IsPlaybackPositionEnabled ?? true;
 
             Color dominant = identity.DominantColor;
             if (art is not null)
