@@ -1,4 +1,4 @@
-# ==============================================================================
+﻿# ==============================================================================
 # Windows Dynamic Bar - Release Build & Packaging Script
 # ==============================================================================
 # Usage:
@@ -22,7 +22,7 @@ Write-Host "==================================================" -ForegroundColor
 
 # 1. Restore & Test
 Write-Host "`n[1/5] Restoring and running tests..." -ForegroundColor Yellow
-dotnet restore
+dotnet restore WindowsDynamicBar.sln -m:1
 
 if (-not $SkipTests) {
     dotnet run --project tests\WindowsDynamicBar.Tests\WindowsDynamicBar.Tests.csproj -c Release

@@ -1,9 +1,10 @@
-; Windows Dynamic Bar - Inno Setup script
+﻿; Windows Dynamic Bar - Inno Setup script
 ; Builds: release\WindowsDynamicBar-Setup.exe  (per-user, no admin required)
 
 #define MyAppName "Windows Dynamic Bar"
 #define MyAppVersion "1.1.0"
-#define MyAppPublisher "Windows Dynamic Bar Project"
+#define MyAppPublisher "Supercell"
+#define MyAppURL "https://github.com/Super-cod/dynamic-island"
 #define MyAppExeName "WindowsDynamicBar.exe"
 #define MyPublishDir "..\src\WindowsDynamicBar\bin\x64\Release\net8.0-windows10.0.19041.0\win-x64\publish"
 #define MyIcon "..\src\WindowsDynamicBar\Assets\app.ico"
@@ -13,6 +14,10 @@ AppId={{9F2B6E3D-5C41-4A7E-9B08-D2E67F3A1C58}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
+AppPublisherURL={#MyAppURL}
+AppSupportURL={#MyAppURL}
+AppUpdatesURL={#MyAppURL}
+AppCopyright=Copyright © 2026 Supercell. All rights reserved except as expressly permitted by the accompanying licence.
 VersionInfoVersion={#MyAppVersion}
 VersionInfoDescription={#MyAppName} installer
 DefaultDirName={autopf}\WindowsDynamicBar

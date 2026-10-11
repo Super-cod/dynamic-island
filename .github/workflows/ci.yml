@@ -1,71 +1,56 @@
-name: CI
+﻿name: CI & Release Build
 
 on:
   push:
-    branches: [main, master]
+    branches: [main]
   pull_request:
+    branches: [main]
   workflow_dispatch:
 
 jobs:
-  build-test:
+  build-and-test:
+    name: Build & Run Automated Tests
     runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - name: Setup .NET 8
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8 SDK
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 8.0.x
+          dotnet-version: '8.0.x'
 
-      - name: Build
-        run: dotnet build WindowsDynamicBar.sln -c Debug -p:Platform=x64 --nologo -v minimal
+      - name: Restore Dependencies
+        run: dotnet restore WindowsDynamicBar.sln -m:1
 
-      - name: Test
-        run: .\tests\WindowsDynamicBar.Tests\bin\x64\Debug\net8.0-windows10.0.19041.0\WindowsDynamicBar.Tests.exe
+      - name: Build Solution (Release)
+        run: dotnet build WindowsDynamicBar.sln -c Release --no-restore
 
-      - name: Publish (single file)
+      - name: Run Automated Test Suite
+        run: dotnet run --project tests\WindowsDynamicBar.Tests\WindowsDynamicBar.Tests.csproj -c Release --no-build
+
+      - name: Publish Self-Contained Win-x64 Executable
         run: >
-          dotnet publish src\WindowsDynamicBar\WindowsDynamicBar.csproj -c Release -r win-x64
-          --self-contained true -p:PublishSingleFile=true
-          -p:IncludeNativeLibrariesForSelfExtract=true -p:Platform=x64
+          dotnet publish src\WindowsDynamicBar\WindowsDynamicBar.csproj
+          -c Release
+          -r win-x64
+          --self-contained true
+          -p:PublishReadyToRun=true
+          -p:PublishTrimmed=false
+          -o release\publish
 
-      - name: Upload portable exe
-        uses: actions/upload-artifact@v4
-        with:
-          name: WindowsDynamicBar-portable
-          path: src\WindowsDynamicBar\bin\x64\Release\net8.0-windows10.0.19041.0\win-x64\publish\WindowsDynamicBar.exe
-          if-no-files-found: error
-
-  installer:
-    # Manual only: requires Inno Setup on the runner.
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: windows-latest
-    needs: build-test
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup .NET 8
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: 8.0.x
-
-      - name: Publish
-        run: >
-          dotnet publish src\WindowsDynamicBar\WindowsDynamicBar.csproj -c Release -r win-x64
-          --self-contained true -p:PublishSingleFile=true
-          -p:IncludeNativeLibrariesForSelfExtract=true -p:Platform=x64
-
-      - name: Install Inno Setup
-        run: choco install innosetup -y --no-progress
-
-      - name: Build installer
+      - name: Archive Portable Release Package
+        shell: pwsh
         run: |
-          Copy-Item "src\WindowsDynamicBar\bin\x64\Release\net8.0-windows10.0.19041.0\win-x64\publish\WindowsDynamicBar.exe" "release\WindowsDynamicBar.exe"
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\WindowsDynamicBar.iss
+          Compress-Archive -Path "release\publish\*" -DestinationPath "release\WindowsDynamicBar-Portable-win-x64.zip" -CompressionLevel Optimal
+          Get-FileHash -Path "release\WindowsDynamicBar-Portable-win-x64.zip" -Algorithm SHA256 | Out-File -FilePath "release\checksums.txt" -Encoding utf8
 
-      - name: Upload installer
+      - name: Upload Portable Zip Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: WindowsDynamicBar-Setup
-          path: release\WindowsDynamicBar-Setup.exe
+          name: WindowsDynamicBar-Portable-win-x64
+          path: |
+            release/WindowsDynamicBar-Portable-win-x64.zip
+            release/checksums.txt
           if-no-files-found: error

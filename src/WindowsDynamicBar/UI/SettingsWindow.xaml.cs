@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -86,6 +86,8 @@ public partial class SettingsWindow : Window
     {
         if (sender is RadioButton { Tag: string key } && key != _page) SelectPage(key);
     }
+
+    internal void NavigateToPage(string key) => SelectPage(key);
 
     private void SelectPage(string key)
     {
@@ -538,11 +540,29 @@ public partial class SettingsWindow : Window
         StatusText.Text = "All data cleared";
     }
 
+    private static void OpenExternal(string pathOrUrl)
+    {
+        try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo { FileName = pathOrUrl, UseShellExecute = true }); }
+        catch { }
+    }
+
     private void PopulateAbout(SettingsModel s)
     {
-        Card(null);
-        Row($"{App.AppName} {App.InfoVersion}", "Local-only. No ads, no accounts.", null);
-        Row("Updates", string.IsNullOrWhiteSpace(s.UpdateFeedUrl) ? "No update address is set (see below)." : s.UpdateFeedUrl,
+        Card("Application");
+        Row($"{App.AppName} {App.InfoVersion}", "Dynamic-Island-style overlay for Windows 10 & 11. Local-only, privacy-focused.", null);
+        Row("Original Creator", "Supercell", null);
+        Row("Copyright", "Copyright © 2026 Supercell. All rights reserved except as expressly permitted by the accompanying licence.", null);
+        Row("Licence", "Source-available, non-commercial software. Free for personal use; commercial use prohibited without permission.",
+            ActionButton("View Licence", () => OpenExternal("https://github.com/Super-cod/dynamic-island/blob/main/LICENSE.md")));
+        Row("Official Repository", "https://github.com/Super-cod/dynamic-island",
+            ActionButton("Open GitHub", () => OpenExternal("https://github.com/Super-cod/dynamic-island")));
+
+        Card("Third-Party Acknowledgements");
+        Row("NAudio & NAudio.Wasapi", "Audio endpoint monitoring and WASAPI capture (MIT Licence).", null);
+        Row("System.Management & WMI", "Hardware telemetry and battery monitoring (MIT Licence).", null);
+
+        Card("Updates");
+        Row("Check for updates", string.IsNullOrWhiteSpace(s.UpdateFeedUrl) ? "No update address is set (see below)." : s.UpdateFeedUrl,
             ActionButton("Check for updates", async () =>
             {
                 StatusText.Text = "Checking…";
@@ -551,12 +571,8 @@ public partial class SettingsWindow : Window
         Row("Update address", "Where releases are published (filled in by the packager).",
             Field(s.UpdateFeedUrl, 300, v => Set(x => x.UpdateFeedUrl = v)), wrapBelow: true);
 
-        Card(null);
-        Row("Logs", Log.LogDirectory, ActionButton("Open folder", () =>
-        {
-            try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo { FileName = Log.LogDirectory, UseShellExecute = true }); }
-            catch (System.ComponentModel.Win32Exception ex) { StatusText.Text = ex.Message; }
-        }));
+        Card("Diagnostics & Support");
+        Row("Logs", Log.LogDirectory, ActionButton("Open folder", () => OpenExternal(Log.LogDirectory)));
         Row("Diagnostics", "Version, Windows, monitors and service status (no personal data).",
             ActionButton("Copy", () =>
             {
@@ -577,6 +593,9 @@ public partial class SettingsWindow : Window
         return new List<(string, string)>
         {
             ("App version", App.InfoVersion),
+            ("Original creator", "Supercell"),
+            ("Licence", "Source-available, non-commercial"),
+            ("Repository", "https://github.com/Super-cod/dynamic-island"),
             ("OS", Environment.OSVersion.VersionString),
             (".NET runtime", Environment.Version.ToString()),
             ("Process arch", RuntimeInformation.ProcessArchitecture.ToString()),
@@ -691,6 +710,18 @@ public partial class SettingsWindow : Window
 
     private static ImageSource? LoadIcon(int size)
     {
+        try
+        {
+            var bi = new BitmapImage();
+            bi.BeginInit();
+            bi.UriSource = new Uri("pack://application:,,,/Assets/app.ico");
+            bi.DecodePixelWidth = size;
+            bi.CacheOption = BitmapCacheOption.OnLoad;
+            bi.EndInit();
+            bi.Freeze();
+            return bi;
+        }
+        catch { }
         try
         {
             string path = Path.Combine(AppContext.BaseDirectory, "Assets", "app.ico");

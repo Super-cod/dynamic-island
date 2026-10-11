@@ -1,19 +1,56 @@
-## build output
-bin/
-obj/
-out/
+﻿# ==========================================
+# Windows Dynamic Bar - .gitignore
+# ==========================================
 
-## IDE
+# Build output
+[Bb]in/
+[Oo]bj/
+[Oo]ut/
+[Ll]og/
+[Ll]ogs/
+
+# Release artifacts (build on demand via build-release.ps1)
+release/*.exe
+release/*.zip
+release/*.pdb
+release/*.msi
+
+# Visual Studio & VS Code
 .vs/
 *.user
 *.suo
+*.userosscache
+*.sln.docstates
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
 
-## test results
+# Rider / JetBrains
+.idea/
+*.sln.iml
+
+# Test Results & Code Coverage
 TestResults/
+[Tt]est[Rr]esult*/
+*.trx
+*.coverage
+*.coveragexml
 
-## release artifacts (build them; exes are too large for GitHub)
-release/*.exe
-release/*.pdb
-
-## logs
+# Temporary and local files
+*.tmp
+*.temp
 *.log
+*.bak
+*.swp
+*~
+err.txt
+out.txt
+
+# OS Generated Files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.BIN/
+.DS_Store

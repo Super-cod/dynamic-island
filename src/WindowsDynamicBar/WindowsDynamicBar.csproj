@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
@@ -13,7 +13,12 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <AssemblyTitle>Windows Dynamic Bar</AssemblyTitle>
     <Product>Windows Dynamic Bar</Product>
-    <Company>Windows Dynamic Bar Project</Company>
+    <Company>Supercell</Company>
+    <Authors>Supercell</Authors>
+    <Copyright>Copyright © 2026 Supercell. All rights reserved except as expressly permitted by the accompanying licence.</Copyright>
+    <Description>A Dynamic-Island-style overlay for Windows 10 &amp; 11.</Description>
+    <RepositoryUrl>https://github.com/Super-cod/dynamic-island</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/Super-cod/dynamic-island</PackageProjectUrl>
     <FileVersion>1.1.0.0</FileVersion>
     <InformationalVersion>1.1.0</InformationalVersion>
     <Version>1.1.0</Version>
@@ -45,7 +50,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Include="Assets\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <Resource Include="Assets\**\*" />
+    <Content Include="Assets\**\*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

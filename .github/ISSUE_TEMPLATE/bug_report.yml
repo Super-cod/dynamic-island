@@ -1,0 +1,44 @@
+﻿name: Bug Report
+description: Report a defect, crash, or unexpected behavior in Windows Dynamic Bar
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Thank you for reporting a bug. Please ensure you are testing the latest version.
+  - type: input
+    id: version
+    attributes:
+      label: Windows Dynamic Bar Version
+      placeholder: e.g. 1.1.0
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Windows Version & Architecture
+      placeholder: e.g. Windows 11 23H2 (Build 22631.3880) x64
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the bug
+      description: Clear and concise description of what happened.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: What steps trigger this issue?
+      placeholder: |
+        1. Launch app
+        2. Press hotkey...
+        3. See error
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Diagnostics or Log Output
+      description: Go to Settings > About > Diagnostics > Copy, or attach the latest log from `%AppData%\WindowsDynamicBar\logs`.

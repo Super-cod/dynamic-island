@@ -1,0 +1,36 @@
+﻿# ==========================================
+# Windows Dynamic Bar - .editorconfig
+# ==========================================
+root = true
+
+[*]
+end_of_line = crlf
+charset = utf-8
+trim_trailing_whitespace = true
+insert_final_newline = true
+indent_style = space
+indent_size = 4
+
+[*.{cs,csx}]
+# Indentation & formatting
+csharp_indent_braces = false
+csharp_new_line_before_open_brace = all
+csharp_new_line_before_else = true
+csharp_new_line_before_catch = true
+csharp_new_line_before_finally = true
+csharp_preferred_modifier_order = public,private,protected,internal,static,extern,new,virtual,abstract,sealed,override,readonly,unsafe,volatile,async:suggestion
+
+# Language conventions
+csharp_style_var_for_built_in_types = false:suggestion
+csharp_style_var_when_type_is_apparent = true:suggestion
+dotnet_style_qualification_for_field = false:suggestion
+dotnet_style_qualification_for_property = false:suggestion
+dotnet_style_qualification_for_method = false:suggestion
+dotnet_style_qualification_for_event = false:suggestion
+
+[*.{xaml,xml,props,targets,csproj,sln}]
+indent_size = 2
+
+[*.{json,yml,yaml,md}]
+indent_size = 2
+trim_trailing_whitespace = true

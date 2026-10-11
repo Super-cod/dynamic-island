@@ -26,8 +26,20 @@ internal static partial class Program
     private static int _fail;
 
     [STAThread]
-    private static int Main()
+    private static int Main(string[] args)
     {
+        if (args.Length > 0 && args[0] == "--screenshots")
+        {
+            ScreenshotGenerator.GenerateAll("docs/screenshots");
+            return 0;
+        }
+        string testSettingsDir = Path.Combine(Path.GetTempPath(), "wdb-test-suite-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(testSettingsDir);
+        string originalSettingsPath = SettingsService.Instance.SettingsPath;
+        SettingsService.Instance.SettingsPath = Path.Combine(testSettingsDir, "settings.json");
+
+        try
+        {
         Console.WriteLine("Windows Dynamic Bar — test suite");
         Console.WriteLine(new string('-', 46));
 
@@ -80,6 +92,12 @@ internal static partial class Program
         Console.WriteLine(new string('-', 46));
         Console.WriteLine($"passed: {_pass}   failed: {_fail}");
         return _fail == 0 ? 0 : 1;
+        }
+        finally
+        {
+            SettingsService.Instance.SettingsPath = originalSettingsPath;
+            try { Directory.Delete(testSettingsDir, true); } catch { }
+        }
     }
 
     // ---------------------------------------------------------------- registration

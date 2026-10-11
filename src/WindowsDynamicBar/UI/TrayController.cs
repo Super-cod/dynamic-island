@@ -178,6 +178,13 @@ public sealed class TrayController : IDisposable
     {
         try
         {
+            var uri = new Uri("pack://application:,,,/Assets/app.ico");
+            var streamInfo = System.Windows.Application.GetResourceStream(uri);
+            if (streamInfo?.Stream is { } stream) return new Icon(stream);
+        }
+        catch { }
+        try
+        {
             string path = System.IO.Path.Combine(AppContext.BaseDirectory, "Assets", "app.ico");
             if (System.IO.File.Exists(path)) return new Icon(path);
         }

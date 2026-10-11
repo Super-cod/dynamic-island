@@ -172,7 +172,7 @@ public sealed class SettingsService
 
     public void ClearLoadProblem() => LoadProblem = null;
 
-    public string SettingsPath { get; } = Path.Combine(
+    public string SettingsPath { get; internal set; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "WindowsDynamicBar", "settings.json");
 

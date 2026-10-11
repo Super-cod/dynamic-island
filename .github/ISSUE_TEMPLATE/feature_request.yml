@@ -1,0 +1,26 @@
+﻿name: Feature Request
+description: Propose a new capability or UX improvement for Windows Dynamic Bar
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: Share your ideas for improving Windows Dynamic Bar!
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or Workflow Gap
+      description: Is your feature request related to an existing limitation or workflow?
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution / Visual Behavior
+      description: How should the feature work, and how should the Island or HUD respond?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Any alternative designs, apps, or workflows you considered.
