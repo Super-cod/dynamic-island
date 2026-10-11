@@ -16,18 +16,18 @@
 The app is **100% local-only and privacy-first**: no background telemetry is transmitted to remote servers, no account is required, and your clipboard history remains encrypted on your machine using Windows DPAPI.
 
 ![Windows Dynamic Bar on Desktop](docs/screenshots/desktop-bar.png)
-*Windows Dynamic Bar resting cleanly above your desktop workflow.*
+*Windows Dynamic Bar resting cleanly above your desktop workflow with media title, battery gauge, and clock.*
 
 ---
 
 ## Key Features
 
 - **Media Player & Visualizer** — Real-time album art, track details, seek progress, playback controls (Previous, Play/Pause, Next), and time-synchronized lyrics (LRCLib) with an optional rotating vinyl/CD disc animation.
-- **System Telemetry & Hardware Monitor** — Real-time CPU usage, GPU engine load via DXGI enumeration, memory utilization rings, battery status with a 15% warning strip, and Per-Monitor DPI V2 support.
+- **System Telemetry & Hardware Monitor** — Real-time CPU usage, GPU engine load via DXGI enumeration, 16-core heatmap, memory utilization rings, ACPI thermal zones, battery status with a 15% warning strip, and Per-Monitor DPI V2 support.
 - **Search Launcher & Window Switcher** — Instant launcher (`Ctrl+Space`) with fuzzy app matching, window switching (`w `), and math/conversion evaluation.
-- **Countdown Timer & Stopwatch** — Presets (5m, 10m, 25m, 45m), natural language parser (`15 min`, `90s`, `1:30`), and a retro digital LED countdown.
+- **Countdown Timer & Stopwatch** — Presets (5m, 10m, 25m, 45m), natural language parser (`15 min`, `90s`, `1:30`), and a retro digital LED dot-matrix countdown.
 - **Encrypted Clipboard History** — `WM_CLIPBOARDUPDATE` event-driven capture with zero polling, DPAPI encryption at rest, and automatic password manager exclusions (1Password, KeePass, Bitwarden).
-- **Network & Speed Test** — RSSI signal bars (`wlanapi.dll`), live transfer throughput, and integrated bandwidth/latency testing.
+- **Network & Speed Test** — RSSI signal bars (`wlanapi.dll`), live transfer throughput, ping latency probes (Gateway, DNS, Cloudflare, Google), and integrated bandwidth testing.
 - **Volume & Brightness HUD** — Dynamic on-screen display with dot-matrix spectrum visualization when system sliders or volume keys change.
 - **Customizable Appearance** — Dark, Light, and Translucent themes, 9 accent colors, adjustable corner radius, width, height, and animation speed.
 - **Gaming & Fullscreen Protection** — Automatically hides in fullscreen games and video playback.
@@ -36,20 +36,25 @@ The app is **100% local-only and privacy-first**: no background telemetry is tra
 
 ## Screenshot Gallery
 
-| Collapsed Pill (Media & Clock) | Expanded Island Card |
+| Collapsed Dynamic Bar | Expanded Island Card |
 | :---: | :---: |
 | ![Collapsed Dynamic Bar](docs/screenshots/main-bar.png) | ![Expanded Island](docs/screenshots/expanded-panel.png) |
-| *Subtle pill showing current song and clock* | *Expanded card with media controls & telemetry* |
+| *Compact pill showing song title, battery badge, and clock* | *Expanded card with media controls & telemetry chips* |
 
-| Search Launcher (`Ctrl+Space`) | Countdown Timer & Stopwatch |
+| System Telemetry Monitor | Network & Speed Test |
 | :---: | :---: |
-| ![Search Launcher](docs/screenshots/search-panel.png) | ![Timer Panel](docs/screenshots/timer.png) |
-| *Fuzzy search, window switcher & math* | *Presets and digital LED countdown* |
+| ![System Telemetry](docs/screenshots/system-telemetry.png) | ![Speed Test](docs/screenshots/speed-test.png) |
+| *btop-style CPU load, core heatmap, ACPI temp & top procs* | *Mirrored transfer rate, ping latency probes & speed test* |
 
-| Network & Speed Test | System Telemetry Monitor |
+| Countdown Timer & Stopwatch | Encrypted Clipboard History |
 | :---: | :---: |
-| ![Speed Test](docs/screenshots/speed-test.png) | ![System Telemetry](docs/screenshots/system-telemetry.png) |
-| *Real-time throughput and speed test* | *Live CPU, GPU, and RAM telemetry* |
+| ![Timer Panel](docs/screenshots/timer.png) | ![Clipboard History](docs/screenshots/clipboard.png) |
+| *LED digital countdown, progress bar, presets & controls* | *DPAPI encrypted history with pinned clips & search* |
+
+| Search Launcher (`Ctrl+Space`) | Weather Forecast Panel |
+| :---: | :---: |
+| ![Search Launcher](docs/screenshots/search-panel.png) | ![Weather Panel](docs/screenshots/weather-panel.png) |
+| *Fuzzy app search, tab commands & quick calculations* | *24-hour temperature curve, UV index, and precipitation* |
 
 | Settings & Hotkey Recorder | About & Creator Attribution |
 | :---: | :---: |
@@ -76,6 +81,50 @@ Windows Dynamic Bar is distributed for **64-bit Windows** and does not require a
 1. Download **`WindowsDynamicBar-Portable-win-x64.zip`** from [Releases](https://github.com/Super-cod/dynamic-island/releases).
 2. Extract the archive into a folder of your choice (e.g. `C:\Tools\WindowsDynamicBar`).
 3. Run **`WindowsDynamicBar.exe`**.
+
+### Option 3: Terminal Command (`island`) (For Developers & Power Users)
+
+You can manage, rebuild, and run Windows Dynamic Bar directly from your terminal using the built-in PowerShell CLI command named **`island`**.
+
+#### Initial Setup
+Open PowerShell and run the setup script:
+
+```powershell
+.\island.ps1
+```
+
+1. **First-time configuration:** When you run `island.ps1` for the first time, it will prompt you for the path to your project repository:
+   ```text
+   Please provide the location of your project repository [C:\Path\To\dynamic-island]:
+   ```
+2. Press **Enter** to accept the current repository or enter a custom path.
+3. The script permanently saves your repository location in `~/.island/config.json` and automatically registers the `island` command into your PowerShell profile.
+4. Open any terminal or directory — you can now use `island` from anywhere!
+
+#### Command Options
+
+| Command | Action |
+|---|---|
+| `island` | Stops any running instance and launches the application. |
+| `island -Stop` | Gracefully terminates any running instance of the application. |
+| `island -Build` | Stops the running instance, rebuilds the solution in Release configuration, and launches the updated application. |
+
+#### Examples
+
+```powershell
+# Launch the application (or restart if already open)
+island
+
+# Stop the application
+island -Stop
+
+# Rebuild code changes and launch immediately
+island -Build
+```
+
+> **Note:** The saved repository location persists across sessions. You will not have to enter it again. If you ever move the repository to a new folder, simply run `island -Config` to update the path.
+
+---
 
 > **SmartScreen Note:** Because this application is released as community-built software without a paid commercial Authenticode certificate, Windows SmartScreen may show an *“Unrecognized app”* warning on first run. Click **More info** → **Run anyway**. You can verify file integrity using the SHA-256 checksums published with every release.
 
@@ -146,6 +195,7 @@ All configuration is stored locally under:
 `%AppData%\WindowsDynamicBar`
 - Settings: `%AppData%\WindowsDynamicBar\settings.json`
 - Logs: `%AppData%\WindowsDynamicBar\logs\`
+- CLI Config: `~/.island/config.json`
 
 ---
 
@@ -153,6 +203,7 @@ All configuration is stored locally under:
 
 - **If installed via Setup:** Open Windows **Settings → Apps → Installed apps**, locate **Windows Dynamic Bar**, and click **Uninstall**. The uninstaller cleanly removes all application files and optionally prompts whether to wipe local settings.
 - **If using the Portable zip:** Exit the app from the system tray and delete the extracted folder. To remove cached configuration, delete `%AppData%\WindowsDynamicBar`.
+- **If using the terminal CLI:** Delete the `~/.island` directory and remove the `island` function block from your PowerShell profile (`$PROFILE`).
 
 ---
 
