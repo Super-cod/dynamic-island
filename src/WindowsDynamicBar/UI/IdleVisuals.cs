@@ -152,7 +152,8 @@ public sealed class DotMatrixClock : FrameworkElement
         IsHitTestVisible = false;
         Width = DotFont.Columns * Cell;
         Height = DotFont.Rows * Cell;
-        IsVisibleChanged += (_, _) => { if (!IsVisible) SnapToTargets(); };
+        IsVisibleChanged += (_, _) => SnapToTargets();
+        Unloaded += (_, _) => StopLoop();
     }
 
     public double Hue
@@ -185,7 +186,15 @@ public sealed class DotMatrixClock : FrameworkElement
             for (int c = 0; c < DotFont.Columns; c++)
             {
                 int i = r * DotFont.Columns + c;
-                if (map[r, c] == _target[i]) continue;
+                if (map[r, c] == _target[i])
+                {
+                    if (instant && _value[i] != (map[r, c] ? 1 : 0))
+                    {
+                        _value[i] = map[r, c] ? 1 : 0;
+                        any = true;
+                    }
+                    continue;
+                }
                 _target[i] = map[r, c];
                 any = true;
                 if (instant || c == DotFont.ColonColumn) { _value[i] = map[r, c] ? 1 : 0; continue; }

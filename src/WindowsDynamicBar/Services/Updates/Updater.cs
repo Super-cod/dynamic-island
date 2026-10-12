@@ -109,11 +109,11 @@ public static class SemVer
         v = default;
         if (string.IsNullOrWhiteSpace(text)) return false;
         string t = text.Trim().TrimStart('v', 'V');
+        int plus = t.IndexOf('+');
+        if (plus >= 0) t = t[..plus];
         string pre = "";
         int dash = t.IndexOf('-');
         if (dash >= 0) { pre = t[(dash + 1)..]; t = t[..dash]; }
-        int plus = pre.IndexOf('+');
-        if (plus >= 0) pre = pre[..plus];
         var parts = t.Split('.');
         if (parts.Length is < 1 or > 3) return false;
         int[] n = new int[3];

@@ -1,4 +1,4 @@
-﻿<Window x:Class="WindowsDynamicBar.UI.BarWindow"
+<Window x:Class="WindowsDynamicBar.UI.BarWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:media="clr-namespace:WindowsDynamicBar.UI.Media"
@@ -202,6 +202,7 @@
                     MouseLeave="OnIslandMouseLeave"
                     MouseLeftButtonDown="OnPillMouseDown"
                     MouseLeftButtonUp="OnPillMouseUp"
+                    MouseRightButtonUp="OnPillRightClick"
                     MouseMove="OnPillMouseMove"
                     PreviewMouseWheel="OnPillMouseWheel"
                     Cursor="Hand"
@@ -348,6 +349,8 @@
                                 Background="{DynamicResource WdbDimBrush}" Margin="0,0,11,0" VerticalAlignment="Top">
                             <Grid>
                                 <Image x:Name="HeaderArt" Stretch="UniformToFill" Visibility="Collapsed" />
+                                <local:HeadphonesVectorIcon x:Name="HeaderHeadphones" Width="26" Height="26"
+                                                           HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed" />
                                 <TextBlock x:Name="HeaderGlyph" Style="{StaticResource WdbGlyph}"
                                            Text="&#x25CF;" FontSize="15" />
                             </Grid>
@@ -706,6 +709,8 @@
                             <media:MediaDisc x:Name="OrbDisc" Diameter="{Binding ActualWidth, ElementName=OrbHost}"
                                              Visibility="Collapsed" />
                             <Image x:Name="OrbArt" Stretch="UniformToFill" Visibility="Collapsed" />
+                            <local:HeadphonesVectorIcon x:Name="OrbHeadphones" Width="18" Height="18"
+                                                       HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed" />
                             <TextBlock x:Name="OrbGlyph" Style="{StaticResource WdbGlyph}"
                                        FontSize="12" Text="&#x25CF;" Foreground="#FF0A84FF" />
                         </Grid>

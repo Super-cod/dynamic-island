@@ -201,8 +201,12 @@ public sealed class BrightnessService : IDisposable
         try
         {
             using var searcher = new ManagementObjectSearcher(@"\\.\root\wmi", "SELECT CurrentBrightness FROM WmiMonitorBrightness");
-            foreach (ManagementObject obj in searcher.Get())
-                return Convert.ToSingle(obj["CurrentBrightness"]) / 100f;
+            using var results = searcher.Get();
+            foreach (ManagementObject obj in results)
+            {
+                using (obj)
+                    return Convert.ToSingle(obj["CurrentBrightness"]) / 100f;
+            }
         }
         catch { }
         return -1;
@@ -215,11 +219,15 @@ public sealed class BrightnessService : IDisposable
             byte target = (byte)Math.Clamp(Math.Round(level01 * 100), 0, 100);
             using var searcher = new ManagementObjectSearcher(
                 @"\\.\root\wmi", "SELECT * FROM WmiMonitorBrightnessMethods");
+            using var results = searcher.Get();
             bool ok = false;
-            foreach (ManagementObject obj in searcher.Get())
+            foreach (ManagementObject obj in results)
             {
-                obj.InvokeMethod("WmiSetBrightness", new object[] { uint.MaxValue, target });
-                ok = true;
+                using (obj)
+                {
+                    obj.InvokeMethod("WmiSetBrightness", new object[] { uint.MaxValue, target });
+                    ok = true;
+                }
             }
             if (ok) { Level = level01; BrightnessChanged?.Invoke(Level); }
             return ok;

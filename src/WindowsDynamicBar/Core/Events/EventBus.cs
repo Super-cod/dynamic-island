@@ -114,7 +114,6 @@ public sealed class EventBus
             Active = null;
             _expiryTimer?.Stop();
             PumpOnDispatcher();
-            if (_queue.Count == 0) Idle?.Invoke();
         });
     }
 

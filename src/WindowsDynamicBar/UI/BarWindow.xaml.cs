@@ -929,8 +929,15 @@ public partial class BarWindow : Window, IDisposable
         UpdateCollapsed();
     }
 
+    private readonly System.Collections.Generic.Dictionary<UIElement, TweenAnimation> _activeFadesByElement = new();
+
     private void Fade(UIElement el, double to, int ms, Action? done = null)
     {
+        if (_activeFadesByElement.TryGetValue(el, out var running))
+        {
+            running.Stop();
+            _activeFadesByElement.Remove(el);
+        }
         if (_cfg.ReduceMotion || ms <= 0)
         {
             el.Opacity = to;
@@ -939,11 +946,14 @@ public partial class BarWindow : Window, IDisposable
             return;
         }
         var tw = new TweenAnimation();
-        tw.Completed += () => done?.Invoke();
+        tw.Completed += () =>
+        {
+            if (_activeFadesByElement.TryGetValue(el, out var cur) && ReferenceEquals(cur, tw))
+                _activeFadesByElement.Remove(el);
+            done?.Invoke();
+        };
+        _activeFadesByElement[el] = tw;
         tw.Run(el.Opacity, to, TimeSpan.FromMilliseconds(ms), v => el.Opacity = v, Easing.CubicOut);
-        // keep ref for cancellation: store on element tag? simple: track in list via closure container
-        _activeFades.Add(tw);
-        tw.Completed += () => _activeFades.Remove(tw);
     }
 
     private readonly System.Collections.Generic.List<TweenAnimation> _activeFades = new();
@@ -952,6 +962,8 @@ public partial class BarWindow : Window, IDisposable
     {
         foreach (var t in _delays) t.Stop();
         _delays.Clear();
+        foreach (var f in _activeFadesByElement.Values) f.Stop();
+        _activeFadesByElement.Clear();
         foreach (var f in _activeFades) f.Stop();
         _activeFades.Clear();
     }
@@ -992,6 +1004,7 @@ public partial class BarWindow : Window, IDisposable
     /// open). One method drives size, disc, content fades, panels and icon highlight (R4/R9).</summary>
     private void SetIslandState(IslandVisualState state, IslandMetric metric, bool force = false)
     {
+        if (!force && _isBuddyCardOpen) return;
         if (!force && state == _islandState && metric == _activeMetric) return;
 
         bool sameState = state == _islandState;
@@ -1085,6 +1098,23 @@ public partial class BarWindow : Window, IDisposable
                     panel.Opacity = 0;
                     panel.IsHitTestVisible = false;
                 }
+                if (_isBuddyCardOpen) CloseBuddyCard();
+                _buddyController?.EndSpeechImmediately(force: true);
+                _buddyController?.StopLifeLoop();
+                if (BuddyContainer is not null)
+                {
+                    BuddyContainer.Visibility = Visibility.Collapsed;
+                    BuddyContainer.Opacity = 0;
+                    BuddyContainer.IsHitTestVisible = false;
+                }
+                if (BuddyCardComponent is not null)
+                {
+                    BuddyCardComponent.Visibility = Visibility.Collapsed;
+                    BuddyCardComponent.Opacity = 0;
+                    BuddyCardComponent.IsHitTestVisible = false;
+                }
+                if (BuddyClockRow is not null) BuddyClockRow.Visibility = Visibility.Visible;
+                if (BuddySpeechText is not null) BuddySpeechText.Visibility = Visibility.Collapsed;
                 SearchHost.Visibility = Visibility.Visible;
                 break;
         }
@@ -1225,6 +1255,26 @@ public partial class BarWindow : Window, IDisposable
         OrbHost.Visibility = Visibility.Visible;
         Fade(OrbHost, 1, 160);
         IslandExpandedHost.Visibility = Visibility.Visible;
+        if (_idleMode)
+        {
+            IdleOpenPanel.Visibility = Visibility.Visible;
+            IdleOpenPanel.Opacity = 1;
+            MediaInfoStack.Visibility = Visibility.Collapsed;
+            MediaInfoStack.Opacity = 0;
+            IslandLeftHost.Width = IdleLeftW;
+            UpdateIdleOpen(DateTime.Now);
+            ApplyTodColors();
+            IdleDotClock.SetTime(IdleClock.FormatTime(DateTime.Now, _twelveHour), DateTime.Now.Second % 2 == 0);
+            IdleDotClock.InvalidateVisual();
+        }
+        else
+        {
+            IdleOpenPanel.Visibility = Visibility.Collapsed;
+            IdleOpenPanel.Opacity = 0;
+            MediaInfoStack.Visibility = Visibility.Visible;
+            MediaInfoStack.Opacity = 1;
+            IslandLeftHost.Width = MusicLeftW;
+        }
         Fade(CollapsedPanel, 0, 120);
         Fade(IslandExpandedHost, 1, 160);
         EnsureWeather();
@@ -1309,10 +1359,20 @@ public partial class BarWindow : Window, IDisposable
         MirrorPanelComponent.StopCamera();
         if (revealCollapsed)
         {
+            IdleCollapsedRow.Visibility = _idleMode ? Visibility.Visible : Visibility.Collapsed;
+            MusicCollapsedRow.Visibility = _idleMode ? Visibility.Collapsed : Visibility.Visible;
+            if (BuddyClockRow is not null) BuddyClockRow.Visibility = Visibility.Visible;
+            if (BuddySpeechText is not null) BuddySpeechText.Visibility = Visibility.Collapsed;
             CollapsedPanel.Visibility = Visibility.Visible;
             OrbHost.Visibility = Visibility.Visible;
             Fade(CollapsedPanel, 1, 160);
             Fade(OrbHost, 1, 160);
+            if (BuddyContainer is not null && App.Settings?.Current.FeatureBuddy == true && _islandState != IslandVisualState.Search)
+            {
+                BuddyContainer.Visibility = Visibility.Visible;
+                BuddyContainer.Opacity = 1;
+                BuddyContainer.IsHitTestVisible = true;
+            }
         }
         UpdateIslandContent();
     }
@@ -2368,7 +2428,7 @@ public partial class BarWindow : Window, IDisposable
 
     private void OnHoverCheckTick(object? sender, EventArgs e)
     {
-        if (_islandState == IslandVisualState.Search || _islandState == IslandVisualState.Collapsed)
+        if (_islandState == IslandVisualState.Search || _isBuddyCardOpen || _islandState == IslandVisualState.Collapsed)
         {
             _hoverCheckTimer.Stop();
             return;
@@ -2399,8 +2459,8 @@ public partial class BarWindow : Window, IDisposable
     /// <summary>Mouse entered the island region (pill + icons + panel).</summary>
     private void OnIslandMouseEnter(object sender, MouseEventArgs e)
     {
+        if (_islandState == IslandVisualState.Search || _isBuddyCardOpen) return;
         HandleBuddyPointerEnter();
-        if (_islandState == IslandVisualState.Search) return;
         _islandHovering = true;
         _collapseDelay.Stop();
         if (_expanded)
@@ -2424,8 +2484,8 @@ public partial class BarWindow : Window, IDisposable
     /// <summary>Mouse left the island region entirely (grace timer defers collapse).</summary>
     private void OnIslandMouseLeave(object sender, MouseEventArgs e)
     {
+        if (_islandState == IslandVisualState.Search || _isBuddyCardOpen) return;
         HandleBuddyPointerLeave();
-        if (_islandState == IslandVisualState.Search) return;
         _islandHovering = false;
         if (_expanded) return;
         if (_pinned && _islandState == IslandVisualState.Detail) return;
@@ -2435,7 +2495,7 @@ public partial class BarWindow : Window, IDisposable
 
     private void OnCollapseDelayTick(object? sender, EventArgs e)
     {
-        if (_islandState == IslandVisualState.Search) return;
+        if (_islandState == IslandVisualState.Search || _isBuddyCardOpen) return;
         _collapseDelay.Stop();
         if (_expanded || (_pinned && _islandState == IslandVisualState.Detail)) return;
 
@@ -2611,9 +2671,9 @@ public partial class BarWindow : Window, IDisposable
             // Volume/brightness HUD switched off: those events never open the island.
             if (!_cfg.FeatureVolumeHud && evt.Kind is BarEventKind.Volume or BarEventKind.Brightness) return;
 
-            // If the dynamic island is open (expanded music pill, detail telemetry panel, or hovered),
+            // If the dynamic island is open (expanded music pill, detail telemetry panel, hovered, or buddy card),
             // transient HUD events (volume, brightness) or media must NOT collapse or preempt the open island.
-            if (_islandState != IslandVisualState.Collapsed || _islandHovering)
+            if (_islandState != IslandVisualState.Collapsed || _islandHovering || _isBuddyCardOpen)
             {
                 if (evt.Kind is BarEventKind.Volume or BarEventKind.Brightness)
                 {
@@ -2941,7 +3001,7 @@ public partial class BarWindow : Window, IDisposable
     private void OnPillMouseDown(object sender, MouseButtonEventArgs e)
     {
         if (e.ChangedButton != MouseButton.Left) return;
-        if (_islandState == IslandVisualState.Search) return;
+        if (_islandState == IslandVisualState.Search || _isBuddyCardOpen) return;
         // Pressing a control (slider, button) is that control's gesture - never start a pill drag,
         // otherwise dragging the mirror zoom/light sliders would slide the whole island sideways.
         if (IsInteractiveSource(e.OriginalSource)) { _dragPressing = false; return; }
@@ -2959,6 +3019,7 @@ public partial class BarWindow : Window, IDisposable
     /// or inside the active detail panel, owning its own pointer gesture.</summary>
     private bool IsInteractiveSource(object? source)
     {
+        if (_isBuddyCardOpen) return true;
         var d = source as DependencyObject;
         while (d is not null and not Window)
         {
@@ -2973,6 +3034,7 @@ public partial class BarWindow : Window, IDisposable
 
     private void OnPillMouseMove(object sender, MouseEventArgs e)
     {
+        if (_islandState == IslandVisualState.Search || _isBuddyCardOpen) return;
         HandleBuddyPointerMove(e);
         if (!_dragPressing || e.LeftButton != MouseButtonState.Pressed) return;
         NativeMethods.GetCursorPos(out var pt);
@@ -2994,6 +3056,7 @@ public partial class BarWindow : Window, IDisposable
         if (Pill.IsMouseCaptured) Pill.ReleaseMouseCapture();
         _dragPressing = false;
         if (e.ChangedButton != MouseButton.Left) return;
+        if (_isBuddyCardOpen) return;
         if (_dragMoved)
         {
             _dragMoved = false;
@@ -3023,8 +3086,44 @@ public partial class BarWindow : Window, IDisposable
         }
     }
 
+    private void OnPillRightClick(object sender, MouseButtonEventArgs e)
+    {
+        if (_isBuddyCardOpen) return;
+        if (IsInteractiveSource(e.OriginalSource)) return;
+
+        var menu = new ContextMenu();
+
+        bool buddyEnabled = App.Settings?.Current.FeatureBuddy ?? true;
+        var buddyItem = new MenuItem
+        {
+            Header = "Island Buddy",
+            IsCheckable = true,
+            IsChecked = buddyEnabled
+        };
+        buddyItem.Click += (_, _) =>
+        {
+            App.Settings?.Update(s => s.FeatureBuddy = !buddyEnabled);
+        };
+        menu.Items.Add(buddyItem);
+
+        menu.Items.Add(new Separator());
+
+        var settingsItem = new MenuItem { Header = "Settings…" };
+        settingsItem.Click += (_, _) => SettingsWindow.ShowSingleton();
+        menu.Items.Add(settingsItem);
+
+        var searchItem = new MenuItem { Header = "Search" };
+        searchItem.Click += (_, _) => OpenSearch();
+        menu.Items.Add(searchItem);
+
+        menu.PlacementTarget = Pill;
+        menu.IsOpen = true;
+        e.Handled = true;
+    }
+
     private void OnPillMouseWheel(object sender, MouseWheelEventArgs e)
     {
+        if (_isBuddyCardOpen) { e.Handled = true; return; }
         if (_islandState is IslandVisualState.Expanded or IslandVisualState.Detail && IconRow.IsMouseOver
             && IconRow.PageCount > 1)
         {
@@ -3052,6 +3151,11 @@ public partial class BarWindow : Window, IDisposable
             // Click-outside closes only a fully open bar that has had focus; OnSearchOpened
             // re-checks once Opening finishes.
             if (_searchPhase == SearchPhase.Open && _searchHadFocus) CloseSearch();
+            return;
+        }
+        if (_isBuddyCardOpen)
+        {
+            CloseBuddyCard();
             return;
         }
         // The clipboard card opened by its hotkey closes when the user clicks elsewhere.
@@ -3082,6 +3186,12 @@ public partial class BarWindow : Window, IDisposable
         }
         if (e.Key == Key.Escape)
         {
+            if (_isBuddyCardOpen)
+            {
+                e.Handled = true;
+                CloseBuddyCard();
+                return;
+            }
             if (_islandState == IslandVisualState.Search)
             {
                 e.Handled = true;
@@ -3240,6 +3350,7 @@ public partial class BarWindow : Window, IDisposable
 
     private void ResetRows()
     {
+        HeaderHeadphones.Visibility = Visibility.Collapsed;
         HeaderGlyph.Visibility = Visibility.Visible;
         HeaderGlyph.Text = IcDot;
         HeaderArt.Visibility = Visibility.Collapsed;
@@ -3474,11 +3585,30 @@ public partial class BarWindow : Window, IDisposable
 
     private void RenderBluetooth(BarEvent evt)
     {
-        HeaderGlyph.Text = IcBluetooth;
-        HeaderText.Text = string.IsNullOrEmpty(evt.Title) ? "Bluetooth" : evt.Title;
         string kind = "";
         bool connected = true;
         if (evt.Payload is BluetoothDeviceInfo bd) { kind = bd.Kind; connected = bd.Connected; }
+
+        bool isAudio = string.Equals(kind, "Audio", StringComparison.OrdinalIgnoreCase) ||
+            (!string.IsNullOrEmpty(evt.Title) && (evt.Title.Contains("headphone", StringComparison.OrdinalIgnoreCase) ||
+                                                  evt.Title.Contains("airpod", StringComparison.OrdinalIgnoreCase) ||
+                                                  evt.Title.Contains("buds", StringComparison.OrdinalIgnoreCase) ||
+                                                  evt.Title.Contains("earphone", StringComparison.OrdinalIgnoreCase) ||
+                                                  evt.Title.Contains("headset", StringComparison.OrdinalIgnoreCase)));
+
+        if (isAudio)
+        {
+            HeaderGlyph.Visibility = Visibility.Collapsed;
+            HeaderHeadphones.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            HeaderHeadphones.Visibility = Visibility.Collapsed;
+            HeaderGlyph.Visibility = Visibility.Visible;
+            HeaderGlyph.Text = IcBluetooth;
+        }
+
+        HeaderText.Text = string.IsNullOrEmpty(evt.Title) ? (isAudio ? "Headphones" : "Bluetooth") : evt.Title;
         HeaderSub.Text = !string.IsNullOrEmpty(kind) ? kind : evt.Subtitle ?? "";
         string status = connected ? (evt.Subtitle ?? "Connected") : "Disconnected";
         FooterText.Text = status;
@@ -3754,8 +3884,17 @@ public partial class BarWindow : Window, IDisposable
     {
         OrbDisc.Visibility = Visibility.Collapsed;
         OrbArt.Visibility = Visibility.Collapsed;
+        OrbHeadphones.Visibility = Visibility.Collapsed;
         OrbGlyph.Text = glyph;
         OrbGlyph.Visibility = Visibility.Visible;
+    }
+
+    private void SetOrbHeadphones()
+    {
+        OrbDisc.Visibility = Visibility.Collapsed;
+        OrbArt.Visibility = Visibility.Collapsed;
+        OrbGlyph.Visibility = Visibility.Collapsed;
+        OrbHeadphones.Visibility = Visibility.Visible;
     }
 
     private BitmapSource? _lastGradientDisc;
@@ -3771,6 +3910,7 @@ public partial class BarWindow : Window, IDisposable
         }
         OrbArt.Visibility = Visibility.Collapsed;
         OrbGlyph.Visibility = Visibility.Collapsed;
+        OrbHeadphones.Visibility = Visibility.Collapsed;
         var art = BytesToImage(m.ArtworkBytes);
         if (art is null)
         {
@@ -4014,10 +4154,10 @@ public partial class BarWindow : Window, IDisposable
 
     /// <summary>Pick the music or idle layout from the media session and crossfade (280 ms) when it
     /// changes. The ring grid on the right is shared and never touched.</summary>
-    private void ApplyLayoutMode(bool instant = false)
+    private void ApplyLayoutMode(bool instant = false, bool force = false)
     {
         bool idle = !HasMediaSession(_lastMedia);
-        if (_layoutApplied && idle == _idleMode) return;
+        if (!force && _layoutApplied && idle == _idleMode) return;
         _idleMode = idle;
         _layoutApplied = true;
 

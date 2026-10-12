@@ -484,14 +484,8 @@ public sealed class MediaService : IDisposable
 
     public void Dispose()
     {
+        Stop();
         _timelineTimer?.Dispose();
-        if (_current is not null)
-        {
-            _current.MediaPropertiesChanged -= OnMediaProperties;
-            _current.PlaybackInfoChanged -= OnPlaybackInfo;
-            _current.TimelinePropertiesChanged -= OnTimeline;
-        }
-        if (_manager is not null) _manager.SessionsChanged -= OnSessionsChanged;
     }
 }
 

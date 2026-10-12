@@ -79,6 +79,19 @@ public sealed class TrayController : IDisposable
         };
         _menu.Items.Add(pauseIsland);
 
+        bool buddyEnabled = App.Settings?.Current.FeatureBuddy ?? true;
+        var buddy = new ToolStripMenuItem("Island Buddy")
+        {
+            CheckOnClick = true,
+            Checked = buddyEnabled,
+            ToolTipText = "Interactive desktop companion (Dot)",
+        };
+        buddy.CheckedChanged += (_, _) =>
+        {
+            App.Settings?.Update(s => s.FeatureBuddy = buddy.Checked);
+        };
+        _menu.Items.Add(buddy);
+
         var dnd = new ToolStripMenuItem("Do Not Disturb")
         {
             CheckOnClick = true,
@@ -209,6 +222,7 @@ public sealed class TrayController : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        SettingsServiceBridge.Unsubscribe();
         try { _icon.Visible = false; _icon.Dispose(); } catch { }
         try { _menu.Dispose(); } catch { }
     }
@@ -218,16 +232,26 @@ public sealed class TrayController : IDisposable
 internal static class SettingsServiceBridge
 {
     private static Action? _handler;
+    private static bool _subscribed;
 
     public static void Subscribe(Action handler)
     {
         _handler = handler;
-        if (App.Settings is not null)
+        if (!_subscribed && App.Settings is not null)
+        {
+            _subscribed = true;
             App.Settings.SettingsChanged += _ => Rebuild();
+        }
+    }
+
+    public static void Unsubscribe()
+    {
+        _handler = null;
     }
 
     private static void Rebuild()
     {
+        if (_handler is null) return;
         if (System.Windows.Application.Current?.Dispatcher is { } dsp)
             dsp.BeginInvoke(() => _handler?.Invoke());
         else _handler?.Invoke();

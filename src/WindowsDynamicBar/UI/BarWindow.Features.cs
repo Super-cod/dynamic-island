@@ -32,7 +32,7 @@ public partial class BarWindow
         if (!m.FeatureMirror && (mirrorWasOn || first)) MirrorPanelComponent.StopCamera();
         IdleSearchButton.Visibility = m.FeatureSearch ? Visibility.Visible : Visibility.Collapsed;
         IdleFocusButton.Visibility = m.FeatureTimers ? Visibility.Visible : Visibility.Collapsed;
-        IdleOpenPanel.Opacity = m.FeatureIdleDashboard ? IdleOpenPanel.Opacity : 0;
+        IdleOpenPanel.Opacity = m.FeatureIdleDashboard ? 1 : 0;
         IdleDotClock.Visibility = m.FeatureIdleDashboard ? Visibility.Visible : Visibility.Hidden;
         IdleGreeting.Visibility = m.FeatureIdleDashboard ? Visibility.Visible : Visibility.Hidden;
         if (!m.FeatureIdleDashboard) IdleEventLine.Visibility = Visibility.Collapsed;

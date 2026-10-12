@@ -164,22 +164,29 @@ public static class AppIconHelper
             int hr = SHCreateItemFromParsingName(parsingName, IntPtr.Zero, guid, out object factoryObj);
             if (hr != 0 || factoryObj is not IShellItemImageFactory factory) return null;
 
-            hr = factory.GetImage(new SIZE { cx = sizePx, cy = sizePx }, SIIGBF_RESIZETOFIT | SIIGBF_ICONONLY, out IntPtr hBitmap);
-            if (hr != 0 || hBitmap == IntPtr.Zero) return null;
-
             try
             {
-                var src = Imaging.CreateBitmapSourceFromHBitmap(
-                    hBitmap,
-                    IntPtr.Zero,
-                    Int32Rect.Empty,
-                    BitmapSizeOptions.FromEmptyOptions());
-                src.Freeze();
-                return src;
+                hr = factory.GetImage(new SIZE { cx = sizePx, cy = sizePx }, SIIGBF_RESIZETOFIT | SIIGBF_ICONONLY, out IntPtr hBitmap);
+                if (hr != 0 || hBitmap == IntPtr.Zero) return null;
+
+                try
+                {
+                    var src = Imaging.CreateBitmapSourceFromHBitmap(
+                        hBitmap,
+                        IntPtr.Zero,
+                        Int32Rect.Empty,
+                        BitmapSizeOptions.FromEmptyOptions());
+                    src.Freeze();
+                    return src;
+                }
+                finally
+                {
+                    DeleteObject(hBitmap);
+                }
             }
             finally
             {
-                DeleteObject(hBitmap);
+                Marshal.ReleaseComObject(factoryObj);
             }
         }
         catch

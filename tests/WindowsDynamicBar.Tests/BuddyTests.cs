@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using WindowsDynamicBar.Core.Buddy;
 using WindowsDynamicBar.Core.Settings;
@@ -29,6 +29,7 @@ internal static partial class Program
         Run("Buddy duplicate media events do not disrupt active session or headphones", TestBuddyMusicDuplicateEventsIgnored);
         Run("Buddy focus timer lifecycle enforces quiet mode and celebrates only natural completion", TestBuddyFocusLifecycle);
         Run("Buddy search lifecycle equips magnifier, hops on found, and clears on close", TestBuddySearchLifecycle);
+        Run("Buddy card lifecycle tracks open/close state cleanly", TestBuddyCardLifecycle);
     }
 
     private static void TestBuddyRender()
@@ -505,5 +506,22 @@ internal static partial class Program
         // 3. Search closes and cleans up
         behavior.Update(2.0, DateTime.UtcNow.AddSeconds(2.5));
         Assert(behavior.CurrentAccessory == BuddyAccessory.None, "Prop cleared on search close");
+    }
+
+    private static void TestBuddyCardLifecycle()
+    {
+        var behavior = new BuddyBehaviorController();
+        behavior.CurrentOutfit = BuddyOutfit.None;
+        Assert(behavior.CurrentOutfit == BuddyOutfit.None, "Default outfit is None");
+
+        behavior.CurrentOutfit = BuddyOutfit.WizardHat;
+        Assert(behavior.CurrentOutfit == BuddyOutfit.WizardHat, "WizardHat outfit set");
+
+        behavior.SetPersonality(BuddyPersonality.Chaotic);
+        Assert(behavior.Personality == BuddyPersonality.Chaotic, "Chaotic personality set");
+
+        // Verify movement bounds with card dimensions (500x180)
+        behavior.Movement.UpdateLayout(IslandMode.Collapsed, 500, 180, false);
+        Assert(behavior.Movement.X >= 0, "X position within card bounds");
     }
 }

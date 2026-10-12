@@ -43,6 +43,7 @@ public sealed class VolumeLevelBar : FrameworkElement
         // Capture can be lost without a button-up (the HUD collapses mid-drag): end the drag, or a
         // later plain hover over the bar would keep changing the volume.
         LostMouseCapture += (_, _) => _dragging = false;
+        Unloaded += (_, _) => _settle.Stop();
     }
 
     public static readonly DependencyProperty LevelProperty = DependencyProperty.Register(

@@ -491,17 +491,27 @@ public sealed class UsbService
         string name = "USB device";
         try
         {
-            int devType = System.Runtime.InteropServices.Marshal.ReadInt32(lParam);
-            if (devType == Interop.NativeMethods.DBT_DEVTYP_VOLUME)
+            if (lParam != IntPtr.Zero)
             {
-                int mask = System.Runtime.InteropServices.Marshal.ReadInt32(lParam, 4);
-                for (int i = 0; i < 16; i++)
+                int devType = System.Runtime.InteropServices.Marshal.ReadInt32(lParam, 4);
+                if (devType == Interop.NativeMethods.DBT_DEVTYP_VOLUME)
                 {
-                    if ((mask & (1 << i)) == 0) continue;
-                    char drive = (char)('A' + i);
-                    var driveInfo = new DriveInfo($"{drive}");
-                    name = $"{driveInfo.Name.TrimEnd('\\')} drive{(!string.IsNullOrEmpty(driveInfo.VolumeLabel) ? " · " + driveInfo.VolumeLabel : "")}";
-                    break;
+                    int mask = System.Runtime.InteropServices.Marshal.ReadInt32(lParam, 12);
+                    for (int i = 0; i < 26; i++)
+                    {
+                        if ((mask & (1 << i)) == 0) continue;
+                        char drive = (char)('A' + i);
+                        string label = "";
+                        try
+                        {
+                            var driveInfo = new DriveInfo($"{drive}");
+                            if (driveInfo.IsReady && !string.IsNullOrEmpty(driveInfo.VolumeLabel))
+                                label = " · " + driveInfo.VolumeLabel;
+                        }
+                        catch { }
+                        name = $"{drive}: drive{label}";
+                        break;
+                    }
                 }
             }
         }

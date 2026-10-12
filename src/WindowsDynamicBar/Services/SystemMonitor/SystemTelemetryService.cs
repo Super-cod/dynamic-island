@@ -213,23 +213,27 @@ public sealed class SystemTelemetryService : IDisposable
             using (var searcher = new ManagementObjectSearcher(
                 "SELECT Name, CurrentClockSpeed, NumberOfCores, NumberOfLogicalProcessors FROM Win32_Processor"))
             {
-                foreach (var mo in searcher.Get())
+                using var results = searcher.Get();
+                foreach (var mo in results)
                 {
-                    seen = true;
-                    if (name is null && mo["Name"] is { } n)
+                    using (mo)
                     {
-                        string? ns = n.ToString();
-                        if (!string.IsNullOrWhiteSpace(ns)) name = ns;
+                        seen = true;
+                        if (name is null && mo["Name"] is { } n)
+                        {
+                            string? ns = n.ToString();
+                            if (!string.IsNullOrWhiteSpace(ns)) name = ns;
+                        }
+                        if (mo["CurrentClockSpeed"] is { } cc && cc != DBNull.Value)
+                        {
+                            double m = Convert.ToDouble(cc, CultureInfo.InvariantCulture);
+                            mhz = Math.Max(mhz, m);
+                        }
+                        if (mo["NumberOfCores"] is { } nc && nc != DBNull.Value)
+                            cores += Convert.ToInt32(nc, CultureInfo.InvariantCulture);
+                        if (mo["NumberOfLogicalProcessors"] is { } nlp && nlp != DBNull.Value)
+                            threads += Convert.ToInt32(nlp, CultureInfo.InvariantCulture);
                     }
-                    if (mo["CurrentClockSpeed"] is { } cc && cc != DBNull.Value)
-                    {
-                        double m = Convert.ToDouble(cc, CultureInfo.InvariantCulture);
-                        mhz = Math.Max(mhz, m);
-                    }
-                    if (mo["NumberOfCores"] is { } nc && nc != DBNull.Value)
-                        cores += Convert.ToInt32(nc, CultureInfo.InvariantCulture);
-                    if (mo["NumberOfLogicalProcessors"] is { } nlp && nlp != DBNull.Value)
-                        threads += Convert.ToInt32(nlp, CultureInfo.InvariantCulture);
                 }
             }
             if (seen && threads == 0) threads = Environment.ProcessorCount;
@@ -766,17 +770,20 @@ public sealed class SystemTelemetryService : IDisposable
     public void Dispose()
     {
         Deactivate();
-        if (_cpuQuery != IntPtr.Zero) { PdhCloseQuery(_cpuQuery); _cpuQuery = IntPtr.Zero; }
-        if (_cpuCoresQuery != IntPtr.Zero) { PdhCloseQuery(_cpuCoresQuery); _cpuCoresQuery = IntPtr.Zero; }
-        if (_engineQuery != IntPtr.Zero) { PdhCloseQuery(_engineQuery); _engineQuery = IntPtr.Zero; }
-        if (_memQuery != IntPtr.Zero) { PdhCloseQuery(_memQuery); _memQuery = IntPtr.Zero; }
-        if (_diskQuery != IntPtr.Zero) { PdhCloseQuery(_diskQuery); _diskQuery = IntPtr.Zero; }
-        if (_sysMemQuery != IntPtr.Zero) { PdhCloseQuery(_sysMemQuery); _sysMemQuery = IntPtr.Zero; }
-        if (_thermalQuery != IntPtr.Zero) { PdhCloseQuery(_thermalQuery); _thermalQuery = IntPtr.Zero; }
-        _thermalCounters.Clear();
-        _vramCounters.Clear();
+        lock (_sync)
+        {
+            if (_cpuQuery != IntPtr.Zero) { PdhCloseQuery(_cpuQuery); _cpuQuery = IntPtr.Zero; }
+            if (_cpuCoresQuery != IntPtr.Zero) { PdhCloseQuery(_cpuCoresQuery); _cpuCoresQuery = IntPtr.Zero; }
+            if (_engineQuery != IntPtr.Zero) { PdhCloseQuery(_engineQuery); _engineQuery = IntPtr.Zero; }
+            if (_memQuery != IntPtr.Zero) { PdhCloseQuery(_memQuery); _memQuery = IntPtr.Zero; }
+            if (_diskQuery != IntPtr.Zero) { PdhCloseQuery(_diskQuery); _diskQuery = IntPtr.Zero; }
+            if (_sysMemQuery != IntPtr.Zero) { PdhCloseQuery(_sysMemQuery); _sysMemQuery = IntPtr.Zero; }
+            if (_thermalQuery != IntPtr.Zero) { PdhCloseQuery(_thermalQuery); _thermalQuery = IntPtr.Zero; }
+            _thermalCounters.Clear();
+            _vramCounters.Clear();
+            _nvml.Dispose();
+        }
         _load.Dispose();
-        lock (_sync) _nvml.Dispose();
     }
 
     [StructLayout(LayoutKind.Sequential)]

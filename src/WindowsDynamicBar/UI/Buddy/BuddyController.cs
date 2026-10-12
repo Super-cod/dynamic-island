@@ -154,7 +154,7 @@ public sealed class BuddyController : IDisposable
     {
         if (_isDisposed) return;
 
-        bool enabled = settings.FeatureBuddy;
+        bool enabled = settings.FeatureBuddy && !_window.IsSearchOpen;
         _buddyContainer.Visibility = enabled ? Visibility.Visible : Visibility.Collapsed;
 
         _behavior.CurrentOutfit = settings.BuddyOutfit;
@@ -212,7 +212,7 @@ public sealed class BuddyController : IDisposable
     public void CheckVisibilityAndRun()
     {
         var settings = App.Settings?.Current;
-        if (settings is null || !settings.FeatureBuddy)
+        if (settings is null || !settings.FeatureBuddy || _window.IsSearchOpen)
         {
             StopLifeLoop();
             return;
@@ -241,7 +241,11 @@ public sealed class BuddyController : IDisposable
 
     private void OnLifeTick(object? sender, EventArgs e)
     {
-        if (_isDisposed) return;
+        if (_isDisposed || _window.IsSearchOpen)
+        {
+            StopLifeLoop();
+            return;
+        }
 
         double nowMs = _lifeClock.ElapsedMilliseconds;
         // Effective value pushed by UpdateSettings (Settings.Current is a deep clone: too costly at 14 fps).
@@ -345,12 +349,14 @@ public sealed class BuddyController : IDisposable
 
     public void OnPointerEnter()
     {
+        if (_window.IsSearchOpen) return;
         _pointerOverIsland = true;
         _wave = 1.2;
     }
 
     public void OnPointerMove(Point islandRelativePoint, Size islandSize)
     {
+        if (_window.IsSearchOpen) return;
         _pointerOverIsland = true;
         double dx = (islandRelativePoint.X - 25.0) / 60.0;
         double dy = (islandRelativePoint.Y - 21.0) / 40.0;
@@ -359,6 +365,7 @@ public sealed class BuddyController : IDisposable
 
     public void OnPointerLeave()
     {
+        if (_window.IsSearchOpen) return;
         _pointerOverIsland = false;
         _targetLook = new Point(0, 0);
     }
@@ -401,7 +408,7 @@ public sealed class BuddyController : IDisposable
 
     private bool IsSpeakingBlocked(int priority)
     {
-        if (_window.IsOverlayOrCardOpen) return true;
+        if (_window.IsOverlayOrCardOpen || _window.IsSearchOpen) return true;
         if (_window.IsDndOrFullscreenOrFocus && priority < 3) return true;
         return false;
     }
@@ -542,6 +549,7 @@ public sealed class BuddyController : IDisposable
 
     private void OnSpriteMouseDown(object sender, MouseButtonEventArgs e)
     {
+        if (_window.IsSearchOpen || _buddyContainer.Visibility != Visibility.Visible) return;
         if (e.ClickCount == 1)
         {
             _clickCount = 1;
@@ -600,6 +608,19 @@ public sealed class BuddyController : IDisposable
         RefreshCardIfOpen();
     }
 
+    public void OnCardOpened()
+    {
+        if (_isCardOpen) return;
+        _isCardOpen = true;
+        EndSpeechImmediately(force: true);
+        RefreshCardIfOpen();
+    }
+
+    public void OnCardClosed()
+    {
+        _isCardOpen = false;
+    }
+
     public void ToggleCard()
     {
         if (_isCardOpen) CloseCard();
@@ -608,17 +629,11 @@ public sealed class BuddyController : IDisposable
 
     public void OpenCard()
     {
-        if (_isCardOpen) return;
-        _isCardOpen = true;
-        EndSpeechImmediately(force: true);
         _window.OpenBuddyCard();
-        RefreshCardIfOpen();
     }
 
     public void CloseCard()
     {
-        if (!_isCardOpen) return;
-        _isCardOpen = false;
         _window.CloseBuddyCard();
     }
 
@@ -660,6 +675,7 @@ public sealed class BuddyController : IDisposable
 
     private void OnSpriteRightMouseUp(object sender, MouseButtonEventArgs e)
     {
+        if (_window.IsSearchOpen || _buddyContainer.Visibility != Visibility.Visible) return;
         ShowBuddyContextMenu();
         e.Handled = true;
     }
@@ -704,7 +720,7 @@ public sealed class BuddyController : IDisposable
     private void OnTalkTimerTick(object? sender, EventArgs e)
     {
         var settings = App.Settings?.Current;
-        if (settings is null || !settings.FeatureBuddy || settings.BuddyQuiet || IsQuietPeriodActive(settings) || !settings.BuddySpeechEnabled) return;
+        if (settings is null || !settings.FeatureBuddy || settings.BuddyQuiet || IsQuietPeriodActive(settings) || !settings.BuddySpeechEnabled || _window.IsSearchOpen) return;
 
         DateTime now = DateTime.Now;
         int hour = now.Hour;

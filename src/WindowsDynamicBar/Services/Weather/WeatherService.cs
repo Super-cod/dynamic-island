@@ -142,10 +142,10 @@ public sealed class WeatherService : IDisposable
 
     public void Stop() => _timer?.Change(Timeout.Infinite, Timeout.Infinite);
 
-    private void Refresh()
+    private async void Refresh()
     {
         if (Interlocked.CompareExchange(ref _fetching, 1, 0) != 0) return;
-        try { RefreshAsync(_cts.Token).GetAwaiter().GetResult(); }
+        try { await RefreshAsync(_cts.Token).ConfigureAwait(false); }
         catch (Exception ex) { Log.Info("Weather refresh failed", ("error", ex.Message)); }
         finally { Interlocked.Exchange(ref _fetching, 0); }
     }
@@ -203,13 +203,16 @@ public sealed class WeatherService : IDisposable
         if (TryArr(root, out var sunset, "daily", "sunset") && sunset.GetArrayLength() > 0)
             snap.Sunset = ParseTime(Str(sunset, 0));
 
-        TryArr(root, out var hTimes, "hourly", "time");
-        TryArr(root, out var hTemp, "hourly", "temperature_2m");
-        TryArr(root, out var hPop, "hourly", "precipitation_probability");
-        TryArr(root, out var hCode, "hourly", "weather_code");
-        TryArr(root, out var hUv, "hourly", "uv_index");
-        int len = Math.Min(hTimes.GetArrayLength(), Math.Min(hTemp.GetArrayLength(),
-                  Math.Min(hPop.GetArrayLength(), Math.Min(hCode.GetArrayLength(), hUv.GetArrayLength()))));
+        bool hasTimes = TryArr(root, out var hTimes, "hourly", "time");
+        bool hasTemp = TryArr(root, out var hTemp, "hourly", "temperature_2m");
+        bool hasPop = TryArr(root, out var hPop, "hourly", "precipitation_probability");
+        bool hasCode = TryArr(root, out var hCode, "hourly", "weather_code");
+        bool hasUv = TryArr(root, out var hUv, "hourly", "uv_index");
+        bool hasHours = hasTimes && hasTemp && hasPop && hasCode && hasUv;
+        int len = hasHours
+            ? Math.Min(hTimes.GetArrayLength(), Math.Min(hTemp.GetArrayLength(),
+              Math.Min(hPop.GetArrayLength(), Math.Min(hCode.GetArrayLength(), hUv.GetArrayLength()))))
+            : 0;
 
         snap.Hours = new WeatherHour[len];
         int nowIdx = 0;

@@ -154,8 +154,12 @@ public sealed class QuickToggleService : IDisposable
     {
         lock (_sync)
         {
-            if (_micVolume is not null) _micVolume.OnVolumeNotification -= OnMicNotification;
-            _micVolume = null;
+            if (_micVolume is not null)
+            {
+                _micVolume.OnVolumeNotification -= OnMicNotification;
+                _micVolume.Dispose();
+                _micVolume = null;
+            }
             _mic?.Dispose();
             _mic = null;
             _states.Remove(ToggleId.MicMute);
@@ -307,8 +311,12 @@ public sealed class QuickToggleService : IDisposable
         {
             foreach (var r in _radios) r.StateChanged -= OnRadioStateChanged;
             _radios.Clear();
-            if (_micVolume is not null) _micVolume.OnVolumeNotification -= OnMicNotification;
-            _micVolume = null;
+            if (_micVolume is not null)
+            {
+                _micVolume.OnVolumeNotification -= OnMicNotification;
+                _micVolume.Dispose();
+                _micVolume = null;
+            }
             _mic?.Dispose();
             _mic = null;
             if (_audio is not null && _deviceSink is not null)

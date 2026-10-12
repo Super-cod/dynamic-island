@@ -1,4 +1,4 @@
-﻿# ==============================================================================
+# ==============================================================================
 # Windows Dynamic Bar - Terminal CLI (island)
 # ==============================================================================
 # Usage:
@@ -178,7 +178,7 @@ function Build-Island {
         $slnPath = Join-Path $repoPath "src\WindowsDynamicBar\WindowsDynamicBar.csproj"
     }
 
-    $buildOutput = & dotnet build $slnPath -c Release 2>&1
+    $buildOutput = & dotnet build $slnPath -c Release -r win-x64 2>&1
     if ($LASTEXITCODE -ne 0) {
         Write-Host "Build failed with exit code $($LASTEXITCODE):" -ForegroundColor Red
         $buildOutput | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
@@ -211,7 +211,7 @@ $candidateExes = @(
     (Join-Path $repoPath "versions\WindowsDynamicBar.exe")
 )
 
-$targetExe = $candidateExes | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+$targetExe = $candidateExes | Where-Object { Test-Path -LiteralPath $_ } | Sort-Object { (Get-Item $_).LastWriteTime } -Descending | Select-Object -First 1
 
 if (-not $targetExe) {
     Write-Host "Application executable not found. Running build first..." -ForegroundColor Yellow
@@ -230,5 +230,5 @@ if (-not $targetExe) {
 
 Write-Host "Launching Windows Dynamic Bar..." -ForegroundColor Cyan
 Write-Host "Executable: $targetExe" -ForegroundColor DarkGray
-Start-Process -FilePath $targetExe -WindowStyle Hidden
+Start-Process -FilePath $targetExe
 Write-Host "Windows Dynamic Bar launched successfully." -ForegroundColor Green

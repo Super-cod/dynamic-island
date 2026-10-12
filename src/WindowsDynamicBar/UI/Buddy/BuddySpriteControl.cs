@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Windows;
 using System.Windows.Media;
@@ -26,6 +26,15 @@ public sealed class BuddySpriteControl : FrameworkElement
     private const uint C_MOUTH = 0xFF7A1F2B;
     private const uint C_TONGUE = 0xFFFF7B8A;
     private const uint C_HP = 0xFF5B6CFF;
+    private const uint C_HP_BAND = 0xFF4A5AE8;      // Vibrant visible royal blue headband
+    private const uint C_HP_BAND_HI = 0xFF99B2FF;   // Headband top reflection / sheen highlight
+    private const uint C_HP_METAL = 0xFFD2D8E4;     // Polished aluminum/silver gimbal hinges
+    private const uint C_HP_RIM = 0xFF2A3BB8;       // Deep sapphire can rim / housing
+    private const uint C_HP_CAN = 0xFF5B6CFF;       // Vibrant signature acoustic royal blue
+    private const uint C_HP_HI = 0xFF99B2FF;        // Specular glossy curve highlight on outer can dome
+    private const uint C_HP_PAD = 0xFF3544A8;       // Cushion clearly visible against dark bar
+    private const uint C_HP_CORE = 0xFFDDE6FF;      // Concentric aluminum pivot disc
+    private const uint C_HP_GLOW = 0xFF00E5FF;      // Active audio beat pulse LED
     private const uint C_SWEAT = 0xFF6FC3FF;
     private const uint C_Z = 0xFFCFD8FF;
     private const uint C_HEART = 0xFFFF5B7A;
@@ -421,10 +430,63 @@ public sealed class BuddySpriteControl : FrameworkElement
         // Accessories & Props
         if (accessory == BuddyAccessory.Headphones)
         {
-            P(2, 7, C_HP, 2, 3);
-            P(12, 7, C_HP, 2, 3);
-            P(6, 2, C_HP, 4, 1);
-            int n = (int)Math.Floor(timeMs / 250.0) % 2;
+            // 1. Arch Headband over the top of the head (Y=1: X=5..10, curves down Y=2: X=4 & 11, Y=3: X=3 & 12)
+            P(5, 1, C_HP_BAND, 6, 1);
+            P(6, 1, C_HP_BAND_HI, 4, 1); // glossy metallic/padded sheen across top
+
+            // Arch shoulders curving down the sides of the skull
+            P(4, 2, C_HP_BAND);
+            P(11, 2, C_HP_BAND);
+            P(3, 3, C_HP_BAND);
+            P(12, 3, C_HP_BAND);
+
+            // Aluminum / chrome slider yokes connecting headband into the earcups
+            P(2, 4, C_HP_METAL);
+            P(13, 4, C_HP_METAL);
+
+            // 2. Big realistic Over-Ear Cushions & Cans (covering ears from Y=5 to Y=9)
+            // Left Earcup (X: 1..3, Y: 5..9)
+            P(2, 5, C_HP_RIM);
+            P(3, 5, C_HP_PAD); // inner leather cushion against head
+
+            P(1, 6, C_HP_RIM);
+            P(2, 6, C_HP_HI);  // specular highlight on dome
+            P(3, 6, C_HP_PAD);
+
+            bool beat = !reduceMotion && ((int)(timeMs / 250.0) % 2 == 1);
+            uint centerGlow = beat ? C_HP_GLOW : C_HP_CORE;
+            P(1, 7, C_HP_RIM);
+            P(2, 7, centerGlow); // center acoustic disc / active LED
+            P(3, 7, C_HP_PAD);
+
+            P(1, 8, C_HP_RIM);
+            P(2, 8, C_HP_CAN);
+            P(3, 8, C_HP_PAD);
+
+            P(2, 9, C_HP_RIM);
+            P(3, 9, C_HP_PAD);
+
+            // Right Earcup (X: 12..14, Y: 5..9)
+            P(12, 5, C_HP_PAD);
+            P(13, 5, C_HP_RIM);
+
+            P(12, 6, C_HP_PAD);
+            P(13, 6, C_HP_HI);
+            P(14, 6, C_HP_RIM);
+
+            P(12, 7, C_HP_PAD);
+            P(13, 7, centerGlow);
+            P(14, 7, C_HP_RIM);
+
+            P(12, 8, C_HP_PAD);
+            P(13, 8, C_HP_CAN);
+            P(14, 8, C_HP_RIM);
+
+            P(12, 9, C_HP_PAD);
+            P(13, 9, C_HP_RIM);
+
+            // 3. Floating Animated Musical Note
+            int n = !reduceMotion ? (int)Math.Floor(timeMs / 250.0) % 2 : 0;
             Q(13, 2 + n, C_NOTE, 1, 2);
             Q(14, 1 + n, C_NOTE, 1, 1);
         }

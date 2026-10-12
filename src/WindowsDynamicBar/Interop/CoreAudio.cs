@@ -292,26 +292,30 @@ internal static class CoreAudio
             if (hr != 0 || dev is null)
                 hr = _enumerator.GetDefaultAudioEndpoint(DEVICE_RENDER, ROLE_MULTIMEDIA, out dev);
             if (hr != 0 || dev is null) return null;
-            if (dev.OpenPropertyStore(STGM_READ, out IntPtr propsPtr) != 0 || propsPtr == IntPtr.Zero) return null;
-            var store = (IPropertyStore)Marshal.GetObjectForIUnknown(propsPtr);
-            Marshal.Release(propsPtr);
             try
             {
-                var key = new PROPERTYKEY
-                {
-                    // PKEY_Device_FriendlyName = {a45c254e-df1c-4efd-8020-67d146a850e0}, pid 14
-                    fmtid = new Guid("A45C254E-DF1C-4EFD-8020-67D146A850E0"),
-                    pid = 14
-                };
-                if (store.GetValue(ref key, out var pv) != 0) return null;
+                if (dev.OpenPropertyStore(STGM_READ, out IntPtr propsPtr) != 0 || propsPtr == IntPtr.Zero) return null;
+                var store = (IPropertyStore)Marshal.GetObjectForIUnknown(propsPtr);
+                Marshal.Release(propsPtr);
                 try
                 {
-                    if (pv.vt != VT_LPWSTR || pv.p == IntPtr.Zero) return null;
-                    return Marshal.PtrToStringUni(pv.p);
+                    var key = new PROPERTYKEY
+                    {
+                        // PKEY_Device_FriendlyName = {a45c254e-df1c-4efd-8020-67d146a850e0}, pid 14
+                        fmtid = new Guid("A45C254E-DF1C-4EFD-8020-67D146A850E0"),
+                        pid = 14
+                    };
+                    if (store.GetValue(ref key, out var pv) != 0) return null;
+                    try
+                    {
+                        if (pv.vt != VT_LPWSTR || pv.p == IntPtr.Zero) return null;
+                        return Marshal.PtrToStringUni(pv.p);
+                    }
+                    finally { PropVariantClear(ref pv); }
                 }
-                finally { PropVariantClear(ref pv); }
+                finally { Marshal.ReleaseComObject(store); }
             }
-            finally { Marshal.ReleaseComObject(store); }
+            finally { Marshal.ReleaseComObject(dev); }
         }
         catch { return null; }
     }

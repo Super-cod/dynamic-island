@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Diagnostics;
 using System.Net.NetworkInformation;
 using System.Windows;
@@ -36,6 +36,8 @@ public partial class BarWindow
 
     private bool _isBuddyCardOpen;
     public bool IsBuddyCardOpen => _isBuddyCardOpen;
+    public IslandVisualState IslandState => _islandState;
+    public bool IsSearchOpen => _islandState == IslandVisualState.Search;
 
     public bool IsInternetConnected => _lastInternetConnected;
     public bool IsBatteryCharging => _hasBattery && _battOnAc;
@@ -144,6 +146,40 @@ public partial class BarWindow
         if (_isBuddyCardOpen) return;
         _isBuddyCardOpen = true;
 
+        _buddyController?.OnCardOpened();
+
+        _hoverCheckTimer.Stop();
+        _collapseDelay.Stop();
+        StopTelemetry();
+        _pinned = false;
+        _expanded = false;
+        _idleCollapse.Stop();
+        CancelDelays();
+
+        // Hide all underlying layers and panels so nothing leaks behind the buddy card
+        CollapsedPanel.Visibility = Visibility.Collapsed;
+        CollapsedPanel.Opacity = 0;
+        ExpandedHost.Visibility = Visibility.Collapsed;
+        ExpandedHost.Opacity = 0;
+        IslandExpandedHost.Visibility = Visibility.Collapsed;
+        IslandExpandedHost.Opacity = 0;
+        IdleOpenPanel.Visibility = Visibility.Collapsed;
+        IdleOpenPanel.Opacity = 0;
+        MediaInfoStack.Visibility = Visibility.Collapsed;
+        MediaInfoStack.Opacity = 0;
+        OrbHost.Visibility = Visibility.Collapsed;
+        OrbHost.Opacity = 0;
+        OrbContainer.Visibility = Visibility.Collapsed;
+        OrbContainer.Opacity = 0;
+        WarningStrip.Visibility = Visibility.Collapsed;
+        if (BuddyContainer is not null) BuddyContainer.Visibility = Visibility.Collapsed;
+        foreach (UIElement panel in AllPanels)
+        {
+            panel.Visibility = Visibility.Collapsed;
+            panel.Opacity = 0;
+            panel.IsHitTestVisible = false;
+        }
+
         if (BuddyCardComponent is not null)
         {
             BuddyCardComponent.Visibility = Visibility.Visible;
@@ -151,11 +187,6 @@ public partial class BarWindow
             BuddyCardComponent.BeginAnimation(OpacityProperty, fadeIn);
             _buddyController?.RefreshCardIfOpen();
         }
-
-        CollapsedPanel.Visibility = Visibility.Collapsed;
-        ExpandedHost.Visibility = Visibility.Collapsed;
-        IdleOpenPanel.Visibility = Visibility.Collapsed;
-        if (BuddyContainer is not null) BuddyContainer.Visibility = Visibility.Collapsed;
 
         // Sized to the content: a fixed 460 x 180 cut off the stats line (bottom) and the third
         // meter (right). The meter row needs ~486 px; the outfit list wraps to the width.
@@ -180,26 +211,59 @@ public partial class BarWindow
         if (!_isBuddyCardOpen) return;
         _isBuddyCardOpen = false;
 
+        _buddyController?.OnCardClosed();
+
         if (BuddyCardComponent is not null)
         {
-            var fadeOut = new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(200));
-            fadeOut.Completed += (_, _) => BuddyCardComponent.Visibility = Visibility.Collapsed;
+            var fadeOut = new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(160));
+            fadeOut.Completed += (_, _) =>
+            {
+                BuddyCardComponent.Visibility = Visibility.Collapsed;
+                BuddyCardComponent.BeginAnimation(OpacityProperty, null);
+                BuddyCardComponent.Opacity = 0;
+            };
             BuddyCardComponent.BeginAnimation(OpacityProperty, fadeOut);
         }
 
         if (BuddyContainer is not null)
         {
-            BuddyContainer.Visibility = App.Settings?.Current.FeatureBuddy == true ? Visibility.Visible : Visibility.Collapsed;
+            BuddyContainer.Visibility = (_islandState != IslandVisualState.Search && App.Settings?.Current.FeatureBuddy == true) ? Visibility.Visible : Visibility.Collapsed;
         }
 
-        ApplyLayoutMode();
-        SetIslandState(IslandVisualState.Collapsed, IslandMetric.None, force: true);
-        SyncBuddyLayoutMode();
+        _islandHovering = false;
+        _collapseDelay.Stop();
+        _hoverCheckTimer.Stop();
+
+        // Restore layout mode and panel visibility (IdleOpenPanel / MediaInfoStack / Collapsed rows)
+        ApplyLayoutMode(instant: true, force: true);
+
+        // Ensure buddy clock row is visible and speech bubble is collapsed
+        if (BuddyClockRow is not null) BuddyClockRow.Visibility = Visibility.Visible;
+        if (BuddySpeechText is not null) BuddySpeechText.Visibility = Visibility.Collapsed;
+
+        // Force return to collapsed state and sync buddy bounds
+        if (_islandState != IslandVisualState.Search)
+        {
+            SetIslandState(IslandVisualState.Collapsed, IslandMetric.None, force: true);
+            SyncBuddyLayoutMode();
+        }
     }
 
     public void SyncBuddyLayoutMode()
     {
         if (_buddyController is null) return;
+        if (_islandState == IslandVisualState.Search)
+        {
+            if (BuddyContainer is not null)
+            {
+                BuddyContainer.Visibility = Visibility.Collapsed;
+                BuddyContainer.Opacity = 0;
+                BuddyContainer.IsHitTestVisible = false;
+            }
+            _buddyController.StopLifeLoop();
+            return;
+        }
+
         IslandMode mode = IslandMode.Collapsed;
         if (_isBuddyCardOpen)
         {
@@ -212,6 +276,16 @@ public partial class BarWindow
         else if (_expanded || _islandState == IslandVisualState.Expanded)
         {
             mode = _idleMode ? IslandMode.ExpandedDashboard : IslandMode.ExpandedMusic;
+        }
+
+        if (BuddyContainer is not null)
+        {
+            BuddyContainer.Visibility = App.Settings?.Current.FeatureBuddy == true ? Visibility.Visible : Visibility.Collapsed;
+            if (BuddyContainer.Visibility == Visibility.Visible)
+            {
+                BuddyContainer.Opacity = 1;
+                BuddyContainer.IsHitTestVisible = true;
+            }
         }
 
         _buddyController.UpdateLayout(mode, _currentW, _currentH);
@@ -725,12 +799,7 @@ public partial class BarWindow
         if (DateTime.Now - _lastSearchOpenedTime >= TimeSpan.FromHours(1))
         {
             _lastSearchOpenedTime = DateTime.Now;
-            _buddyController?.Say(BuddyLines.SearchOpened, new Buddy.BuddyController.SpeechOptions
-            {
-                Priority = 2,
-                Mood = BuddyMood.Happy,
-                Accessory = BuddyAccessory.Glass
-            });
+            _buddyController?.Behavior.TriggerEvent(2, BuddyAnimationState.IdleBreathing, BuddyMood.Happy, BuddyAccessory.Glass, 3.0);
         }
     }
 

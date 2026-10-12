@@ -127,6 +127,23 @@ public partial class BarWindow
     {
         if (!_cfg.FeatureSearch) return;
         SearchTrace("open begin", ("phase", _searchPhase), ("hostMeasured", SearchHost.IsMeasureValid));
+        if (_isBuddyCardOpen) CloseBuddyCard();
+        _buddyController?.EndSpeechImmediately(force: true);
+        _buddyController?.StopLifeLoop();
+        if (BuddyContainer is not null)
+        {
+            BuddyContainer.Visibility = Visibility.Collapsed;
+            BuddyContainer.Opacity = 0;
+            BuddyContainer.IsHitTestVisible = false;
+        }
+        if (BuddyCardComponent is not null)
+        {
+            BuddyCardComponent.Visibility = Visibility.Collapsed;
+            BuddyCardComponent.Opacity = 0;
+            BuddyCardComponent.IsHitTestVisible = false;
+        }
+        if (BuddyClockRow is not null) BuddyClockRow.Visibility = Visibility.Visible;
+        if (BuddySpeechText is not null) BuddySpeechText.Visibility = Visibility.Collapsed;
         OnBuddySearchOpened();
         if (_searchPhase is SearchPhase.Opening or SearchPhase.Open)
         {
@@ -224,6 +241,17 @@ public partial class BarWindow
             OrbHost.Visibility = Visibility.Visible;
             Fade(CollapsedPanel, 1, 160);
             Fade(OrbHost, 1, 160);
+
+            if (BuddyContainer is not null && App.Settings?.Current.FeatureBuddy == true)
+            {
+                BuddyContainer.Visibility = Visibility.Visible;
+                BuddyContainer.Opacity = 1;
+                BuddyContainer.IsHitTestVisible = true;
+            }
+            if (BuddyClockRow is not null) BuddyClockRow.Visibility = Visibility.Visible;
+            if (BuddySpeechText is not null) BuddySpeechText.Visibility = Visibility.Collapsed;
+            _buddyController?.CheckVisibilityAndRun();
+            SyncBuddyLayoutMode();
         }
         if (_islandState != IslandVisualState.Search) SetTallWindow(false);
         SearchTrace("close settled", ("reveal", reveal));
@@ -783,6 +811,13 @@ public partial class BarWindow
             ("Restart", "Restart computer", true, () => { StartProcess("shutdown.exe", "/r /t 0"); ShowActionSuccess("✓ Restarting..."); }),
             ("Shut Down", "Turn off computer", true, () => { StartProcess("shutdown.exe", "/s /t 0"); ShowActionSuccess("✓ Shutting down..."); }),
             ("Task Manager", "View running processes and performance", false, () => { StartProcess("taskmgr.exe"); ShowActionSuccess("✓ Opened Task Manager"); }),
+            ("Settings", "Open Dynamic Bar settings", false, () => { SettingsWindow.ShowSingleton(); ShowActionSuccess("✓ Opened Settings"); }),
+            ("Toggle Island Buddy", "Show or hide Dot companion", false, () =>
+            {
+                bool cur = App.Settings?.Current.FeatureBuddy ?? true;
+                App.Settings?.Update(s => s.FeatureBuddy = !cur);
+                ShowActionSuccess(!cur ? "✓ Enabled Island Buddy" : "✓ Hidden Island Buddy");
+            }),
         };
 
         var list = new List<SearchResult>();

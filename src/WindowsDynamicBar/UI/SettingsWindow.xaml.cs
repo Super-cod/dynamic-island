@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -433,6 +433,7 @@ public partial class SettingsWindow : Window
     {
         Card(null);
         Row("Turn features on or off", "A feature that is off is not loaded at all: no timers, no hooks, no hotkey.", null);
+        SwitchRow("Island Buddy", "Interactive companion (Dot) with reactions and animations", s.FeatureBuddy, v => Set(x => x.FeatureBuddy = v));
         SwitchRow("Music", "Now playing, artwork, controls, lyrics", s.FeatureMedia, v => Set(x => x.FeatureMedia = v));
         SwitchRow("Idle dashboard", "Dot clock, greeting, focus button when nothing plays", s.FeatureIdleDashboard, v => Set(x => x.FeatureIdleDashboard = v));
         SwitchRow("Notifications", "Cards for incoming Windows notifications", s.FeatureNotifications, v => Set(x => x.FeatureNotifications = v));

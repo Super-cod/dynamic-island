@@ -415,6 +415,7 @@ public sealed class FocusService : IDisposable
         Emit();
         if (done)
         {
+            _tick.Change(Timeout.Infinite, Timeout.Infinite);
             _bus.Raise(BarEvent.Create(BarEventKind.Toast, "Focus session finished",
                 "Take a break", priority: 99, displayDuration: TimeSpan.FromSeconds(8)));
             try { System.Media.SystemSounds.Exclamation.Play(); } catch { }

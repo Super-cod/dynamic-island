@@ -254,6 +254,11 @@ public sealed class WasapiSpectrumService : IDisposable
         if (_disposed) return;
         _disposed = true;
         Stop();
-        _renderTimer = null;
+        if (_renderTimer is not null)
+        {
+            _renderTimer.Tick -= OnRenderTick;
+            _renderTimer.Stop();
+            _renderTimer = null;
+        }
     }
 }
