@@ -49,6 +49,10 @@ public sealed class BuddyController : IDisposable
     private readonly Stopwatch _lifeClock = Stopwatch.StartNew();
     private readonly List<BuddySpriteControl.Particle> _particles = new();
 
+    // Audio wave and dance tracking
+    private float _audioEnergy;
+    private double _dancePhase;
+
     // Interaction tracking
     private int _clickCount;
     private bool _pointerOverIsland;
@@ -323,6 +327,17 @@ public sealed class BuddyController : IDisposable
 
         bool isTalking = _currentSpeech is not null;
 
+        // Step wave dance phase if music is actively playing
+        if (_behavior.IsMusicPlaying && !rm)
+        {
+            double speedMultiplier = 1.0 + (_audioEnergy * 0.45);
+            _dancePhase += (0.071 * 1000.0 / 140.0) * speedMultiplier;
+        }
+        else
+        {
+            _audioEnergy = 0f;
+        }
+
         _sprite.RenderFrame(
             _behavior.CurrentMood,
             _behavior.CurrentAccessory,
@@ -338,7 +353,10 @@ public sealed class BuddyController : IDisposable
             _particles,
             _behavior.CurrentAnimation,
             _behavior.Movement.FacingLeft,
-            _behavior.Movement.WalkFrame
+            _behavior.Movement.WalkFrame,
+            _behavior.IsMusicPlaying,
+            _audioEnergy,
+            _dancePhase
         );
 
         if (_isCardOpen && _cardControl is not null)
@@ -517,30 +535,50 @@ public sealed class BuddyController : IDisposable
         _behavior.BaselineAccessory = accessory;
     }
 
+    public void SetAudioSpectrum(float[]? bands)
+    {
+        if (bands is null || bands.Length == 0)
+        {
+            _audioEnergy = 0f;
+            return;
+        }
+
+        // Calculate bass & rhythmic wave energy from lower frequency bands (sub-bass & bass)
+        float bass = 0f;
+        int count = Math.Min(6, bands.Length);
+        for (int i = 0; i < count; i++)
+        {
+            bass += bands[i];
+        }
+        _audioEnergy = Math.Clamp(bass / count, 0f, 1f);
+    }
+
     public void OnMediaPlaybackStateChanged(WindowsDynamicBar.Services.Media.MediaInfo? media)
     {
         if (media is { IsPlaying: true } && !string.IsNullOrWhiteSpace(media.Title))
         {
             string trackKey = $"{media.Artist}|{media.Title}";
-            if (_behavior.HasActiveMusicSession && _behavior.CurrentTrackKey != trackKey)
+            if (!_behavior.HasActiveMusicSession)
+            {
+                _behavior.OnMediaPlaybackStarted(trackKey);
+            }
+            else if (_behavior.CurrentTrackKey != trackKey)
             {
                 _behavior.OnMediaTrackChanged(trackKey);
             }
-            else if (_behavior.CurrentMusicActivity == BuddyMusicActivity.PausedWithHeadphones)
+            else if (!_behavior.IsMusicPlaying || _behavior.CurrentMusicActivity == BuddyMusicActivity.PausedWithHeadphones)
             {
                 _behavior.OnMediaResumed();
-            }
-            else if (!_behavior.HasActiveMusicSession)
-            {
-                _behavior.OnMediaPlaybackStarted(trackKey);
             }
         }
         else if (media is not null && !media.IsPlaying && !string.IsNullOrWhiteSpace(media.Title))
         {
+            _audioEnergy = 0f;
             _behavior.OnMediaPaused();
         }
         else
         {
+            _audioEnergy = 0f;
             _behavior.OnMediaStopped();
         }
     }

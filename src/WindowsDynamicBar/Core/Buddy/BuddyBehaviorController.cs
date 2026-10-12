@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 
 namespace WindowsDynamicBar.Core.Buddy;
@@ -219,16 +219,16 @@ public sealed class BuddyBehaviorController
             return;
         }
 
-            CurrentMusicActivity = BuddyMusicActivity.Starting;
-            BaselineAccessory = BuddyAccessory.Headphones;
-            if (ActivePriority <= 1)
-            {
-                CurrentAccessory = BuddyAccessory.Headphones;
-                CurrentMood = BuddyMood.Happy;
-                CurrentAnimation = BuddyAnimationState.HeadBobbing;
-                _actionDuration = 1.5;
-            }
-            CurrentMusicActivity = BuddyMusicActivity.Dancing;
+        CurrentMusicActivity = BuddyMusicActivity.Starting;
+        BaselineAccessory = BuddyAccessory.Headphones;
+        if (ActivePriority <= 1)
+        {
+            CurrentAccessory = BuddyAccessory.Headphones;
+            CurrentMood = BuddyMood.Happy;
+            CurrentAnimation = BuddyAnimationState.Dancing;
+            _actionDuration = 3.5;
+        }
+        CurrentMusicActivity = BuddyMusicActivity.Dancing;
     }
 
     public void OnMediaPaused()
@@ -254,8 +254,8 @@ public sealed class BuddyBehaviorController
         {
             CurrentAccessory = BuddyAccessory.Headphones;
             CurrentMood = BuddyMood.Happy;
-            CurrentAnimation = BuddyAnimationState.HeadBobbing;
-            _actionDuration = 2.0;
+            CurrentAnimation = BuddyAnimationState.Dancing;
+            _actionDuration = 3.5;
         }
         CurrentMusicActivity = BuddyMusicActivity.Dancing;
     }
@@ -282,16 +282,14 @@ public sealed class BuddyBehaviorController
             return;
         }
 
-        // Preserve headphones, change dance activity smoothly
+        // Preserve headphones, keep dancing smoothly to the new track
         BaselineAccessory = BuddyAccessory.Headphones;
         if (ActivePriority <= 1)
         {
             CurrentAccessory = BuddyAccessory.Headphones;
             CurrentMood = BuddyMood.Excited;
-            CurrentAnimation = CurrentAnimation == BuddyAnimationState.Dancing
-                ? BuddyAnimationState.HeadBobbing
-                : BuddyAnimationState.Dancing;
-            _actionDuration = 2.5;
+            CurrentAnimation = BuddyAnimationState.Dancing;
+            _actionDuration = 3.5;
         }
     }
 
@@ -321,37 +319,16 @@ public sealed class BuddyBehaviorController
             BaselineAccessory = BuddyAccessory.Headphones;
             CurrentMood = BuddyMood.Happy;
 
-            var musicActions = new List<BuddyAnimationState>
-            {
-                BuddyAnimationState.Dancing,
-                BuddyAnimationState.HeadBobbing,
-                BuddyAnimationState.FootTapping,
-                BuddyAnimationState.Resting,
-                BuddyAnimationState.LookingLeft,
-                BuddyAnimationState.LookingRight,
-                BuddyAnimationState.Walking
-            };
-            musicActions.RemoveAll(a => a == _previousAnimation);
-            if (musicActions.Count == 0) musicActions.Add(BuddyAnimationState.Dancing);
+            // When music plays, Dot dances to the wave continuously!
+            // Alternate between the fluid wave dance and groovy beat movements
+            var roll = _rng.NextDouble();
+            BuddyAnimationState musicChosen = roll < 0.75
+                ? BuddyAnimationState.Dancing
+                : (roll < 0.88 ? BuddyAnimationState.HeadBobbing : BuddyAnimationState.FootTapping);
 
-            var musicChosen = musicActions[_rng.Next(musicActions.Count)];
             _previousAnimation = musicChosen;
             CurrentAnimation = musicChosen;
-
-            if (musicChosen == BuddyAnimationState.Walking)
-            {
-                Movement.PickRandomDestination();
-                _actionDuration = 2.5;
-            }
-            else if (musicChosen == BuddyAnimationState.Resting)
-            {
-                CurrentMood = BuddyMood.Calm;
-                _actionDuration = 3.5;
-            }
-            else
-            {
-                _actionDuration = 3.0;
-            }
+            _actionDuration = 3.5;
             ScheduleNextAction();
             return;
         }

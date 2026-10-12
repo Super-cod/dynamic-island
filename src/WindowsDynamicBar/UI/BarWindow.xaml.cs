@@ -367,7 +367,15 @@ public partial class BarWindow : Window, IDisposable
 
         _spectrum.SpectrumChanged += bands =>
         {
-            try { Dispatcher.InvokeAsync(() => HoverEq.SetSpectrum(bands)); } catch { }
+            try
+            {
+                Dispatcher.InvokeAsync(() =>
+                {
+                    HoverEq.SetSpectrum(bands);
+                    _buddyController?.SetAudioSpectrum(bands);
+                });
+            }
+            catch { }
         };
 
         ApplySettingsUi(_cfg);
@@ -1411,10 +1419,13 @@ public partial class BarWindow : Window, IDisposable
         HoverEq.Running = playing;
         HoverEq.Visibility = hasMedia ? Visibility.Visible : Visibility.Collapsed;
 
-        if (playing && _islandState != IslandVisualState.Collapsed)
+        if (playing)
             _spectrum.Start();
         else
+        {
             _spectrum.Stop();
+            _buddyController?.SetAudioSpectrum(null);
+        }
 
         LyricText.Foreground = new SolidColorBrush(Color.FromArgb(255,
             (byte)(dominant.R * 0.45 + 255 * 0.55),
@@ -1855,7 +1866,7 @@ public partial class BarWindow : Window, IDisposable
         switch (e.Key)
         {
             case Key.Space:
-                _ = App.Media?.PlayPauseAsync();
+                OnPlayPauseClick(sender, e);
                 e.Handled = true;
                 break;
             case Key.Left:
@@ -4044,10 +4055,13 @@ public partial class BarWindow : Window, IDisposable
                 HoverEq.Running = nextPlaying;
                 HoverEq.Visibility = Visibility.Visible;
                 OrbDisc.SetPlaying(nextPlaying);
-                if (nextPlaying && _islandState != IslandVisualState.Collapsed)
+                if (nextPlaying)
                     _spectrum.Start();
                 else
+                {
                     _spectrum.Stop();
+                    _buddyController?.SetAudioSpectrum(null);
+                }
             }
             _ = App.Media?.PlayPauseAsync();
         }

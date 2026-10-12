@@ -305,6 +305,16 @@ internal static partial class Program
         Assert(behavior.IsMusicPlaying, "Music is playing");
         Assert(behavior.CurrentAccessory == BuddyAccessory.Headphones, "Headphones equipped");
         Assert(behavior.CurrentTrackKey == "Artist - Song 1", "Track key registered");
+        Assert(behavior.CurrentAnimation == BuddyAnimationState.Dancing, "Dancing wave animation starts immediately");
+
+        // Autonomous scheduling keeps Dot dancing / grooving during music
+        for (int i = 0; i < 10; i++)
+        {
+            behavior.Update(5.0, DateTime.UtcNow.AddSeconds(i * 5));
+            Assert(behavior.IsMusicPlaying, "Music remains playing");
+            Assert(behavior.CurrentAnimation is BuddyAnimationState.Dancing or BuddyAnimationState.HeadBobbing or BuddyAnimationState.FootTapping,
+                "Dot dances or grooves during music, never idles or walks away");
+        }
 
         // 2. Playback paused
         behavior.OnMediaPaused();
@@ -313,17 +323,63 @@ internal static partial class Program
         Assert(behavior.HasActiveMusicSession, "Session remains active through pause");
         Assert(behavior.CurrentAccessory == BuddyAccessory.Headphones, "Headphones preserved through pause");
         Assert(behavior.CurrentMood == BuddyMood.Calm, "Calm mood while listening paused");
+        Assert(behavior.CurrentAnimation == BuddyAnimationState.Sitting, "Paused in sitting pose with headphones");
+
+        // While paused, Dot stays calm with headphones on and does not dance
+        for (int i = 0; i < 5; i++)
+        {
+            behavior.Update(5.0, DateTime.UtcNow.AddSeconds(i * 5));
+            Assert(behavior.CurrentMusicActivity == BuddyMusicActivity.PausedWithHeadphones, "Still paused");
+            Assert(behavior.CurrentAnimation == BuddyAnimationState.Sitting, "Dot remains paused in sitting pose");
+        }
 
         // 3. Playback resumed
         behavior.OnMediaResumed();
         Assert(behavior.IsMusicPlaying, "Music playing after resume");
         Assert(behavior.CurrentAccessory == BuddyAccessory.Headphones, "Headphones retained on resume");
+        Assert(behavior.CurrentAnimation == BuddyAnimationState.Dancing, "Dancing immediately resumes upon unpause");
 
         // 4. Playback stopped
         behavior.OnMediaStopped();
         Assert(behavior.CurrentMusicActivity == BuddyMusicActivity.Stopped, "Transitioned to Stopped");
         Assert(!behavior.HasActiveMusicSession, "Session cleanly stopped");
         Assert(behavior.CurrentAccessory == BuddyAccessory.None, "Headphones removed on stop");
+        Assert(behavior.CurrentAnimation == BuddyAnimationState.IdleBreathing, "Idle breathing restored on stop");
+
+        // Verify sprite renders wave dance and paused states without exceptions
+        var control = new BuddySpriteControl();
+        control.RenderFrame(
+            mood: BuddyMood.Happy,
+            accessory: BuddyAccessory.Headphones,
+            timeMs: 2500,
+            reduceMotion: false,
+            isTalking: false,
+            hop: 0,
+            wave: 0,
+            lookX: 0,
+            lookY: 0,
+            isBlinking: false,
+            animState: BuddyAnimationState.Dancing,
+            isMusicPlaying: true,
+            audioEnergy: 0.8f,
+            dancePhase: 3.5
+        );
+        control.RenderFrame(
+            mood: BuddyMood.Calm,
+            accessory: BuddyAccessory.Headphones,
+            timeMs: 2500,
+            reduceMotion: false,
+            isTalking: false,
+            hop: 0,
+            wave: 0,
+            lookX: 0,
+            lookY: 0,
+            isBlinking: false,
+            animState: BuddyAnimationState.Sitting,
+            isMusicPlaying: false,
+            audioEnergy: 0f,
+            dancePhase: 0.0
+        );
     }
 
     private static void TestBuddyMusicInterruptionPreservation()

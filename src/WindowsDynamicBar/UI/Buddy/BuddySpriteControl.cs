@@ -111,12 +111,19 @@ public sealed class BuddySpriteControl : FrameworkElement
         List<Particle>? particles = null,
         BuddyAnimationState animState = BuddyAnimationState.IdleBreathing,
         bool facingLeft = false,
-        int walkFrame = 0)
+        int walkFrame = 0,
+        bool isMusicPlaying = false,
+        float audioEnergy = 0f,
+        double dancePhase = 0.0)
     {
         Array.Clear(_pixels, 0, PixelCount);
 
         double hp = hop > 0 ? Math.Abs(Math.Sin(hop * Math.PI)) * 3.0 : 0.0;
         int by = 0;
+
+        double effectivePhase = dancePhase > 0 ? dancePhase : (timeMs / 140.0);
+        int waveStep = ((int)Math.Floor(effectivePhase)) % 8;
+        if (waveStep < 0) waveStep += 8;
 
         if (!reduceMotion)
         {
@@ -127,11 +134,26 @@ public sealed class BuddySpriteControl : FrameworkElement
             else if (animState == BuddyAnimationState.EdgePeeking)
                 by = 5;
             else if (animState == BuddyAnimationState.Dancing)
-                by = (int)Math.Round(Math.Sin(timeMs / 180.0) * 1.0);
+            {
+                if (!isMusicPlaying)
+                {
+                    by = 2; // Paused sitting pose with headphones
+                }
+                else
+                {
+                    int dip = audioEnergy > 0.35f ? 2 : 1;
+                    by = waveStep switch
+                    {
+                        1 or 5 => -1,
+                        2 or 6 => dip,
+                        _ => 0
+                    };
+                }
+            }
             else if (animState == BuddyAnimationState.HeadBobbing)
-                by = (int)Math.Round(Math.Sin(timeMs / 140.0) * 1.2);
+                by = isMusicPlaying ? (int)Math.Round(Math.Sin(timeMs / 140.0) * 1.2) : 0;
             else if (animState == BuddyAnimationState.FootTapping)
-                by = (int)Math.Round(Math.Sin(timeMs / 200.0) * 0.5);
+                by = isMusicPlaying ? (int)Math.Round(Math.Sin(timeMs / 200.0) * 0.5) : 0;
             else if (animState == BuddyAnimationState.Laughing)
                 by = (int)Math.Round(Math.Sin(timeMs / 100.0) * 0.8);
             else
@@ -141,7 +163,20 @@ public sealed class BuddySpriteControl : FrameworkElement
         int sx = 0;
         if (animState == BuddyAnimationState.Dancing && !reduceMotion)
         {
-            sx = ((int)(timeMs / 250.0) % 2 == 0) ? -1 : 1;
+            if (isMusicPlaying)
+            {
+                // Smooth sinusoidal wave body sway across 8 steps
+                sx = waveStep switch
+                {
+                    0 or 7 => -1,
+                    3 or 4 => 1,
+                    _ => 0
+                };
+            }
+            else
+            {
+                sx = 0;
+            }
         }
         else if (animState == BuddyAnimationState.Stumble && !reduceMotion)
         {
@@ -226,9 +261,35 @@ public sealed class BuddySpriteControl : FrameworkElement
         }
         else if (animState == BuddyAnimationState.FootTapping)
         {
-            bool tap = ((int)Math.Floor(timeMs / 180.0) % 2 == 1);
+            bool tap = isMusicPlaying && ((int)Math.Floor(timeMs / 180.0) % 2 == 1);
             P(5, 14, C_FOOT, 2, 1);
             P(9, tap ? 13 : 14, C_FOOT, 2, 1);
+        }
+        else if (animState == BuddyAnimationState.Dancing)
+        {
+            if (!isMusicPlaying)
+            {
+                P(4, 13, C_FOOT, 3, 1);
+                P(9, 13, C_FOOT, 3, 1);
+            }
+            else
+            {
+                switch (waveStep)
+                {
+                    case 0 or 7:
+                        P(4, 14, C_FOOT, 2, 1);
+                        P(9, 13, C_FOOT, 2, 1); // right foot taps up with left sway
+                        break;
+                    case 3 or 4:
+                        P(5, 13, C_FOOT, 2, 1); // left foot taps up with right sway
+                        P(10, 14, C_FOOT, 2, 1);
+                        break;
+                    default:
+                        P(5, 14, C_FOOT, 2, 1);
+                        P(9, 14, C_FOOT, 2, 1);
+                        break;
+                }
+            }
         }
         else
         {
@@ -257,9 +318,58 @@ public sealed class BuddySpriteControl : FrameworkElement
         }
         else if (animState == BuddyAnimationState.Dancing)
         {
-            int armSwing = (int)Math.Floor(timeMs / 200.0) % 2;
-            P(2, 8 + armSwing, C_BODY, 2, 2);
-            P(12, 9 - armSwing, C_BODY, 2, 2);
+            if (!isMusicPlaying)
+            {
+                P(2, 9, C_BODY);
+                P(13, 9, C_BODY);
+            }
+            else
+            {
+                // Smooth 8-step fluid arm wave traveling across the body
+                switch (waveStep)
+                {
+                    case 0:
+                        // Left arm starts wave crest high
+                        P(1, 6, C_BODY, 2, 2);
+                        P(13, 9, C_BODY, 2, 2);
+                        break;
+                    case 1:
+                        // Wave flows into left shoulder/elbow
+                        P(2, 7, C_BODY, 2, 2);
+                        P(13, 9, C_BODY, 2, 2);
+                        break;
+                    case 2:
+                        // Wave ripples across chest/neck
+                        P(2, 8, C_BODY, 2, 2);
+                        P(12, 8, C_BODY, 2, 2);
+                        break;
+                    case 3:
+                        // Wave reaches right shoulder
+                        P(2, 9, C_BODY, 2, 2);
+                        P(13, 7, C_BODY, 2, 2);
+                        break;
+                    case 4:
+                        // Right arm reaches full wave crest high
+                        P(2, 9, C_BODY, 2, 2);
+                        P(14, 6, C_BODY, 2, 2);
+                        break;
+                    case 5:
+                        // Wave rolls back through right shoulder
+                        P(2, 9, C_BODY, 2, 2);
+                        P(13, 7, C_BODY, 2, 2);
+                        break;
+                    case 6:
+                        // Wave rolls back across chest
+                        P(2, 8, C_BODY, 2, 2);
+                        P(12, 8, C_BODY, 2, 2);
+                        break;
+                    case 7:
+                        // Wave returns to left shoulder
+                        P(1, 7, C_BODY, 2, 2);
+                        P(13, 9, C_BODY, 2, 2);
+                        break;
+                }
+            }
         }
         else
         {
@@ -453,7 +563,7 @@ public sealed class BuddySpriteControl : FrameworkElement
             P(2, 6, C_HP_HI);  // specular highlight on dome
             P(3, 6, C_HP_PAD);
 
-            bool beat = !reduceMotion && ((int)(timeMs / 250.0) % 2 == 1);
+            bool beat = isMusicPlaying && !reduceMotion && (waveStep % 2 == 1 || audioEnergy > 0.35f);
             uint centerGlow = beat ? C_HP_GLOW : C_HP_CORE;
             P(1, 7, C_HP_RIM);
             P(2, 7, centerGlow); // center acoustic disc / active LED
@@ -485,10 +595,13 @@ public sealed class BuddySpriteControl : FrameworkElement
             P(12, 9, C_HP_PAD);
             P(13, 9, C_HP_RIM);
 
-            // 3. Floating Animated Musical Note
-            int n = !reduceMotion ? (int)Math.Floor(timeMs / 250.0) % 2 : 0;
-            Q(13, 2 + n, C_NOTE, 1, 2);
-            Q(14, 1 + n, C_NOTE, 1, 1);
+            // 3. Floating Animated Musical Note (only flutter when music is actively playing!)
+            if (isMusicPlaying && !reduceMotion)
+            {
+                int n = (waveStep / 2) % 2;
+                Q(13, 2 + n, C_NOTE, 1, 2);
+                Q(14, 1 + n, C_NOTE, 1, 1);
+            }
         }
         if (accessory == BuddyAccessory.Umbrella)
         {
