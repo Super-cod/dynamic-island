@@ -42,12 +42,17 @@ public partial class WeatherDetailPanel : UserControl
         TitleText.Foreground = NameBrush;
         CityText.Cursor = Cursors.Hand;
         CityText.ToolTip = "Click to configure weather location in Settings";
-        CityText.MouseLeftButtonUp += (_, _) => SettingsWindow.ShowSingleton("widgets");
+        CityText.MouseLeftButtonUp += (_, _) => SettingsWindow.ShowSingleton("general");   // Weather card
         BuildTiles();
         BuildStats();
     }
 
     public bool ReduceMotion { get; set; }
+
+    /// <summary>Settings "Temperature: °F" (the data is always Celsius).</summary>
+    public bool Fahrenheit { get; set; }
+
+    private string Deg(double celsius) => $"{Math.Round(Fahrenheit ? celsius * 9 / 5 + 32 : celsius):F0}°";
 
     // ------------------------------------------------------------------ build
 
@@ -164,7 +169,7 @@ public partial class WeatherDetailPanel : UserControl
         }
 
         CityText.Text = s.LocationName ?? "";
-        TempText.Text = $"{Math.Round(s.TempC):F0}\u00b0";
+        TempText.Text = Deg(s.TempC);
         CondText.Text = s.Condition;
 
         int now = s.NowIndex;
@@ -181,11 +186,11 @@ public partial class WeatherDetailPanel : UserControl
         }
         Graph.SetData(temps, rain, 0);
 
-        RangeText.Text = n > 0 ? $"{Math.Round(lo)}\u00b0/{Math.Round(hi)}\u00b0" : "";
+        RangeText.Text = n > 0 ? $"{Deg(lo)}/{Deg(hi)}" : "";
         string arrow = n > 1 && temps[1] - temps[0] > 0.5 ? "\u2191"
             : n > 1 && temps[1] - temps[0] < -0.5 ? "\u2193" : "\u2192";
-        LblNow.Text = $"now {Math.Round(s.TempC)}\u00b0 {arrow}";
-        LblFeels.Text = $"feels {Math.Round(s.ApparentC)}\u00b0  \u00b7  {Math.Round(s.Humidity)}% rh";
+        LblNow.Text = $"now {Deg(s.TempC)} {arrow}";
+        LblFeels.Text = $"feels {Deg(s.ApparentC)}  \u00b7  {Math.Round(s.Humidity)}% rh";
 
         for (int i = 0; i < _tiles.Count; i++)
         {
@@ -201,14 +206,14 @@ public partial class WeatherDetailPanel : UserControl
             _tiles[i].Hour.Text = i == 0 ? "Now" : HourLabel(h.Time);
             _tiles[i].Glyph.Text = GlyphOf(kind);
             _tiles[i].Glyph.Foreground = KindBrush(kind);
-            _tiles[i].Temp.Text = $"{Math.Round(h.TempC)}\u00b0";
+            _tiles[i].Temp.Text = Deg(h.TempC);
         }
 
         string sunGlyph = s.IsDay ? "\u2600" : "\u263E";
         LblSun.Text = s.Sunrise != DateTime.MinValue && s.Sunset != DateTime.MinValue
             ? $"{sunGlyph} \u2191{s.Sunrise:HH:mm}  \u2193{s.Sunset:HH:mm}"
             : $"{GlyphOf(s.Kind)} {s.Condition.ToLowerInvariant()}";
-        LblUv.Text = $"upd {s.UpdatedAt:HH:mm}";
+        LblUv.Text = $"upd {s.UpdatedAt.ToLocalTime():HH:mm}";   // UpdatedAt is UTC
 
         ShowRow(_humVal); ShowRow(_rainVal); ShowRow(_uvVal); ShowRow(_windVal);
         SetBar(_humBar, _humVal, s.Humidity / 100.0, $"{Math.Round(s.Humidity):F0}%");
@@ -238,7 +243,7 @@ public partial class WeatherDetailPanel : UserControl
         TitleText.Inlines.Add(Run("\u2524", NameBrush));
         TitleText.Inlines.Add(Run("wx", MetricBrush));
         TitleText.Inlines.Add(Run($"\u251C\u2524{cond}\u251C", NameBrush));
-        if (s.Available) TitleText.Inlines.Add(Run($"\u2524{Math.Round(s.TempC):F0}\u00b0\u251C", NameBrush));
+        if (s.Available) TitleText.Inlines.Add(Run($"\u2524{Deg(s.TempC)}\u251C", NameBrush));
     }
 
     // Rows/tiles without data are hidden but keep their space (no layout jump when data arrives).

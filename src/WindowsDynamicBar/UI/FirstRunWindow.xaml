@@ -16,7 +16,28 @@
             <Setter Property="FontFamily" Value="Segoe UI Variable Text, Segoe UI" />
             <Setter Property="Cursor" Value="Hand" />
         </Style>
+        <!-- Flat buttons: the default template turns hovered buttons light blue (#BEE6FD), which made
+             the white "Next" label unreadable on hover. -->
+        <ControlTemplate x:Key="FlatButton" TargetType="Button">
+            <Border x:Name="Bd" CornerRadius="6" Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}"
+                    Padding="{TemplateBinding Padding}">
+                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+            </Border>
+            <ControlTemplate.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter TargetName="Bd" Property="Opacity" Value="0.85" />
+                </Trigger>
+                <Trigger Property="IsPressed" Value="True">
+                    <Setter TargetName="Bd" Property="Opacity" Value="0.7" />
+                </Trigger>
+                <Trigger Property="IsEnabled" Value="False">
+                    <Setter TargetName="Bd" Property="Opacity" Value="0.5" />
+                </Trigger>
+            </ControlTemplate.Triggers>
+        </ControlTemplate>
         <Style x:Key="ActionButton" TargetType="Button">
+            <Setter Property="Template" Value="{StaticResource FlatButton}" />
             <Setter Property="Background" Value="#22FFFFFF" />
             <Setter Property="Foreground" Value="White" />
             <Setter Property="BorderThickness" Value="1" />
@@ -214,11 +235,13 @@
                     Visibility="Collapsed"
                     FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="12"
                     Foreground="#CCFFFFFF" Background="#18FFFFFF"
-                    BorderThickness="0" Padding="14,8" Margin="0,0,8,0" Cursor="Hand" />
+                    BorderThickness="0" Padding="14,8" Margin="0,0,8,0" Cursor="Hand"
+                    Template="{StaticResource FlatButton}" />
             <Button x:Name="NextButton" Grid.Column="2" Content="Next" Click="OnNext"
                     FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="12.5"
                     FontWeight="SemiBold" Foreground="White" Background="#FF0A84FF"
-                    BorderThickness="0" Padding="18,8" Cursor="Hand" />
+                    BorderThickness="0" Padding="18,8" Cursor="Hand"
+                    Template="{StaticResource FlatButton}" />
         </Grid>
 
     </StackPanel>

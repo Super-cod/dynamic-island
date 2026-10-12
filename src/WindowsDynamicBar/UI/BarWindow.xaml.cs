@@ -91,10 +91,10 @@ public partial class BarWindow : Window, IDisposable
 
     // Layout-dependent geometry: the idle layout (no media session) has its own open/collapsed sizes.
     private double IslandOpenW => _idleMode ? IdleIslandW : IslandExpandedW;
-    private double CollapsedW => _idleMode ? IdleCollapsedW : Math.Max(80, _cfg.BarWidth);
+    private double CollapsedW => _idleMode ? IdleCollapsedW : Math.Max(340, _cfg.BarWidth + 60);
     // The warning strip (40 px) adds to the collapsed pill too, so a low-battery warning is seen.
-    private double CollapsedH => (_idleMode ? IdleCollapsedH : Math.Max(24, _cfg.BarHeight)) + (_warningStripActive ? 40 : 0);
-    private double CollapsedRadius => _idleMode ? IdleCollapsedR : _cfg.CornerRadius;
+    private double CollapsedH => (_idleMode ? IdleCollapsedH : Math.Max(42, _cfg.BarHeight)) + (_warningStripActive ? 40 : 0);
+    private double CollapsedRadius => _idleMode ? IdleCollapsedR : Math.Max(21, _cfg.CornerRadius);
 
     private double DetailWidth() => _activeMetric == IslandMetric.Mirror ? DynamicMirrorW : DynamicDetailW;
 
@@ -311,6 +311,27 @@ public partial class BarWindow : Window, IDisposable
         _hoverCheckTimer.Tick += OnHoverCheckTick;
 
         ProgressTrack.SizeChanged += (_, _) => SyncFills();
+        // A pill drag whose capture was lost without a button-up: keep the new position and do not
+        // swallow the next click as a "drag end". Deferred, so a normal mouse-up (which releases the
+        // capture itself and saves) has already cleared _dragMoved.
+        Pill.LostMouseCapture += (_, _) => Dispatcher.BeginInvoke(DispatcherPriority.Input, () =>
+        {
+            if (!_dragMoved || Mouse.LeftButton == MouseButtonState.Pressed) return;
+            _dragMoved = false;
+            _dragPressing = false;
+            double saved = _cfg.CustomOffsetX;
+            try { App.Settings?.Update(s => s.CustomOffsetX = saved); } catch { }
+        });
+        // Capture lost without a button-up (island collapsed mid-scrub): drop the scrub, or the
+        // timeline stays frozen (UpdateTimeline skips while scrubbing).
+        HoverProgressBarTrack.LostMouseCapture += (_, _) =>
+        {
+            if (!_isScrubbing) return;
+            _isScrubbing = false;
+            HoverProgressTooltip.Visibility = Visibility.Collapsed;
+            HoverProgressKnob.Visibility = Visibility.Collapsed;
+            UpdateTimeline();
+        };
         VolumeHudBar.Scrub += OnVolumeHudScrub;
 
         _layoutTween.Completed += FinishLayoutFade;
@@ -339,6 +360,7 @@ public partial class BarWindow : Window, IDisposable
         };
 
         _fullscreenTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1500) };
+        _fullscreenTimer.Tick += OnFullscreenTick;
         PreviewKeyDown += OnBarPreviewKeyDown;
         // Progress/lyrics interpolation: runs only while the island is open (see SyncTimelineTimer).
         _timelineTimer.Tick += (_, _) => OnTimelineTick();
@@ -347,14 +369,6 @@ public partial class BarWindow : Window, IDisposable
         {
             try { Dispatcher.InvokeAsync(() => HoverEq.SetSpectrum(bands)); } catch { }
         };
-
-        if (App.Volume is not null)
-        {
-            App.Volume.VolumeChanged += (_, _) =>
-            {
-                try { Dispatcher.InvokeAsync(UpdateVolumeControls); } catch { }
-            };
-        }
 
         ApplySettingsUi(_cfg);
         Subscribe();
@@ -453,6 +467,7 @@ public partial class BarWindow : Window, IDisposable
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
         EnsureWeather();
+        InitializeBuddy();
         UpdateCollapsed();
         Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, PrewarmSearch);
     }
@@ -463,6 +478,7 @@ public partial class BarWindow : Window, IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        TeardownBuddy();
         Unsubscribe();
         IconRow.MetricHovered -= OnIconMetricHovered;
         IconRow.MetricUnhovered -= OnIconMetricUnhovered;
@@ -649,7 +665,8 @@ public partial class BarWindow : Window, IDisposable
             NativeMethods.MonitorInfoEx mon =
                 cfg.MonitorIndex >= 0 && cfg.MonitorIndex < monitors.Count
                     ? monitors[cfg.MonitorIndex]
-                    : monitors.FirstOrDefault(m => m.Bounds.Left == 0 && m.Bounds.Top == 0)
+                    : (cfg.MonitorIndex == MonitorWithMouse ? MonitorUnderCursor(monitors) : null)
+                      ?? monitors.FirstOrDefault(m => m.Bounds.Left == 0 && m.Bounds.Top == 0)
                       ?? monitors[0];
 
             PlaceWindow(mon);
@@ -663,6 +680,25 @@ public partial class BarWindow : Window, IDisposable
             RefreshBlur();
         }
         catch (Exception ex) { Log.Debug("Reposition failed", ("error", ex.Message)); }
+    }
+
+    /// <summary>Settings "Show the island on: With the mouse".</summary>
+    private const int MonitorWithMouse = -2;
+
+    private static NativeMethods.MonitorInfoEx? MonitorUnderCursor(IReadOnlyList<NativeMethods.MonitorInfoEx> monitors)
+    {
+        if (!NativeMethods.GetCursorPos(out var pt)) return null;
+        return monitors.FirstOrDefault(m =>
+            pt.X >= m.Bounds.Left && pt.X < m.Bounds.Right && pt.Y >= m.Bounds.Top && pt.Y < m.Bounds.Bottom);
+    }
+
+    /// <summary>"With the mouse": move the collapsed island to the screen the pointer went to.</summary>
+    private void FollowMouseMonitor()
+    {
+        if (_cfg.MonitorIndex != MonitorWithMouse || _islandState != IslandVisualState.Collapsed || _expanded
+            || _searchPhase != SearchPhase.Closed || _placedOn is not { } placed) return;
+        var monitors = NativeMethods.GetMonitors();
+        if (MonitorUnderCursor(monitors) is { } under && under.Handle != placed.Handle) Reposition();
     }
 
     // The window is layered (per-pixel alpha): every changed frame pushes the whole surface, so it
@@ -739,6 +775,7 @@ public partial class BarWindow : Window, IDisposable
         UpdatePillMargin();
         UpdateShape();
         SyncFills();
+        _buddyController?.OnIslandResized(_currentW, _currentH);
     }
 
     private void ApplyH(double v)
@@ -940,7 +977,11 @@ public partial class BarWindow : Window, IDisposable
         _telemetry = snap;
         if (_islandState == IslandVisualState.Detail)
         {
-            UpdatePanelContent();
+            // Only the CPU/GPU/RAM cards show telemetry. The others (clipboard, toggles, net, weather,
+            // timer, mirror) refresh from their own events; rebuilding them every 800 ms dropped the
+            // clipboard row hover (pin/delete vanished under the pointer).
+            if (_activeMetric is IslandMetric.Cpu or IslandMetric.Gpu or IslandMetric.Ram) UpdatePanelContent();
+            else UpdateIconRowValues();
             FitIslandHeight();
         }
         else if (_islandState == IslandVisualState.Expanded) UpdateIslandContent();
@@ -988,6 +1029,7 @@ public partial class BarWindow : Window, IDisposable
             case IslandVisualState.Collapsed:
                 _pinned = false;
                 _hoverCheckTimer.Stop();
+                StopTelemetry();   // every way of closing (click, Esc, click-outside), not only hover-out
                 IconRow.SetPage(0, instant: true);
                 IconRow.SuspendPulse();
                 // Closing the search bar: the pill's own content returns only after the morph lands.
@@ -1024,6 +1066,7 @@ public partial class BarWindow : Window, IDisposable
                 // Only one view is visible: everything else is Collapsed (cannot show through or take space).
                 _pinned = false;
                 _hoverCheckTimer.Stop();
+                StopTelemetry();
                 _expanded = false;
                 _idleCollapse.Stop();
                 CancelDelays();   // no pending fade may bring another view back while searching
@@ -1045,6 +1088,7 @@ public partial class BarWindow : Window, IDisposable
                 SearchHost.Visibility = Visibility.Visible;
                 break;
         }
+        SyncBuddyLayoutMode();
         SyncTimelineTimer();
         // Reduce Motion applies geometry instantly, so no "settled" event will follow.
         if (state != IslandVisualState.Search && _searchPhase == SearchPhase.Closed && (_cfg.ReduceMotion || !_anim.IsAnimating))
@@ -1145,6 +1189,7 @@ public partial class BarWindow : Window, IDisposable
     private void MorphDisc(double size)
     {
         OrbContainer.Margin = new Thickness(_islandState == IslandVisualState.Collapsed ? 10.5 : 16, 0, 0, 0);
+        OrbContainer.Visibility = (_islandState == IslandVisualState.Collapsed || _idleMode) ? Visibility.Collapsed : Visibility.Visible;
         if (_cfg.ReduceMotion)
         {
             OrbHost.Width = size;
@@ -1156,6 +1201,7 @@ public partial class BarWindow : Window, IDisposable
         double from = OrbHost.Width > 0 ? OrbHost.Width : DiscCollapsed;
         _anim.Animate("disc", from, size, v =>
         {
+            v = Math.Max(0, v);   // an underdamped spring can overshoot below zero (invalid Width)
             OrbHost.Width = v;
             OrbHost.Height = v;
             OrbHost.CornerRadius = new CornerRadius(v / 2);
@@ -1543,7 +1589,7 @@ public partial class BarWindow : Window, IDisposable
             HoverVolumeSliderHost.Opacity = 1;
             return;
         }
-        _anim.Animate("volSliderW", HoverVolumeSliderHost.ActualWidth, 74, v => HoverVolumeSliderHost.Width = v);
+        _anim.Animate("volSliderW", HoverVolumeSliderHost.ActualWidth, 74, v => HoverVolumeSliderHost.Width = Math.Max(0, v));
         _anim.Animate("volSliderOp", HoverVolumeSliderHost.Opacity, 1, v => HoverVolumeSliderHost.Opacity = v);
     }
 
@@ -1556,7 +1602,8 @@ public partial class BarWindow : Window, IDisposable
             HoverVolumeSliderHost.Opacity = 0;
             return;
         }
-        _anim.Animate("volSliderW", HoverVolumeSliderHost.ActualWidth, 0, v => HoverVolumeSliderHost.Width = v);
+        // Spring overshoot past 0 would be an invalid (negative) Width.
+        _anim.Animate("volSliderW", HoverVolumeSliderHost.ActualWidth, 0, v => HoverVolumeSliderHost.Width = Math.Max(0, v));
         _anim.Animate("volSliderOp", HoverVolumeSliderHost.Opacity, 0, v => HoverVolumeSliderHost.Opacity = v);
     }
 
@@ -1781,7 +1828,11 @@ public partial class BarWindow : Window, IDisposable
     private void SeekRelative(double seconds)
     {
         if (_lastMedia is null || !_lastMedia.CanSeek || _lastMedia.Duration <= TimeSpan.Zero) return;
-        TimeSpan target = _lastMedia.Position + TimeSpan.FromSeconds(seconds);
+        // Position is the last timeline snapshot; while playing, add the time since (as the timeline does).
+        TimeSpan pos = _lastMedia.Position;
+        if (_lastMedia.IsPlaying && _lastMedia.LastUpdatedTime is { } at && DateTimeOffset.UtcNow > at)
+            pos += DateTimeOffset.UtcNow - at;
+        TimeSpan target = pos + TimeSpan.FromSeconds(seconds);
         target = TimeSpan.FromTicks(Math.Clamp(target.Ticks, 0, _lastMedia.Duration.Ticks));
         _ = App.Media?.SeekToTimeAsync(target);
     }
@@ -2126,7 +2177,8 @@ public partial class BarWindow : Window, IDisposable
 
         // Ring shows the temperature mapped over a -10..40 degC window; colour follows the temp.
         double frac = Math.Clamp((snap.TempC + 10) / 50.0, 0, 1);
-        IconRow.UpdateWeather(frac * 100, $"{Math.Round(snap.TempC):F0}\u00b0", WeatherAccent(snap.TempC));
+        double shown = _cfg.TemperatureFahrenheit ? snap.TempC * 9 / 5 + 32 : snap.TempC;
+        IconRow.UpdateWeather(frac * 100, $"{Math.Round(shown):F0}\u00b0", WeatherAccent(snap.TempC));
     }
 
     private static Color WeatherAccent(double tempC)
@@ -2182,6 +2234,15 @@ public partial class BarWindow : Window, IDisposable
         {
             Dispatcher.BeginInvoke(() =>
             {
+                var testState = _netMonitor?.TestState;
+                if (testState is not null)
+                {
+                    if (testState.Phase == NetTestPhase.Done && _lastNetTestPhase != NetTestPhase.Done)
+                    {
+                        OnBuddySpeedTestFinished(testState.DownMbps ?? 0);
+                    }
+                    _lastNetTestPhase = testState.Phase;
+                }
                 if (IslandExpandedHost.Visibility != Visibility.Visible) return;
                 UpdateNetIcon();
                 if (_islandState == IslandVisualState.Detail && _activeMetric == IslandMetric.Net && _netMonitor is not null)
@@ -2189,6 +2250,15 @@ public partial class BarWindow : Window, IDisposable
             });
         }
         catch { }
+    }
+    private NetTestPhase _lastNetTestPhase = NetTestPhase.Idle;
+
+    /// <summary>Settings "Clear all data": the caches this window owns in memory (deleting the files
+    /// alone is undone by the next save from the running app).</summary>
+    internal void ClearCachedData()
+    {
+        _lrcClient.ClearCache();
+        _netMonitor?.ResetDailyTotals();
     }
 
     private void OnNetTestToggle()
@@ -2213,6 +2283,7 @@ public partial class BarWindow : Window, IDisposable
         {
             Dispatcher.BeginInvoke(() =>
             {
+                OnBuddyWeatherUpdated(_weather?.Snapshot);
                 if (IslandExpandedHost.Visibility == Visibility.Visible) UpdateWeatherIcon();
                 if (_islandState == IslandVisualState.Detail && _activeMetric == IslandMetric.Weather && _weather is not null)
                     WeatherPanelComponent.Render(_weather.Snapshot);
@@ -2328,6 +2399,7 @@ public partial class BarWindow : Window, IDisposable
     /// <summary>Mouse entered the island region (pill + icons + panel).</summary>
     private void OnIslandMouseEnter(object sender, MouseEventArgs e)
     {
+        HandleBuddyPointerEnter();
         if (_islandState == IslandVisualState.Search) return;
         _islandHovering = true;
         _collapseDelay.Stop();
@@ -2352,6 +2424,7 @@ public partial class BarWindow : Window, IDisposable
     /// <summary>Mouse left the island region entirely (grace timer defers collapse).</summary>
     private void OnIslandMouseLeave(object sender, MouseEventArgs e)
     {
+        HandleBuddyPointerLeave();
         if (_islandState == IslandVisualState.Search) return;
         _islandHovering = false;
         if (_expanded) return;
@@ -2384,7 +2457,7 @@ public partial class BarWindow : Window, IDisposable
         var (state, metric) = IslandStateMachine.Resolve(
             _islandState, _activeMetric, pointerInside: false, IslandMetric.None, collapseElapsed: true, _cfg.HoverPreview);
         SetIslandState(state, metric);
-        try { if (App.Telemetry is { IsActive: true }) App.Telemetry.Deactivate(); } catch { }
+        StopTelemetry();
     }
 
     /// <summary>The ring's panel switched off the visible page: close it, keep the island open.</summary>
@@ -2479,7 +2552,10 @@ public partial class BarWindow : Window, IDisposable
     }
 
     private void OnMirrorCameraStateChanged(bool live)
-        => IconRow.UpdateMirror(live, live ? "LIVE" : "off");
+    {
+        IconRow.UpdateMirror(live, live ? "LIVE" : "off");
+        if (live) OnBuddyMirrorOpened();
+    }
 
     private void OnGpuCycleRequested()
     {
@@ -2499,6 +2575,12 @@ public partial class BarWindow : Window, IDisposable
         try { if (App.Telemetry is { IsActive: false }) App.Telemetry.Activate(); } catch { }
     }
 
+    /// <summary>Telemetry samples (PDH + process list, every 800 ms) only while the island is open.</summary>
+    private static void StopTelemetry()
+    {
+        try { if (App.Telemetry is { IsActive: true }) App.Telemetry.Deactivate(); } catch { }
+    }
+
     // ---------------------------------------------------------------- events in
 
     private static bool IsTicking(BarEventKind kind) =>
@@ -2511,6 +2593,21 @@ public partial class BarWindow : Window, IDisposable
     {
         try
         {
+            if (evt.Kind == BarEventKind.Screenshot)
+            {
+                OnBuddyScreenshotTaken();
+            }
+            else if (evt.Kind == BarEventKind.Notification)
+            {
+                bool isCall = evt.Subtitle?.Contains("call", StringComparison.OrdinalIgnoreCase) == true
+                    || evt.Title?.Contains("call", StringComparison.OrdinalIgnoreCase) == true;
+                OnBuddyNotificationShown(isCall);
+            }
+            else if (evt.Kind == BarEventKind.Clipboard)
+            {
+                OnBuddyCopied();
+            }
+
             // Volume/brightness HUD switched off: those events never open the island.
             if (!_cfg.FeatureVolumeHud && evt.Kind is BarEventKind.Volume or BarEventKind.Brightness) return;
 
@@ -2622,6 +2719,7 @@ public partial class BarWindow : Window, IDisposable
         }
 
         _lastMedia = info;
+        OnBuddyMediaUpdated(info);
         ApplyLayoutMode();
         if (_islandState != IslandVisualState.Collapsed)
         {
@@ -2692,7 +2790,14 @@ public partial class BarWindow : Window, IDisposable
 
     private void OnStatsChanged(SystemStats s)
     {
+        // Raised on the monitor's thread-pool timer.
+        if (!Dispatcher.CheckAccess())
+        {
+            try { Dispatcher.BeginInvoke(() => OnStatsChanged(s)); } catch (TaskCanceledException) { }
+            return;
+        }
         _lastStats = s;
+        OnBuddyStatsUpdated(s);
         if (_expanded && _shown?.Kind == BarEventKind.SystemMonitor)
         {
             _shown = BarEvent.Create(BarEventKind.SystemMonitor, "System", payload: s, priority: 50);
@@ -2770,6 +2875,7 @@ public partial class BarWindow : Window, IDisposable
             _cfg.HotkeyTimer = m.HotkeyTimer;
             _cfg.HotkeySearch = m.HotkeySearch;
             _cfg.TemperatureFahrenheit = m.TemperatureFahrenheit;
+            WeatherPanelComponent.Fahrenheit = m.TemperatureFahrenheit;
             ApplyFeatureSettings(m, first);
             _warningLogic.RamPercent = Math.Clamp(m.WarnRamPercent, 50, 100);
             _warningLogic.CpuPercent = Math.Clamp(m.WarnCpuPercent, 50, 100);
@@ -2779,6 +2885,7 @@ public partial class BarWindow : Window, IDisposable
                 _cfg.DoNotDisturb = m.DoNotDisturb;
                 App.Toggles?.RefreshDnd();
             }
+            _buddyController?.UpdateSettings(m);
             _cfg.IslandPage1 = m.IslandPage1;
             _cfg.IslandPage2 = m.IslandPage2;
             ApplyRingLayout(first);
@@ -2866,6 +2973,7 @@ public partial class BarWindow : Window, IDisposable
 
     private void OnPillMouseMove(object sender, MouseEventArgs e)
     {
+        HandleBuddyPointerMove(e);
         if (!_dragPressing || e.LeftButton != MouseButtonState.Pressed) return;
         NativeMethods.GetCursorPos(out var pt);
         if (!_dragMoved)
@@ -3077,6 +3185,7 @@ public partial class BarWindow : Window, IDisposable
             bool wantVisible = cfg.BarEnabled && !fs;
             if (wantVisible && !IsVisible) Show();
             else if (!wantVisible && IsVisible && _searchPhase == SearchPhase.Closed) Hide();   // never under an open search bar
+            if (IsVisible) FollowMouseMonitor();
         }
         catch { }
     }
@@ -3790,6 +3899,7 @@ public partial class BarWindow : Window, IDisposable
             {
                 bool nextPlaying = !_lastMedia.IsPlaying;
                 _lastMedia = _lastMedia with { IsPlaying = nextPlaying };
+                OnBuddyMediaUpdated(_lastMedia);
                 HoverPlayGlyph.Text = nextPlaying ? IcPause : IcPlay;
                 HoverEq.Running = nextPlaying;
                 HoverEq.Visibility = Visibility.Visible;
@@ -3915,7 +4025,7 @@ public partial class BarWindow : Window, IDisposable
         IdleCollapsedRow.Visibility = Visibility.Visible;
         MediaInfoStack.Visibility = Visibility.Visible;
         IdleOpenPanel.Visibility = Visibility.Visible;
-        OrbContainer.Visibility = Visibility.Visible;
+        OrbContainer.Visibility = (idle || _islandState == IslandVisualState.Collapsed) ? Visibility.Collapsed : Visibility.Visible;
         OrbContainer.IsHitTestVisible = !idle;
 
         double to = idle ? 1 : 0;
@@ -3955,7 +4065,7 @@ public partial class BarWindow : Window, IDisposable
     {
         MusicCollapsedRow.Visibility = _idleMode ? Visibility.Collapsed : Visibility.Visible;
         MediaInfoStack.Visibility = _idleMode ? Visibility.Collapsed : Visibility.Visible;
-        OrbContainer.Visibility = _idleMode ? Visibility.Collapsed : Visibility.Visible;
+        OrbContainer.Visibility = (_idleMode || _islandState == IslandVisualState.Collapsed) ? Visibility.Collapsed : Visibility.Visible;
         IdleCollapsedRow.Visibility = _idleMode ? Visibility.Visible : Visibility.Collapsed;
         IdleOpenPanel.Visibility = _idleMode ? Visibility.Visible : Visibility.Collapsed;
     }
@@ -3973,6 +4083,12 @@ public partial class BarWindow : Window, IDisposable
             if (_cfg.FeatureIdleDashboard) _calendar.RefreshIfStale(TimeSpan.FromMinutes(5));
             RefreshIdle(now);
         }
+        if (_cfg.FeatureIdleDashboard && _calendar.HasCalendar)
+        {
+            OnBuddyCalendarCheck(_calendar, now);
+        }
+        if (_islandState == IslandVisualState.Detail && _activeMetric == IslandMetric.Clipboard)
+            ClipboardPanelComponent.RefreshAges();   // "now" -> "1m" while the card stays open
         _clockTimer.Interval = TimeSpan.FromMilliseconds(1000 - now.Millisecond + 10);
     }
 
@@ -4069,7 +4185,7 @@ public partial class BarWindow : Window, IDisposable
         {
             if (App.Timer is null) return;
             if (App.Timer.Current.State == TimerState.Running) App.Timer.Cancel();
-            else App.Timer.Start(TimeSpan.FromMinutes(25), "Focus");
+            else App.Timer.Start(TimeSpan.FromMinutes(25), FocusTimerLabel);
         }
         catch (Exception ex) { Log.Error("Idle focus toggle failed", ex); }
         UpdateFocusButton();
@@ -4083,6 +4199,7 @@ public partial class BarWindow : Window, IDisposable
     private void OnTimerUi(TimerInfo info, bool finishedNow)
     {
         if (finishedNow) PulseIsland();   // once, scale 1 -> 1.03 -> 1 (skipped with Reduce Motion)
+        SyncBuddyFocusSession(info, finishedNow);
         UpdateCollapsed();
         if (IslandExpandedHost.Visibility == Visibility.Visible)
         {
@@ -4092,6 +4209,25 @@ public partial class BarWindow : Window, IDisposable
             if (_idleMode) UpdateFocusButton();
         }
     }
+
+    private bool _focusTimerActive;
+
+    /// <summary>The Focus button runs the timer labelled "Focus": that is the focus session the buddy
+    /// reacts to (start, natural finish, cancel). Pause/resume keep the session.</summary>
+    private void SyncBuddyFocusSession(TimerInfo info, bool finishedNow)
+    {
+        bool isFocus = info.Label == FocusTimerLabel;
+        bool active = isFocus && info.State is TimerState.Running or TimerState.Paused;
+        if (active && !_focusTimerActive) OnBuddyFocusStarted();
+        else if (_focusTimerActive && !active)
+        {
+            if (isFocus && finishedNow) OnBuddyFocusFinished();
+            else OnBuddyFocusCancelled();
+        }
+        _focusTimerActive = active;
+    }
+
+    private const string FocusTimerLabel = "Focus";
 
     private void OnTimerStartRequested(TimeSpan duration)
     {
@@ -4119,9 +4255,23 @@ public partial class BarWindow : Window, IDisposable
     {
         bool finished = _focusWasRunning && !info.Running && info.Remaining <= TimeSpan.Zero
                         && _focusLastRemaining <= TimeSpan.FromSeconds(1.5);
+        bool started = !_focusWasRunning && info.Running;
+        bool cancelled = _focusWasRunning && !info.Running && !finished;
         _focusWasRunning = info.Running;
         _focusLastRemaining = info.Remaining;
-        if (finished) PulseIsland();
+        if (finished)
+        {
+            PulseIsland();
+            OnBuddyFocusFinished();
+        }
+        else if (started)
+        {
+            OnBuddyFocusStarted();
+        }
+        else if (cancelled)
+        {
+            OnBuddyFocusCancelled();
+        }
         UpdateCollapsed();
         if (_idleMode) RefreshIdle(DateTime.Now);
     }

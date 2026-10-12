@@ -40,6 +40,9 @@ public sealed class VolumeLevelBar : FrameworkElement
         MouseLeftButtonDown += OnDown;
         MouseMove += OnMove;
         MouseLeftButtonUp += OnUp;
+        // Capture can be lost without a button-up (the HUD collapses mid-drag): end the drag, or a
+        // later plain hover over the bar would keep changing the volume.
+        LostMouseCapture += (_, _) => _dragging = false;
     }
 
     public static readonly DependencyProperty LevelProperty = DependencyProperty.Register(
@@ -141,6 +144,7 @@ public sealed class VolumeLevelBar : FrameworkElement
     private void OnMove(object sender, MouseEventArgs e)
     {
         if (!_dragging) return;
+        if (e.LeftButton != MouseButtonState.Pressed) { _dragging = false; return; }
         ScrubTo(e);
         e.Handled = true;
     }

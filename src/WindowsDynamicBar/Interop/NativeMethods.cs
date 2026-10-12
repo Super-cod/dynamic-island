@@ -190,6 +190,12 @@ internal static class NativeMethods
 
         var appRoot = GetAncestor(hWnd, 2 /*GA_ROOT*/);
         if (appRoot != hWnd && appRoot != IntPtr.Zero) { hWnd = appRoot; }
+        // The desktop (Progman/WorkerW) and this app's own overlay span the monitor without being
+        // a full-screen app: focusing them must never hide the island.
+        GetWindowThreadProcessId(hWnd, out uint pid);
+        if (pid == (uint)Environment.ProcessId) return false;
+        var cls = new StringBuilder(32);
+        if (GetClassName(hWnd, cls, cls.Capacity) > 0 && cls.ToString() is "Progman" or "WorkerW") return false;
         if (!GetWindowRect(hWnd, out var rc)) return false;
         var pt = new POINT { X = (rc.Left + rc.Right) / 2, Y = (rc.Top + rc.Bottom) / 2 };
         IntPtr monitor = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);

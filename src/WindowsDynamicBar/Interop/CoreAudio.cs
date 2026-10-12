@@ -171,11 +171,13 @@ internal static class CoreAudio
         try
         {
             _enumerator = (IMMDeviceEnumerator)CreateEnumerator();
-            _sink = new VolumeChangeSink(onVolumeChanged, () =>
+            // Never call back into the enumerator inside its own notification callback: re-attach
+            // on the thread pool (same rule as the mic toggle's DefaultDeviceSink).
+            _sink = new VolumeChangeSink(onVolumeChanged, () => Task.Run(() =>
             {
                 AttachDefaultEndpoint();
                 onDefaultDeviceChanged?.Invoke();
-            });
+            }));
 
             _notificationClientPtr = Marshal.GetComInterfaceForObject(_sink, typeof(IMMNotificationClient));
             _enumerator.RegisterEndpointNotificationCallback(_notificationClientPtr);

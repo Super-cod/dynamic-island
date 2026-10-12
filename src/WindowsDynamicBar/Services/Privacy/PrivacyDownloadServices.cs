@@ -84,8 +84,21 @@ public sealed class PrivacyService : IDisposable
         {
             using var key = root.OpenSubKey(basePath);
             if (key is not null && IsActive(key, now)) { active = true; app ??= "System"; }
+            if (key is null) continue;
 
-            using var np = key?.OpenSubKey("NonPackaged");
+            // Packaged (Store) apps - WhatsApp, Camera, Teams - record use on their own subkey
+            // ("5319275A.WhatsAppDesktop_cv1g1gvanyjgm"); classic apps live under NonPackaged.
+            foreach (string sub in key.GetSubKeyNames())
+            {
+                if (sub.Equals("NonPackaged", StringComparison.OrdinalIgnoreCase)) continue;
+                using var subKey = key.OpenSubKey(sub);
+                if (subKey is null || !IsActive(subKey, now)) continue;
+                active = true;
+                app ??= PackageFriendlyName(sub);
+                break;
+            }
+
+            using var np = key.OpenSubKey("NonPackaged");
             if (np is null) continue;
             foreach (string sub in np.GetSubKeyNames())
             {
@@ -147,6 +160,17 @@ public sealed class PrivacyService : IDisposable
         if (path.StartsWith("#", StringComparison.Ordinal)) path = path[1..];
         try { return Path.GetFileNameWithoutExtension(path); }
         catch { return "App"; }
+    }
+
+    /// <summary>"5319275A.WhatsAppDesktop_cv1g1gvanyjgm" -> "WhatsAppDesktop".</summary>
+    internal static string PackageFriendlyName(string familyName)
+    {
+        string s = familyName;
+        int us = s.LastIndexOf('_');
+        if (us > 0) s = s[..us];
+        int dot = s.LastIndexOf('.');
+        if (dot >= 0 && dot < s.Length - 1) s = s[(dot + 1)..];
+        return s.Length > 0 ? s : "App";
     }
 
     private void RaiseIfChanged(PrivacyState prev, PrivacyState cur)
@@ -291,7 +315,10 @@ public sealed class DownloadService : IDisposable
             _watcher = new FileSystemWatcher(dir) { IncludeSubdirectories = false, NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size };
             _watcher.Created += (s, e) => OnFileActivity(e.FullPath, isNew: true);
             _watcher.Changed += (s, e) => OnFileActivity(e.FullPath, isNew: false);
-            _watcher.Deleted += (s, e) => OnFileDone(e.FullPath, completed: true);
+            // Browsers finish by RENAMING the temp file (X.crdownload -> X); Chrome also renames
+            // "Unconfirmed 123.crdownload" -> "X.crdownload" first. A deleted temp file was cancelled.
+            _watcher.Renamed += (s, e) => OnFileRenamed(e.OldFullPath, e.FullPath);
+            _watcher.Deleted += (s, e) => OnFileDone(e.FullPath, completed: false);
             _watcher.EnableRaisingEvents = true;
 
             _progressTimer = new System.Threading.Timer(_ => TickProgress(), null,
@@ -309,12 +336,16 @@ public sealed class DownloadService : IDisposable
 
     private void OnFileActivity(string path, bool isNew)
     {
-        if (!_settings.Current.FeatureDownloads) return;
+        // Cheap checks first: Changed fires for every write while a download runs, and
+        // Settings.Current is a deep clone.
         if (!IsTempDownload(path)) return;
         try
         {
             var fi = new FileInfo(path);
             if (!fi.Exists) return;
+            bool tracked;
+            lock (_sync) tracked = _active.ContainsKey(path);
+            if (!tracked && !_settings.Current.FeatureDownloads) return;
             lock (_sync)
             {
                 if (!_active.TryGetValue(path, out var st))
@@ -387,18 +418,40 @@ public sealed class DownloadService : IDisposable
         }
     }
 
+    private void OnFileRenamed(string oldPath, string newPath)
+    {
+        if (!IsTempDownload(oldPath)) return;
+        if (IsTempDownload(newPath))
+        {
+            // Still downloading under its real name: carry the progress state over.
+            lock (_sync)
+            {
+                if (!_active.Remove(oldPath, out var st)) return;
+                st.DisplayName = CleanName(Path.GetFileName(newPath));
+                _active[newPath] = st;
+            }
+            return;
+        }
+        lock (_sync) _active.Remove(oldPath);
+        if (_settings.Current.FeatureDownloads) AnnounceComplete(Path.GetFileName(newPath));
+    }
+
     private void OnFileDone(string path, bool completed)
     {
+        string name;
         lock (_sync)
         {
             if (!_active.Remove(path, out var st)) return;
-            if (completed)
-            {
-                _bus.Raise(BarEvent.Create(BarEventKind.Toast, "Download complete", st.DisplayName,
-                    payload: st.DisplayName, priority: 65, displayDuration: TimeSpan.FromSeconds(4)));
-            }
+            name = st.DisplayName;
         }
+        // Some tools copy to the final name and then delete the temp file: that is a completion too.
+        string final = Path.Combine(Path.GetDirectoryName(path) ?? "", name);
+        if (completed || File.Exists(final)) AnnounceComplete(name);
     }
+
+    private void AnnounceComplete(string name) =>
+        _bus.Raise(BarEvent.Create(BarEventKind.Toast, "Download complete", name,
+            payload: name, priority: 65, displayDuration: TimeSpan.FromSeconds(4)));
 
     private static string FormatSpeed(double bytesPerSec)
     {

@@ -109,7 +109,7 @@ public sealed class SystemMonitorService : IDisposable
             {
                 PdhCollectQueryData(_cpuQuery);
                 var buf = new PDH_FMT_COUNTERVALUE_DOUBLE[1];
-                if (PdhGetFormattedCounterValueDouble(_cpuCounter, out _, buf) == 0)
+                if (PdhGetFormattedCounterValue(_cpuCounter, 0x00000200 /*PDH_FMT_DOUBLE*/, out _, buf) == 0)
                     cpu = Math.Clamp(buf[0].doubleValue, 0, 100);
             }
 
@@ -189,7 +189,7 @@ public sealed class SystemMonitorService : IDisposable
     [System.Runtime.InteropServices.DllImport("pdh.dll")]
     private static extern int PdhCollectQueryData(IntPtr query);
     [System.Runtime.InteropServices.DllImport("pdh.dll")]
-    private static extern int PdhGetFormattedCounterValueDouble(IntPtr counter, out IntPtr type, [System.Runtime.InteropServices.Out] PDH_FMT_COUNTERVALUE_DOUBLE[] value);
+    private static extern int PdhGetFormattedCounterValue(IntPtr counter, int format, out int type, [System.Runtime.InteropServices.Out] PDH_FMT_COUNTERVALUE_DOUBLE[] value);
     [System.Runtime.InteropServices.DllImport("pdh.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
     private static extern int PdhGetFormattedCounterArrayW(IntPtr counter, int format, ref uint bufferSize, ref uint itemCount, IntPtr buffer);
     [System.Runtime.InteropServices.DllImport("pdh.dll")]

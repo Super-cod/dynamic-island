@@ -87,7 +87,9 @@ internal static partial class Program
         Run("Idle countdown / until strings", TestIdleStrings);
         Run("DotFont renders HH:mm on a 27x7 grid", TestDotFont);
         RunFeatureTests();
+        RunBuddyTests();
         RunSearchRankingTests();
+        RunAuditTests();
 
         Console.WriteLine(new string('-', 46));
         Console.WriteLine($"passed: {_pass}   failed: {_fail}");

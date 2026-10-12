@@ -83,6 +83,7 @@ public partial class TelemetryIconRow : UserControl
         Page1.Children.Clear();
         foreach (var cell in _cells.Values) DetachCell(cell);
         _cells.Clear();
+        _ramPulsing = false;   // the pulse lived on the old RAM cell; the new one starts still
         for (int p = 0; p < 2; p++)
         {
             var host = p == 0 ? Page0 : Page1;

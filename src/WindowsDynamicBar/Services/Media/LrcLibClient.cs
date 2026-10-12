@@ -79,16 +79,19 @@ public sealed class LrcLibClient : IDisposable
         return null;
     }
 
+    // One shared instance: compiling per call cost ~ms each, and the disk cache parses up to 150
+    // tracks on the UI thread at startup.
+    private static readonly Regex LrcLineRegex = new(@"\[(\d+):(\d+(?:\.\d+)?)\](.*)", RegexOptions.Compiled);
+
     public static List<LrcLine> ParseLrc(string lrc)
     {
         var result = new List<LrcLine>();
-        var regex = new Regex(@"\[(\d+):(\d+(?:\.\d+)?)\](.*)", RegexOptions.Compiled);
 
         using var reader = new StringReader(lrc);
         string? line;
         while ((line = reader.ReadLine()) is not null)
         {
-            var match = regex.Match(line);
+            var match = LrcLineRegex.Match(line);
             if (!match.Success) continue;
 
             if (int.TryParse(match.Groups[1].Value, out int minutes) &&
@@ -183,6 +186,16 @@ public sealed class LrcLibClient : IDisposable
             }
         }
         catch { }
+    }
+
+    /// <summary>"Clear all data": drop the lyrics cache in memory and on disk.</summary>
+    public void ClearCache()
+    {
+        _memoryCache.Clear();
+        lock (_diskLock)
+        {
+            try { if (File.Exists(_cacheFilePath)) File.Delete(_cacheFilePath); } catch { }
+        }
     }
 
     public void Dispose()

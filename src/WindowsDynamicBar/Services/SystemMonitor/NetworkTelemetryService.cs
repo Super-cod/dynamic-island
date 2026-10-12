@@ -148,6 +148,9 @@ public sealed class NetworkMonitor : IDisposable
     {
         LoadDailyTotals();
         _lastSampleUtc = DateTime.UtcNow;
+        // The counters last seen may be minutes or hours old: the first sample only re-baselines,
+        // otherwise everything transferred while closed shows up as one huge "speed" spike.
+        _needBaseline = true;
         _timer.Change(TimeSpan.FromMilliseconds(200), TimeSpan.FromMilliseconds(500));
     }
 
@@ -169,8 +172,12 @@ public sealed class NetworkMonitor : IDisposable
 
     // ------------------------------------------------------------------ sampling
 
+    private volatile bool _needBaseline = true;
+    private int _sampling;   // 0/1: a slow sample must not overlap the next 500 ms tick
+
     private void Sample()
     {
+        if (Interlocked.Exchange(ref _sampling, 1) == 1) return;
         try
         {
             var now = DateTime.UtcNow;
@@ -221,11 +228,14 @@ public sealed class NetworkMonitor : IDisposable
         {
             Log.Debug("Network sample failed", ("error", ex.Message));
         }
+        finally { Interlocked.Exchange(ref _sampling, 0); }
     }
 
     private bool SampleAdapter(double elapsed, out double downMbps, out double upMbps)
     {
         downMbps = 0; upMbps = 0;
+        bool baseline = _needBaseline;
+        _needBaseline = false;
         NetworkInterface? best = null;
         long bestRx = 0, bestTx = 0;
 
@@ -259,10 +269,11 @@ public sealed class NetworkMonitor : IDisposable
 
         if (best is null) return false;
 
-        downMbps = bestRx * 8.0 / elapsed / 1e6;
-        upMbps = bestTx * 8.0 / elapsed / 1e6;
         Interlocked.Add(ref _dayRx, bestRx);
         Interlocked.Add(ref _dayTx, bestTx);
+        if (baseline) return false;   // counted for today, but not a rate
+        downMbps = bestRx * 8.0 / elapsed / 1e6;
+        upMbps = bestTx * 8.0 / elapsed / 1e6;
         return true;
     }
 
@@ -654,6 +665,14 @@ public sealed class NetworkMonitor : IDisposable
         }
         catch { }
         _dayDate = today;
+    }
+
+    /// <summary>"Clear all data": today's transfer totals back to zero (memory and state.json).</summary>
+    public void ResetDailyTotals()
+    {
+        Interlocked.Exchange(ref _dayRx, 0);
+        Interlocked.Exchange(ref _dayTx, 0);
+        PersistDailyTotals(force: true);
     }
 
     private void PersistDailyTotals(bool force)

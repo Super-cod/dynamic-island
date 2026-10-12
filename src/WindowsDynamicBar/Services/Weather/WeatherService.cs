@@ -125,10 +125,19 @@ public sealed class WeatherService : IDisposable
 
     public event Action? Updated;
 
+    private static readonly TimeSpan RefreshEvery = TimeSpan.FromMinutes(15);
+    private static readonly TimeSpan RetryAfterFailure = TimeSpan.FromMinutes(1);
+    private DateTime _lastAttemptUtc = DateTime.MinValue;
+
+    /// <summary>Called every time the island opens: fetches only when the data is due (fresh data
+    /// is not re-downloaded on each hover; a failed fetch is retried after a minute).</summary>
     public void Start()
     {
         _timer ??= new System.Threading.Timer(_ => Refresh(), null, Timeout.Infinite, Timeout.Infinite);
-        _timer.Change(TimeSpan.Zero, TimeSpan.FromMinutes(15));
+        var snap = Snapshot;
+        DateTime dueAt = snap.Available ? snap.UpdatedAt + RefreshEvery : _lastAttemptUtc + RetryAfterFailure;
+        var due = dueAt - DateTime.UtcNow;
+        _timer.Change(due > TimeSpan.Zero ? due : TimeSpan.Zero, RefreshEvery);
     }
 
     public void Stop() => _timer?.Change(Timeout.Infinite, Timeout.Infinite);
@@ -143,6 +152,7 @@ public sealed class WeatherService : IDisposable
 
     private async Task RefreshAsync(CancellationToken token)
     {
+        _lastAttemptUtc = DateTime.UtcNow;
         if (!HasLocation || (DateTime.UtcNow - _locationResolvedUtc) > TimeSpan.FromHours(12))
             await ResolveLocationAsync(token).ConfigureAwait(false);
 

@@ -127,6 +127,7 @@ public partial class BarWindow
     {
         if (!_cfg.FeatureSearch) return;
         SearchTrace("open begin", ("phase", _searchPhase), ("hostMeasured", SearchHost.IsMeasureValid));
+        OnBuddySearchOpened();
         if (_searchPhase is SearchPhase.Opening or SearchPhase.Open)
         {
             Activate();
@@ -168,6 +169,7 @@ public partial class BarWindow
     {
         SearchTrace("close begin", ("phase", _searchPhase));
         if (_islandState != IslandVisualState.Search) return;
+        OnBuddySearchClosed();
 
         // Leaving Search runs LeaveSearchMode, and the Collapsed case morphs back to the pill.
         SetIslandState(IslandVisualState.Collapsed, IslandMetric.None, force: true);
@@ -827,6 +829,7 @@ public partial class BarWindow
         try
         {
             result.Action?.Invoke();
+            OnBuddySearchFound();
         }
         catch (Exception ex)   // actions start external processes / shell handlers: report, never crash the bar
         {

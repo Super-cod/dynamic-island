@@ -57,6 +57,7 @@ public partial class BarWindow
     {
         ReadBattery();
         UpdateBatteryChips();
+        OnBuddyBatteryUpdated(_hasBattery, _battPct, _battOnAc);
     }
 
     private void ReadBattery()

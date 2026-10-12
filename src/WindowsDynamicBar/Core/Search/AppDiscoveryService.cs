@@ -99,6 +99,25 @@ public sealed class AppDiscoveryService
         }
     }
 
+    /// <summary>"Clear all data": forget launch counts and recency (memory and disk).</summary>
+    public void ClearUsage()
+    {
+        lock (_sync)
+        {
+            _launchCounts.Clear();
+            _lastUsed.Clear();
+            foreach (var app in _apps) { app.LaunchCount = 0; app.LastUsedUtc = null; }
+            foreach (var path in new[] { _statsPath, _recentPath })
+            {
+                try { if (File.Exists(path)) File.Delete(path); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    Log.Warning("Search history not deleted", ("error", ex.Message));
+                }
+            }
+        }
+    }
+
     public int GetLaunchCount(string appIdOrName)
     {
         lock (_sync)

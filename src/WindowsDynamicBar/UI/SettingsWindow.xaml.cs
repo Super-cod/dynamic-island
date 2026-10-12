@@ -334,6 +334,13 @@ public partial class SettingsWindow : Window
             Segments(new[] { "System", "12-hour", "24-hour" }, (int)s.ClockFormat, i => Set(x => x.ClockFormat = (ClockFormat)i)));
         Row("Temperature", null,
             Segments(new[] { "°C", "°F" }, s.TemperatureFahrenheit ? 1 : 0, i => Set(x => x.TemperatureFahrenheit = i == 1)));
+
+        // The weather card's "click to configure location" lands here.
+        Card("Weather");
+        SwitchRow("Use my location", "Approximate city from your internet address (ipwho.is). Off: the city below.",
+            s.WeatherAutoLocation, v => Set(x => x.WeatherAutoLocation = v));
+        Row("City", "A city name, or coordinates like 13.08, 80.27.",
+            Field(s.WeatherLocation, 200, v => { if (v.Length > 0) Set(x => x.WeatherLocation = v); }));
     }
 
     private void PopulateIsland(SettingsModel s)
@@ -529,8 +536,20 @@ public partial class SettingsWindow : Window
         if (MessageBox.Show(this, "Delete the clipboard history, cached data and logs?\nYour settings are kept.", "Clear all data",
                 MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK) return;
         App.ClipHistory?.ForgetEverything();
+        // The running app keeps these in memory and would write them straight back: reset there too.
+        App.Bar?.ClearCachedData();
+        WindowsDynamicBar.Core.Search.AppDiscoveryService.Instance.ClearUsage();
+        bool timerLive = App.Timer?.Current.State is WindowsDynamicBar.Services.Timers.TimerState.Running
+            or WindowsDynamicBar.Services.Timers.TimerState.Paused;
+        RuntimeState.Instance.Update(st =>
+        {
+            // Dated today (an empty date would fall back to the legacy totals in settings.json).
+            st.NetDailyDate = DateTime.Now.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+            st.NetDailyRxBytes = 0; st.NetDailyTxBytes = 0;
+            if (!timerLive) { st.TimerEndUtc = null; st.TimerTotalSeconds = 0; st.TimerLabel = ""; st.TimerPausedSeconds = 0; }
+        });
         string dir = Path.GetDirectoryName(App.Settings?.SettingsPath ?? "") ?? "";
-        foreach (var name in new[] { "state.json", "lyrics_cache.json", "search_stats.json", "clipboard.dat" })
+        foreach (var name in new[] { "lyrics_cache.json", "search_stats.json", "search_recent.json", "terminal_history.json", "clipboard.dat" })
         {
             string f = Path.Combine(dir, name);
             try { if (File.Exists(f)) File.Delete(f); }

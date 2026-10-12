@@ -44,7 +44,11 @@ public sealed class TrayController : IDisposable
 
     private void RebuildMenu()
     {
+        // Rebuilt on every settings change: Clear() alone leaves the old items undisposed.
+        var old = new ToolStripItem[_menu.Items.Count];
+        _menu.Items.CopyTo(old, 0);
         _menu.Items.Clear();
+        foreach (var item in old) item.Dispose();
 
         var open = new ToolStripMenuItem("Open island");
         open.Click += (_, _) => App.Bar?.Toggle();
