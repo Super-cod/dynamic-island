@@ -550,18 +550,49 @@ internal static partial class Program
     private static void TestBuddySearchLifecycle()
     {
         var behavior = new BuddyBehaviorController();
+        var movement = behavior.Movement;
 
-        // 1. Search opens
-        behavior.TriggerEvent(2, BuddyAnimationState.IdleBreathing, BuddyMood.Happy, BuddyAccessory.Glass, 3.0);
+        // 1. Perched coordinates on search ceiling
+        movement.UpdateLayout(IslandMode.Search, 660, 58);
+        Assert(movement.X == 36.0, "Perched X is 36.0 on search bar");
+        Assert(movement.Y == -25.0, "Perched Y is -25.0 on upper ceiling");
+        Assert(!movement.IsWalking, "Sitting perched: not walking");
+
+        // 2. Search opens: equips Glass, Sitting pose, Happy mood
+        behavior.TriggerEvent(3, BuddyAnimationState.Sitting, BuddyMood.Happy, BuddyAccessory.Glass, 3600.0);
         Assert(behavior.CurrentAccessory == BuddyAccessory.Glass, "Magnifier equipped on search open");
+        Assert(behavior.CurrentAnimation == BuddyAnimationState.Sitting, "Sitting pose on search ceiling");
+        Assert(behavior.CurrentMood == BuddyMood.Happy, "Happy mood while perched");
 
-        // 2. Search result executed
-        behavior.TriggerEvent(2, BuddyAnimationState.Hopping, BuddyMood.Happy, BuddyAccessory.None, 1.5);
-        Assert(behavior.CurrentAnimation == BuddyAnimationState.Hopping, "Hops on successful search execution");
+        // 3. Search result found/executed: hops on ceiling with magnifier
+        behavior.TriggerEvent(4, BuddyAnimationState.Hopping, BuddyMood.Happy, BuddyAccessory.Glass, 1.5);
+        Assert(behavior.CurrentAnimation == BuddyAnimationState.Hopping, "Hops on ceiling on successful search found");
+        Assert(behavior.CurrentAccessory == BuddyAccessory.Glass, "Maintains magnifier while hopping");
 
-        // 3. Search closes and cleans up
-        behavior.Update(2.0, DateTime.UtcNow.AddSeconds(2.5));
+        // 4. Hop finishes: restores back to sitting pose with magnifier
+        behavior.Update(2.0, DateTime.UtcNow.AddSeconds(2.0));
+        Assert(behavior.CurrentAnimation == BuddyAnimationState.Sitting, "Restores to sitting on ceiling after hop");
+        Assert(behavior.CurrentAccessory == BuddyAccessory.Glass, "Still holding magnifier while search remains open");
+
+        // 5. Search closes and cleans up back to idle baseline
+        behavior.ClearActiveEvent();
         Assert(behavior.CurrentAccessory == BuddyAccessory.None, "Prop cleared on search close");
+        Assert(behavior.ActivePriority == 1, "Active priority restored to 1");
+
+        // 6. Search during active music session preserves and restores headphones & dance
+        behavior.OnMediaPlaybackStarted("Artist|Song");
+        Assert(behavior.CurrentAccessory == BuddyAccessory.Headphones, "Headphones equipped during music");
+        Assert(behavior.CurrentAnimation == BuddyAnimationState.Dancing, "Dancing during music");
+
+        // Open search while music playing
+        behavior.TriggerEvent(3, BuddyAnimationState.Sitting, BuddyMood.Happy, BuddyAccessory.Glass, 3600.0);
+        Assert(behavior.CurrentAccessory == BuddyAccessory.Glass, "Glass equipped even when music was active");
+        Assert(behavior.CurrentAnimation == BuddyAnimationState.Sitting, "Sitting pose while search is open");
+
+        // Close search
+        behavior.ClearActiveEvent();
+        Assert(behavior.CurrentAccessory == BuddyAccessory.Headphones, "Headphones restored after search closed");
+        Assert(behavior.CurrentAnimation == BuddyAnimationState.Dancing, "Music dance resumed after search closed");
     }
 
     private static void TestBuddyCardLifecycle()

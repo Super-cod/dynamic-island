@@ -836,17 +836,7 @@
                                             Margin="0,0,16,0"
                                             VerticalAlignment="Center"
                                             Visibility="Collapsed" Opacity="0" IsHitTestVisible="False" />
-
-                                <!-- ============ LIVING BUDDY COMPANION LAYER ============ -->
-                <Border x:Name="BuddyContainer" Panel.ZIndex="16" Width="32" Height="32"
-                        HorizontalAlignment="Left" VerticalAlignment="Top"
-                        Background="Transparent" Cursor="Hand">
-                    <Border.RenderTransform>
-                        <TranslateTransform x:Name="BuddyTransform" X="8" Y="5" />
-                    </Border.RenderTransform>
-                    <buddy:BuddySpriteControl x:Name="BuddySprite" Width="32" Height="32" />
-                </Border>
-<!-- ============ BUDDY COMPANION CARD ============ -->
+                                <!-- ============ BUDDY COMPANION CARD ============ -->
                 <buddy:BuddyCardControl x:Name="BuddyCardComponent"
                                         Panel.ZIndex="25"
                                         Visibility="Collapsed"
@@ -944,6 +934,17 @@
                 </Grid>
 
             </Grid>
+        </Border>
+
+        <!-- ============ LIVING BUDDY COMPANION LAYER ============ -->
+        <Border x:Name="BuddyContainer" Panel.ZIndex="100" Width="32" Height="32"
+                HorizontalAlignment="Left" VerticalAlignment="Top"
+                Margin="40,6,40,0"
+                Background="Transparent" Cursor="Hand">
+            <Border.RenderTransform>
+                <TranslateTransform x:Name="BuddyTransform" X="8" Y="5" />
+            </Border.RenderTransform>
+            <buddy:BuddySpriteControl x:Name="BuddySprite" Width="32" Height="32" />
         </Border>
 
         </Grid>

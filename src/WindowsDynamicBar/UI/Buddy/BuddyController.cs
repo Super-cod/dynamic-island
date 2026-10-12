@@ -158,7 +158,7 @@ public sealed class BuddyController : IDisposable
     {
         if (_isDisposed) return;
 
-        bool enabled = settings.FeatureBuddy && !_window.IsSearchOpen;
+        bool enabled = settings.FeatureBuddy;
         _buddyContainer.Visibility = enabled ? Visibility.Visible : Visibility.Collapsed;
 
         _behavior.CurrentOutfit = settings.BuddyOutfit;
@@ -216,7 +216,7 @@ public sealed class BuddyController : IDisposable
     public void CheckVisibilityAndRun()
     {
         var settings = App.Settings?.Current;
-        if (settings is null || !settings.FeatureBuddy || _window.IsSearchOpen)
+        if (settings is null || !settings.FeatureBuddy)
         {
             StopLifeLoop();
             return;
@@ -245,7 +245,7 @@ public sealed class BuddyController : IDisposable
 
     private void OnLifeTick(object? sender, EventArgs e)
     {
-        if (_isDisposed || _window.IsSearchOpen)
+        if (_isDisposed)
         {
             StopLifeLoop();
             return;
@@ -587,7 +587,13 @@ public sealed class BuddyController : IDisposable
 
     private void OnSpriteMouseDown(object sender, MouseButtonEventArgs e)
     {
-        if (_window.IsSearchOpen || _buddyContainer.Visibility != Visibility.Visible) return;
+        if (_buddyContainer.Visibility != Visibility.Visible) return;
+        if (_window.IsSearchOpen)
+        {
+            _behavior.TriggerEvent(4, BuddyAnimationState.Hopping, BuddyMood.Love, BuddyAccessory.Glass, 1.5);
+            e.Handled = true;
+            return;
+        }
         if (e.ClickCount == 1)
         {
             _clickCount = 1;

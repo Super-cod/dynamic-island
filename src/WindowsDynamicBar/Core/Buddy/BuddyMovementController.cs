@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 
 namespace WindowsDynamicBar.Core.Buddy;
 
@@ -7,7 +7,8 @@ public enum IslandMode
     Collapsed,
     ExpandedMusic,
     ExpandedDashboard,
-    Detail
+    Detail,
+    Search
 }
 
 public sealed class BuddyMovementController
@@ -71,6 +72,14 @@ public sealed class BuddyMovementController
                 MinY = Math.Max(30.0, islandHeight - 36.0);
                 MaxY = MinY;
                 break;
+
+            case IslandMode.Search:
+                // Perched on the top ceiling (upper roof) of the search bar
+                MinX = 36.0;
+                MaxX = 36.0;
+                MinY = -25.0;
+                MaxY = -25.0;
+                break;
         }
 
         bool modeChanged = (oldMode != mode);
@@ -79,6 +88,13 @@ public sealed class BuddyMovementController
         {
             TargetX = MinX;
             TargetY = MinY;
+            if (mode == IslandMode.Search || oldMode == IslandMode.Search)
+            {
+                X = TargetX;
+                Y = TargetY;
+                IsWalking = false;
+                FacingLeft = false;
+            }
         }
         else
         {
@@ -120,6 +136,7 @@ public sealed class BuddyMovementController
         IslandMode.ExpandedMusic => new[] { MinX, MinX + 35.0, (MinX + MaxX) / 2.0, MaxX - 25.0, MaxX },
         IslandMode.ExpandedDashboard => new[] { MinX, (MinX + MaxX) / 2.0, MaxX },
         IslandMode.Detail => new[] { MinX, (MinX + MaxX) / 2.0, MaxX },
+        IslandMode.Search => new[] { MinX, MaxX },
         _ => new[] { MinX, MaxX }
     };
 

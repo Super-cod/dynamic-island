@@ -252,22 +252,15 @@ public partial class BarWindow
     public void SyncBuddyLayoutMode()
     {
         if (_buddyController is null) return;
-        if (_islandState == IslandVisualState.Search)
-        {
-            if (BuddyContainer is not null)
-            {
-                BuddyContainer.Visibility = Visibility.Collapsed;
-                BuddyContainer.Opacity = 0;
-                BuddyContainer.IsHitTestVisible = false;
-            }
-            _buddyController.StopLifeLoop();
-            return;
-        }
 
         IslandMode mode = IslandMode.Collapsed;
         if (_isBuddyCardOpen)
         {
             return;
+        }
+        else if (_islandState == IslandVisualState.Search)
+        {
+            mode = IslandMode.Search;
         }
         else if (_islandState == IslandVisualState.Detail)
         {
@@ -794,33 +787,36 @@ public partial class BarWindow
     public void OnBuddySearchOpened()
     {
         var s = App.Settings?.Current;
-        if (s is null || !s.FeatureBuddy || !s.BuddyCommentSearch) return;
+        if (s is null || !s.FeatureBuddy) return;
 
-        if (DateTime.Now - _lastSearchOpenedTime >= TimeSpan.FromHours(1))
-        {
-            _lastSearchOpenedTime = DateTime.Now;
-            _buddyController?.Behavior.TriggerEvent(2, BuddyAnimationState.IdleBreathing, BuddyMood.Happy, BuddyAccessory.Glass, 3.0);
-        }
+        _buddyController?.Behavior.TriggerEvent(
+            3,
+            BuddyAnimationState.Sitting,
+            BuddyMood.Happy,
+            BuddyAccessory.Glass,
+            3600.0);
     }
 
     public void OnBuddySearchFound()
     {
         var s = App.Settings?.Current;
-        if (s is null || !s.FeatureBuddy || !s.BuddyCommentSearch) return;
+        if (s is null || !s.FeatureBuddy) return;
 
-        _buddyController?.Say(BuddyLines.SearchFound, new Buddy.BuddyController.SpeechOptions
-        {
-            Priority = 2,
-            Mood = BuddyMood.Happy
-        });
+        _buddyController?.Behavior.TriggerEvent(
+            4,
+            BuddyAnimationState.Hopping,
+            BuddyMood.Happy,
+            BuddyAccessory.Glass,
+            1.5);
     }
 
     public void OnBuddySearchClosed()
     {
         var s = App.Settings?.Current;
         if (s is null || !s.FeatureBuddy) return;
-        if (_buddyController is not null && _buddyController.Behavior.CurrentAccessory == BuddyAccessory.Glass)
+        if (_buddyController is not null)
         {
+            _buddyController.Behavior.ClearActiveEvent();
             _buddyController.SetBaseline(_buddyController.Behavior.BaselineMood, _buddyController.Behavior.BaselineAccessory);
         }
     }

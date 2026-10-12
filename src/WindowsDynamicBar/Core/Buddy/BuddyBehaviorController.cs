@@ -209,6 +209,14 @@ public sealed class BuddyBehaviorController
         RestoreIdleState();
     }
 
+    public void ClearActiveEvent()
+    {
+        _interruptionStack.Clear();
+        ActivePriority = 1;
+        PriorityUntil = DateTime.MinValue;
+        RestoreIdleState();
+    }
+
     public void OnMediaPlaybackStarted(string trackKey)
     {
         if (IsMusicPlaying && CurrentTrackKey == trackKey) return;

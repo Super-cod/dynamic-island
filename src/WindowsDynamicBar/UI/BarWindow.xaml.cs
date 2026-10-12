@@ -854,6 +854,7 @@ public partial class BarWindow : Window, IDisposable
         double maxLeft = Math.Max(8, _winW - _currentW - 8);
         left = Math.Max(8, Math.Min(left, maxLeft));
         Pill.Margin = new Thickness(left, _currentTop, 0, 0);
+        if (BuddyContainer is not null) BuddyContainer.Margin = Pill.Margin;
     }
 
     // ---------------------------------------------------------------- expand / collapse
@@ -1108,13 +1109,6 @@ public partial class BarWindow : Window, IDisposable
                 }
                 if (_isBuddyCardOpen) CloseBuddyCard();
                 _buddyController?.EndSpeechImmediately(force: true);
-                _buddyController?.StopLifeLoop();
-                if (BuddyContainer is not null)
-                {
-                    BuddyContainer.Visibility = Visibility.Collapsed;
-                    BuddyContainer.Opacity = 0;
-                    BuddyContainer.IsHitTestVisible = false;
-                }
                 if (BuddyCardComponent is not null)
                 {
                     BuddyCardComponent.Visibility = Visibility.Collapsed;
@@ -1123,6 +1117,7 @@ public partial class BarWindow : Window, IDisposable
                 }
                 if (BuddyClockRow is not null) BuddyClockRow.Visibility = Visibility.Visible;
                 if (BuddySpeechText is not null) BuddySpeechText.Visibility = Visibility.Collapsed;
+                OnBuddySearchOpened();
                 SearchHost.Visibility = Visibility.Visible;
                 break;
         }

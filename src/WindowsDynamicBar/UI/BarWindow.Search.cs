@@ -129,13 +129,6 @@ public partial class BarWindow
         SearchTrace("open begin", ("phase", _searchPhase), ("hostMeasured", SearchHost.IsMeasureValid));
         if (_isBuddyCardOpen) CloseBuddyCard();
         _buddyController?.EndSpeechImmediately(force: true);
-        _buddyController?.StopLifeLoop();
-        if (BuddyContainer is not null)
-        {
-            BuddyContainer.Visibility = Visibility.Collapsed;
-            BuddyContainer.Opacity = 0;
-            BuddyContainer.IsHitTestVisible = false;
-        }
         if (BuddyCardComponent is not null)
         {
             BuddyCardComponent.Visibility = Visibility.Collapsed;
@@ -144,6 +137,7 @@ public partial class BarWindow
         }
         if (BuddyClockRow is not null) BuddyClockRow.Visibility = Visibility.Visible;
         if (BuddySpeechText is not null) BuddySpeechText.Visibility = Visibility.Collapsed;
+        SyncBuddyLayoutMode();
         OnBuddySearchOpened();
         if (_searchPhase is SearchPhase.Opening or SearchPhase.Open)
         {
