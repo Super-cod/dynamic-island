@@ -227,7 +227,7 @@ public partial class BarWindow
 
         if (BuddyContainer is not null)
         {
-            BuddyContainer.Visibility = (_islandState != IslandVisualState.Search && App.Settings?.Current.FeatureBuddy == true) ? Visibility.Visible : Visibility.Collapsed;
+            BuddyContainer.Visibility = App.Settings?.Current.FeatureBuddy == true ? Visibility.Visible : Visibility.Collapsed;
         }
 
         _islandHovering = false;
@@ -282,6 +282,7 @@ public partial class BarWindow
         }
 
         _buddyController.UpdateLayout(mode, _currentW, _currentH);
+        _buddyController.CheckVisibilityAndRun();
     }
 
     private void CheckDailyGreetingAndStreak()

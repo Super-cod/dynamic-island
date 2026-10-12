@@ -854,7 +854,12 @@ public partial class BarWindow : Window, IDisposable
         double maxLeft = Math.Max(8, _winW - _currentW - 8);
         left = Math.Max(8, Math.Min(left, maxLeft));
         Pill.Margin = new Thickness(left, _currentTop, 0, 0);
-        if (BuddyContainer is not null) BuddyContainer.Margin = Pill.Margin;
+        if (BuddyContainer is not null)
+        {
+            BuddyContainer.Margin = _islandState == IslandVisualState.Search
+                ? new Thickness(left + 36, _currentTop - 24, 0, 0)
+                : Pill.Margin;
+        }
     }
 
     // ---------------------------------------------------------------- expand / collapse
@@ -1117,6 +1122,12 @@ public partial class BarWindow : Window, IDisposable
                 }
                 if (BuddyClockRow is not null) BuddyClockRow.Visibility = Visibility.Visible;
                 if (BuddySpeechText is not null) BuddySpeechText.Visibility = Visibility.Collapsed;
+                if (BuddyContainer is not null && App.Settings?.Current.FeatureBuddy == true)
+                {
+                    BuddyContainer.Visibility = Visibility.Visible;
+                    BuddyContainer.Opacity = 1;
+                    BuddyContainer.IsHitTestVisible = true;
+                }
                 OnBuddySearchOpened();
                 SearchHost.Visibility = Visibility.Visible;
                 break;
@@ -1370,7 +1381,7 @@ public partial class BarWindow : Window, IDisposable
             OrbHost.Visibility = Visibility.Visible;
             Fade(CollapsedPanel, 1, 160);
             Fade(OrbHost, 1, 160);
-            if (BuddyContainer is not null && App.Settings?.Current.FeatureBuddy == true && _islandState != IslandVisualState.Search)
+            if (BuddyContainer is not null && App.Settings?.Current.FeatureBuddy == true)
             {
                 BuddyContainer.Visibility = Visibility.Visible;
                 BuddyContainer.Opacity = 1;

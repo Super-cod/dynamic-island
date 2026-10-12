@@ -137,6 +137,12 @@ public partial class BarWindow
         }
         if (BuddyClockRow is not null) BuddyClockRow.Visibility = Visibility.Visible;
         if (BuddySpeechText is not null) BuddySpeechText.Visibility = Visibility.Collapsed;
+        if (BuddyContainer is not null && App.Settings?.Current.FeatureBuddy == true)
+        {
+            BuddyContainer.Visibility = Visibility.Visible;
+            BuddyContainer.Opacity = 1;
+            BuddyContainer.IsHitTestVisible = true;
+        }
         SyncBuddyLayoutMode();
         OnBuddySearchOpened();
         if (_searchPhase is SearchPhase.Opening or SearchPhase.Open)
@@ -167,6 +173,7 @@ public partial class BarWindow
         _searchTargetH = SearchBarH;
         MorphSearch(SearchBarWidth, SearchBarH, SearchTop, SearchBarR, ScaledMs(SearchOpenMs), OnSearchOpened);
         SearchTrace("animation started", ("toW", SearchBarWidth), ("toH", SearchBarH), ("toTop", SearchTop));
+        _buddyController?.CheckVisibilityAndRun();
 
         AppDiscoveryService.Instance.RefreshInBackground();
         WindowSwitcherService.Instance.RefreshInBackground(_hwnd);
@@ -195,6 +202,8 @@ public partial class BarWindow
     private void OnSearchOpened()
     {
         _searchPhase = SearchPhase.Open;
+        _buddyController?.CheckVisibilityAndRun();
+        SyncBuddyLayoutMode();
         SearchTrace("open settled", ("active", IsActive), ("hadFocus", _searchHadFocus));
         // A click elsewhere during Opening was ignored; honour it now that the bar is fully open.
         if (_searchHadFocus && !IsActive) CloseSearch();

@@ -554,8 +554,8 @@ internal static partial class Program
 
         // 1. Perched coordinates on search ceiling
         movement.UpdateLayout(IslandMode.Search, 660, 58);
-        Assert(movement.X == 36.0, "Perched X is 36.0 on search bar");
-        Assert(movement.Y == -25.0, "Perched Y is -25.0 on upper ceiling");
+        Assert(movement.X == 0.0, "Perched X is 0.0 inside search margin slot");
+        Assert(movement.Y == 0.0, "Perched Y is 0.0 inside search margin slot");
         Assert(!movement.IsWalking, "Sitting perched: not walking");
 
         // 2. Search opens: equips Glass, Sitting pose, Happy mood

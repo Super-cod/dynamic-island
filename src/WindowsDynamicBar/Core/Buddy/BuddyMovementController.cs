@@ -74,11 +74,11 @@ public sealed class BuddyMovementController
                 break;
 
             case IslandMode.Search:
-                // Perched on the top ceiling (upper roof) of the search bar
-                MinX = 36.0;
-                MaxX = 36.0;
-                MinY = -25.0;
-                MaxY = -25.0;
+                // Perched on the top ceiling (upper roof) of the search bar (offset cleanly handled via BuddyContainer.Margin)
+                MinX = 0.0;
+                MaxX = 0.0;
+                MinY = 0.0;
+                MaxY = 0.0;
                 break;
         }
 
