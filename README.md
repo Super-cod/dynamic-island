@@ -1,6 +1,6 @@
 # Windows Dynamic Bar
 
-**A modern, lightweight Dynamic-Island-style overlay for Windows 10 and Windows 11.**
+**A modern, lightweight Dynamic-Island-style overlay for Windows 10 and Windows 11 with a living desktop companion.**
 
 [![Version](https://img.shields.io/badge/version-1.1.0-0A84FF.svg)](https://github.com/Super-cod/dynamic-island/releases)
 [![Runtime](https://img.shields.io/badge/.NET-8.0-512BD4.svg)](https://dotnet.microsoft.com/)
@@ -13,25 +13,83 @@
 
 **Windows Dynamic Bar** brings an interactive, context-aware pill interface to the top of your desktop. Inspired by mobile dynamic islands, it stays compact and unobtrusive during daily work, then smoothly expands with fluid spring physics when you play media, set timers, inspect hardware telemetry, search for apps, or adjust volume and display brightness.
 
-The app is **100% local-only and privacy-first**: no background telemetry is transmitted to remote servers, no account is required, and your clipboard history remains encrypted on your machine using Windows DPAPI.
+Featuring **Dot**—a living pixel-art desktop companion living right inside your island pill that reacts in real time to your daily PC workflow with expressive animations, procedural pixel props, and zero background telemetry.
+
+The application is **100% local-only and privacy-first**: no background analytics or network telemetry are transmitted to remote servers, no account is required, and your clipboard history remains encrypted on your machine using Windows DPAPI.
 
 ![Windows Dynamic Bar on Desktop](docs/screenshots/desktop-bar.png)
-*Windows Dynamic Bar resting cleanly above your desktop workflow with media title, battery gauge, and clock.*
+*Windows Dynamic Bar resting cleanly above your desktop workflow with media title, battery gauge, clock, and companion.*
 
 ---
 
 ## Key Features
 
+- **Living Desktop Companion (Dot)** — An interactive pixel-art companion living directly in the bar. Reacts in real time to Windows system events: taking screenshots with instant smartphone photo reviews, Caps Lock pop-out letters, Wi-Fi wave arcs, VPN security shields, charging electricity munches, over-ear DJ headphones, mic/camera privacy poses, treadmill running sprints, and interactive petting with hearts.
 - **Media Player & Visualizer** — Real-time album art, track details, seek progress, playback controls (Previous, Play/Pause, Next), and time-synchronized lyrics (LRCLib) with an optional rotating vinyl/CD disc animation.
 - **System Telemetry & Hardware Monitor** — Real-time CPU usage, GPU engine load via DXGI enumeration, 16-core heatmap, memory utilization rings, ACPI thermal zones, battery status with a 15% warning strip, and Per-Monitor DPI V2 support.
-- **Search Launcher & Window Switcher** — Instant launcher (`Ctrl+Space`) with fuzzy app matching, window switching (`w `), and math/conversion evaluation.
-- **Countdown Timer & Stopwatch** — Presets (5m, 10m, 25m, 45m), natural language parser (`15 min`, `90s`, `1:30`), and a retro digital LED dot-matrix countdown.
+- **Search Launcher & Window Switcher** — Instant launcher (`Ctrl+Space`) with fuzzy app matching, window switching (`w `), math evaluation, and direct Buddy command control (`> buddy-acc`, `> buddy-anim`, `> buddy-pet`).
+- **Countdown Timer & Stopwatch** — Quick presets (5m, 10m, 25m, 45m), natural language parser (`15 min`, `90s`, `1:30`), and a retro digital LED dot-matrix countdown.
 - **Encrypted Clipboard History** — `WM_CLIPBOARDUPDATE` event-driven capture with zero polling, DPAPI encryption at rest, and automatic password manager exclusions (1Password, KeePass, Bitwarden).
-- **Network & Speed Test** — RSSI signal bars (`wlanapi.dll`), live transfer throughput, ping latency probes (Gateway, DNS, Cloudflare, Google), and integrated bandwidth testing.
+- **Network & Speed Test** — RSSI signal bars (`wlanapi.dll`), live transfer throughput, ping latency probes (Gateway, DNS, Cloudflare, Google), and integrated bandwidth testing with Dot's treadmill sprint reaction.
 - **Volume & Brightness HUD** — Dynamic on-screen display with dot-matrix spectrum visualization when system sliders or volume keys change.
 - **Customizable Appearance** — Dark, Light, and Translucent themes, 9 accent colors, adjustable corner radius, width, height, and animation speed.
-- **Living Desktop Companion (Dot)** — Pixel-art desktop companion reacting in real time to PC events: screenshots with smartphone photo review, Caps Lock pop-out "A", Wi-Fi wave arcs, VPN security shield, DJ headphones with beat LEDs, treadmill sprint on speed tests, and interactive petting with hearts. Easily controlled via search commands (`> buddy-acc`, `> buddy-pet`, `> buddy-anim`).
 - **Gaming & Fullscreen Protection** — Automatically hides in fullscreen games and video playback.
+
+---
+
+## Living Desktop Companion: Dot
+
+Dot lives right inside the Dynamic Island pill, keeping you company and giving instant, playful visual feedback on everything happening on your PC.
+
+### Real-Time System Status Reactions
+
+| System Event | Action on Your PC | What Dot Does |
+| :--- | :--- | :--- |
+| **Screenshot Capture** | Press <kbd>Win</kbd> + <kbd>Shift</kbd> + <kbd>S</kbd> | Camera flash snaps, then Dot pulls out his smartphone with both paws displaying your screenshot on the screen with a wink. |
+| **Caps Lock Toggle** | Press <kbd>Caps Lock</kbd> | **ON:** Puffs up with a wide mouth and a golden pop-out letter **"A"** appears. **OFF:** Relaxes into a lowercase **"a"** in 0 ms. |
+| **Clipboard Copy** | Press <kbd>Ctrl</kbd> + <kbd>C</kbd> | Holds up a metallic double-loop clipboard and nods. Copying an image shows a framed picture; copying files shows a cardboard box. |
+| **Wi-Fi Connected** | Connect to a network | Antenna perks up, emits 3 sequential expanding Wi-Fi arcs, and does a happy hop. If offline >2 min, says *"We're back online!"*. |
+| **Wi-Fi Disconnected** | Turn off Wi-Fi or disconnect | Antenna droops red, sits down, scratches his head, and holds up a **"?"** mark looking around. |
+| **Airplane Mode** | Toggle Airplane Mode | **ON:** Puts on a pilot cap and glides with arms out holding an airplane. **OFF:** Lands with a hop and Wi-Fi waves. |
+| **VPN Connected** | Connect to VPN | Stands 1 px taller, equips a green security shield with checkmark, and strikes a sunglasses pose. |
+| **Battery Charging** | Plug in power cord | Holds a cable with yellow electrical sparks, antenna glows neon green, and he munches 3 times on electricity. At 100%, pats his belly. |
+| **Low Battery Alert** | Battery drops to &le;15% | Yawns, walks at 60% speed with an alert **"!"**. At &le;10%, lies down on the floor in a power-saving nap until charged. |
+| **Music Playback** | Play music (Spotify, YouTube, etc.) | Puts on over-ear DJ studio headphones with pulsing cyan beat LEDs, sways in an 8-step wave dance, and taps his foot with sound ripples. |
+| **Microphone in Use** | Join call / unmute mic | Puts finger to mouth in a **"shh"** pose, sits down calmly, pauses any music dancing, and stays silent until the call ends. |
+| **Camera in Use** | Open webcam / video call | Sits still facing forward, straightens his collar/outfit once, and stays calm. |
+| **Do Not Disturb** | Toggle DND / Focus Assist | Pulls out a crescent golden Moon prop, half-closes his eyes, and drifts off to sleep with floating Zzz letters. |
+| **Speed Test (>100 Mbps)** | Run network speed test | Jumps onto a side-view treadmill sprinting at 10.5 km/h with moving belt dashes, console display, and workout sweat. |
+| **Petting Dot** | Click Dot (or press <kbd>Enter</kbd>) | Bounces in a continuous parabolic hop with rosy blushing cheeks and floating heart particles. |
+| **Event Capsule Open** | Any capsule pops (Volume, Brightness) | Enters **Peek** pose: drops to bottom rim with only head and antenna visible over edge; eyes track the capsule icon, antenna matches event color. |
+
+### Interactive Search Bar Commands (<kbd>Ctrl</kbd> + <kbd>Space</kbd>)
+
+Press <kbd>Ctrl</kbd> + <kbd>Space</kbd> to open the search bar, then type any of these commands and press <kbd>Enter</kbd> to command Dot directly:
+
+```text
+> buddy-acc PhonePhoto     # Shows smartphone photo review
+> buddy-acc Camera         # Equips camera prop
+> buddy-acc WifiArcs       # Emits 3 expanding Wi-Fi wave arcs
+> buddy-acc ShieldCheck    # Equips VPN shield with checkmark & shades
+> buddy-acc CableSparks    # Charging cable with electrical sparks
+> buddy-acc BatteryAlert   # Low battery warning prop
+> buddy-acc Speaker        # Audio speaker cabinet prop
+> buddy-acc Moon           # Crescent moon nighttime prop
+> buddy-acc Plane          # Pilot cap with tiny airplane
+> buddy-acc DizzyStars     # Orbiting dizzy stars
+> buddy-anim Treadmill     # Sprints on side-view treadmill machine
+> buddy-anim Hopping       # Parabolic jump animation
+> buddy-anim Celebrating   # Victory celebration with confetti particles
+> buddy-anim Inspecting    # Magnifying glass with 2x eye inspection
+> buddy-anim Stretching    # Reaches tall arms overhead yawning
+> buddy-pet                # Pets Dot immediately
+> buddy-peek               # Triggers bottom-rim peek pose
+> buddy-card               # Opens customization Buddy Card
+> buddy-outfit WizardHat   # Equips star-tipped wizard hat
+> buddy-outfit Crown       # Equips golden royal crown
+> buddy-quiet off          # Enables speech bubbles and chatter
+> buddy-quiet on           # Mutes speech bubbles (visual reactions stay active)
+```
 
 ---
 
@@ -40,27 +98,27 @@ The app is **100% local-only and privacy-first**: no background telemetry is tra
 | Collapsed Dynamic Bar | Expanded Island Card |
 | :---: | :---: |
 | ![Collapsed Dynamic Bar](docs/screenshots/main-bar.png) | ![Expanded Island](docs/screenshots/expanded-panel.png) |
-| *Compact pill showing song title, battery badge, and clock* | *Expanded card with media controls & telemetry chips* |
+| *Compact pill showing song title, battery badge, clock, and companion* | *Expanded card with media controls & telemetry chips* |
 
-| System Telemetry Monitor | Network & Speed Test |
+| Living Companion (Dot) | System Telemetry Monitor |
 | :---: | :---: |
-| ![System Telemetry](docs/screenshots/system-telemetry.png) | ![Speed Test](docs/screenshots/speed-test.png) |
-| *btop-style CPU load, core heatmap, ACPI temp & top procs* | *Mirrored transfer rate, ping latency probes & speed test* |
+| ![Living Companion](docs/screenshots/desktop-bar.png) | ![System Telemetry](docs/screenshots/system-telemetry.png) |
+| *Dot reacting in real time with over-ear DJ headphones and props* | *btop-style CPU load, core heatmap, ACPI temp & top procs* |
 
-| Countdown Timer & Stopwatch | Encrypted Clipboard History |
+| Network & Speed Test | Countdown Timer & Stopwatch |
 | :---: | :---: |
-| ![Timer Panel](docs/screenshots/timer.png) | ![Clipboard History](docs/screenshots/clipboard.png) |
-| *LED digital countdown, progress bar, presets & controls* | *DPAPI encrypted history with pinned clips & search* |
+| ![Speed Test](docs/screenshots/speed-test.png) | ![Timer Panel](docs/screenshots/timer.png) |
+| *Mirrored transfer rate, ping latency probes & treadmill speed test* | *LED digital countdown, progress bar, presets & controls* |
 
-| Search Launcher (`Ctrl+Space`) | Weather Forecast Panel |
+| Encrypted Clipboard History | Search Launcher (`Ctrl+Space`) |
 | :---: | :---: |
-| ![Search Launcher](docs/screenshots/search-panel.png) | ![Weather Panel](docs/screenshots/weather-panel.png) |
-| *Fuzzy app search, tab commands & quick calculations* | *24-hour temperature curve, UV index, and precipitation* |
+| ![Clipboard History](docs/screenshots/clipboard.png) | ![Search Launcher](docs/screenshots/search-panel.png) |
+| *DPAPI encrypted history with pinned clips & search* | *Fuzzy app search, tab commands & direct buddy control* |
 
-| Settings & Hotkey Recorder | About & Creator Attribution |
+| Weather Forecast Panel | Settings & Hotkey Configuration |
 | :---: | :---: |
-| ![Settings Window](docs/screenshots/settings.png) | ![About Window](docs/screenshots/about.png) |
-| *Customizable startup and hotkey binding* | *Creator attribution to Supercell & licence terms* |
+| ![Weather Panel](docs/screenshots/weather-panel.png) | ![Settings Window](docs/screenshots/settings.png) |
+| *24-hour temperature curve, UV index, and precipitation* | *Customizable themes, accents, hotkeys & buddy reaction toggles* |
 
 *For more screenshots, see the [Full Screenshot Gallery](docs/SCREENSHOTS.md).*
 
@@ -108,103 +166,38 @@ Open PowerShell and run the setup script:
 |---|---|
 | `island` | Stops any running instance and launches the application. |
 | `island -Stop` | Gracefully terminates any running instance of the application. |
-| `island -Build` | Stops the running instance, rebuilds the solution in Release configuration, and launches the updated application. |
-
-#### Examples
-
-```powershell
-# Launch the application (or restart if already open)
-island
-
-# Stop the application
-island -Stop
-
-# Rebuild code changes and launch immediately
-island -Build
-```
-
-> **Note:** The saved repository location persists across sessions. You will not have to enter it again. If you ever move the repository to a new folder, simply run `island -Config` to update the path.
+| `island -Build` | Stops the running instance, rebuilds the application in Release configuration, and launches the updated binary. |
 
 ---
 
-> **SmartScreen Note:** Because this application is released as community-built software without a paid commercial Authenticode certificate, Windows SmartScreen may show an *“Unrecognized app”* warning on first run. Click **More info** → **Run anyway**. You can verify file integrity using the SHA-256 checksums published with every release.
+## Production Executable & Artifact Locations
 
----
+When working from source or setting up shortcuts, binaries are located at:
 
-## First-Run Experience
-
-When you launch Windows Dynamic Bar for the first time, a 4-step onboarding wizard will introduce you to core features, hotkeys, and permissions:
-
-![Onboarding Wizard](docs/screenshots/first-run.png)
-
-1. **Features Overview:** Summary of media, volume, telemetry, and search capabilities.
-2. **Permissions:** Configure optional Windows notification and media session access.
-3. **Shortcuts:** Review and customize the default keyboard hotkeys.
-4. **Finish:** Places the collapsed pill at the top of your primary display.
+- **Primary Release Executable:**
+  `src/WindowsDynamicBar/bin/Release/net8.0-windows10.0.19041.0/WindowsDynamicBar.exe`
+- **Self-Contained Standalone Executable (Publish):**
+  `src/WindowsDynamicBar/bin/Release/net8.0-windows10.0.19041.0/win-x64/publish/WindowsDynamicBar.exe`
+- **Mirrored Launcher Executable:**
+  `src/WindowsDynamicBar/bin/Release/net8.0-windows10.0.19041.0/win-x64/WindowsDynamicBar.exe`
+- **Release Package Artifacts:**
+  - `release/WindowsDynamicBar-Setup.exe` (per-user installer)
+  - `release/WindowsDynamicBar-Portable-win-x64.zip` (portable archive)
+  - `release/checksums.txt` (SHA-256 integrity hashes)
 
 ---
 
 ## Keyboard Shortcuts
 
-| Shortcut | Action | Configurable in Settings |
-|---|---|:---:|
-| `Ctrl+Space` | Open Search launcher & Window Switcher | Yes |
-| `Ctrl+Alt+Space` | Toggle Dynamic Bar visibility | Yes |
-| `Ctrl+Alt+M` | Open Media Player Card | Yes |
-| `Ctrl+Alt+T` | Start or show 5-minute timer | Yes |
-| `Ctrl+Alt+V` | Open Clipboard History | Yes |
-
-*All shortcuts can be remapped in **Settings → General** with real-time conflict detection.*
-
----
-
-## System Requirements
-
-- **Operating System:** Windows 10 (Version 2004 / Build 19041 or higher) or Windows 11.
-- **Architecture:** x64 (64-bit Intel / AMD).
-- **Runtime:** Fully self-contained. You do **not** need to install Visual Studio or the .NET SDK to run the application.
-- **Hardware:** Any modern laptop or desktop PC (typical memory footprint is ~60–90 MB).
-
----
-
-## Settings & Customization
-
-Open Settings by clicking the gear icon in the expanded island or right-clicking the system tray icon:
-
-- **General:** Toggle *Start with Windows*, multi-monitor monitor selector, and collapse delays (300 ms – 10 s).
-- **Island:** Configure which telemetry badges appear on the collapsed pill.
-- **Features:** Selectively toggle Media, Clipboard, Volume HUD, Speed Test, Timers, and Camera Mirror.
-- **Appearance:** Switch between Dark, Light, and Translucent themes; customize accent color; adjust corner radius and pill width.
-- **Privacy:** Toggle clipboard monitoring, set clipboard history retention (1h, 6h, 24h, forever), and clear all local data.
-- **About:** View original creator attribution, licence terms, log folder, and copy diagnostic reports.
-
----
-
-## Troubleshooting & Common Questions
-
-#### The bar is hidden behind another application
-Windows Dynamic Bar is configured as `Topmost` by default. If another application forces itself on top, press `Ctrl+Alt+Space` to bring the island back to the foreground.
-
-#### Dynamic Bar does not appear during games
-By default, **Auto-Hide in Fullscreen** is enabled to prevent distracting overlays during games or video playback. You can disable this behavior in **Settings → General**.
-
-#### Media information is not updating
-Ensure your media player supports Windows Media Session (GSMTC). Spotify, Chrome, Edge, and modern players support this natively. For web players, ensure media playback is active and the browser is not muting the tab.
-
-#### Where are settings and logs stored?
-All configuration is stored locally under:
-`%AppData%\WindowsDynamicBar`
-- Settings: `%AppData%\WindowsDynamicBar\settings.json`
-- Logs: `%AppData%\WindowsDynamicBar\logs\`
-- CLI Config: `~/.island/config.json`
-
----
-
-## Uninstall Instructions
-
-- **If installed via Setup:** Open Windows **Settings → Apps → Installed apps**, locate **Windows Dynamic Bar**, and click **Uninstall**. The uninstaller cleanly removes all application files and optionally prompts whether to wipe local settings.
-- **If using the Portable zip:** Exit the app from the system tray and delete the extracted folder. To remove cached configuration, delete `%AppData%\WindowsDynamicBar`.
-- **If using the terminal CLI:** Delete the `~/.island` directory and remove the `island` function block from your PowerShell profile (`$PROFILE`).
+| Shortcut | Action |
+| :--- | :--- |
+| <kbd>Ctrl</kbd> + <kbd>Space</kbd> | Opens the search bar & command launcher. |
+| <kbd>Win</kbd> + <kbd>Shift</kbd> + <kbd>S</kbd> | Snips a screenshot & triggers Dot's smartphone photo review. |
+| <kbd>Ctrl</kbd> + <kbd>C</kbd> | Copies text, images, or files & triggers Dot's clipboard reaction. |
+| <kbd>Caps Lock</kbd> | Toggles Caps Lock & triggers Dot's pop-out letter "A" in 0 ms. |
+| <kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>Space</kbd> | Toggles the Dynamic Bar visibility. |
+| <kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>M</kbd> | Toggles the expanded Media player card. |
+| <kbd>Esc</kbd> | Dismisses the active expanded panel, search bar, or detail card. |
 
 ---
 
@@ -230,16 +223,7 @@ dotnet build src/WindowsDynamicBar/WindowsDynamicBar.csproj -c Release
 dotnet run --project tests/WindowsDynamicBar.Tests/WindowsDynamicBar.Tests.csproj -c Release --no-build
 ```
 
-### 3. Production Executable & Artifact Locations
-After building, production binaries are located at:
-- **Primary Release Executable:**
-  `src/WindowsDynamicBar/bin/Release/net8.0-windows10.0.19041.0/WindowsDynamicBar.exe`
-- **Self-Contained Standalone Executable (Publish):**
-  `src/WindowsDynamicBar/bin/Release/net8.0-windows10.0.19041.0/win-x64/publish/WindowsDynamicBar.exe`
-- **Mirrored Launcher Executable:**
-  `src/WindowsDynamicBar/bin/Release/net8.0-windows10.0.19041.0/win-x64/WindowsDynamicBar.exe`
-
-### 4. Generate Release Packages
+### 3. Generate Release Packages
 Run the automated packaging script to build self-contained executables, compile the Inno Setup installer, and output SHA-256 checksums:
 ```powershell
 .uild-release.ps1
@@ -251,41 +235,15 @@ Resulting distributable artifacts will be generated in the `release/` directory:
 
 ---
 
+## Standalone Animation Studio Lab
+
+We provide an interactive zero-dependency testing studio in `buddy-studio.html` for designers and contributors to preview and inspect all **26 animation states**, **22 accessories**, and **14 moods**:
+
+- **Location:** `buddy-studio.html` (open directly in Microsoft Edge or Google Chrome).
+- **Features:** Real-time 60 fps canvas rendering, 1× to 12× zoom scaling, side-by-side legacy vs. high-clarity comparisons, dynamic island context simulators, interactive system action triggers, and one-click sprite sheet export.
+
+---
+
 ## Licence & Non-Commercial Policy
 
-Windows Dynamic Bar is licensed as **Source-Available, Non-Commercial Software** under the [Supercell Source-Available Non-Commercial Licence](LICENSE.md).
-
-### Summary of Terms:
-- **Free for Personal Use:** Anyone may download, install, run, and modify the software for individual, personal, non-commercial purposes.
-- **Free Redistribution:** You may share and redistribute unmodified or modified versions of the software free of charge, provided all copyright notices, attribution, and `LICENSE.md` remain intact.
-- **No Commercial Use or Sale:** Selling the application, charging for downloads, bundling with paid software, hosting behind paywalls, or commercial use in business environments is strictly prohibited without prior written permission from Supercell.
-- **OSI Clarification:** This is a custom source-available non-commercial licence; it is not an OSI-approved open-source licence.
-
-*For complete legal terms, please read [LICENSE.md](LICENSE.md).*
-
----
-
-## Creator Attribution
-
-- **Original Creator & Maintainer:** **Supercell**
-- **Copyright:** Copyright © 2026 Supercell. All rights reserved except as expressly permitted by the accompanying licence.
-- **Repository:** [https://github.com/Super-cod/dynamic-island](https://github.com/Super-cod/dynamic-island)
-
----
-
-## Third-Party Acknowledgements
-
-Windows Dynamic Bar is built with the help of excellent open-source libraries:
-- [NAudio & NAudio.Wasapi](https://github.com/naudio/NAudio) — Audio device endpoint monitoring and WASAPI capture (MIT Licence).
-- [System.Management](https://github.com/dotnet/runtime) — WMI hardware telemetry and battery monitoring (MIT Licence).
-- [Inno Setup](https://jrsoftware.org/) — Windows installer compiler by Jordan Russell and Martijn Laan.
-
-*Full copyright notices are documented in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).*
-
----
-
-## Community & Feedback
-
-- **Bug Reports:** [Submit an issue](https://github.com/Super-cod/dynamic-island/issues/new?template=bug_report.yml)
-- **Feature Requests:** [Propose an enhancement](https://github.com/Super-cod/dynamic-island/issues/new?template=feature_request.yml)
-- **Contributing Guide:** [CONTRIBUTING.md](CONTRIBUTING.md)
+This project is source-available and released under a non-commercial licence for personal desktop use. See [LICENSE.md](LICENSE.md) and [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) for full terms and attributions.
