@@ -45,7 +45,9 @@ public enum BuddyAnimationState
     Celebrating,
     Resting,
     HeadBobbing,
-    FootTapping
+    FootTapping,
+    PhotoReview,
+    Treadmill
 }
 
 public enum BuddyMusicActivity
@@ -83,7 +85,8 @@ public enum BuddyAccessory
     Heart,
     Sweat,
     Question,
-    Exclamation
+    Exclamation,
+    PhonePhoto
 }
 
 public enum BuddyOutfit

@@ -118,7 +118,13 @@ public sealed class BuddySpriteControl : FrameworkElement
     {
         Array.Clear(_pixels, 0, PixelCount);
 
-        double hp = hop > 0 ? Math.Abs(Math.Sin(hop * Math.PI)) * 3.0 : 0.0;
+        double hopProg = hop;
+        if (animState == BuddyAnimationState.Hopping && hopProg <= 0)
+        {
+            double cycle = (timeMs % 750.0) / 750.0;
+            hopProg = cycle < 0.15 ? 0.0 : (cycle < 0.70 ? (cycle - 0.15) / 0.55 : 0.0);
+        }
+        double hp = hopProg > 0 ? Math.Abs(Math.Sin(hopProg * Math.PI)) * 3.5 : 0.0;
         int by = 0;
 
         double effectivePhase = dancePhase > 0 ? dancePhase : (timeMs / 140.0);
@@ -130,9 +136,15 @@ public sealed class BuddySpriteControl : FrameworkElement
             if (animState == BuddyAnimationState.Sitting || animState == BuddyAnimationState.Resting)
                 by = 2;
             else if (animState == BuddyAnimationState.Stretching)
-                by = -1;
+                by = -2;
             else if (animState == BuddyAnimationState.EdgePeeking)
                 by = 5;
+            else if (animState == BuddyAnimationState.Celebrating)
+                by = (int)Math.Round(-2.5 * Math.Abs(Math.Sin(timeMs / 180.0)));
+            else if (animState == BuddyAnimationState.Surprise)
+                by = -2;
+            else if (animState == BuddyAnimationState.SadReact)
+                by = 1;
             else if (animState == BuddyAnimationState.Dancing)
             {
                 if (!isMusicPlaying)
@@ -306,15 +318,22 @@ public sealed class BuddySpriteControl : FrameworkElement
         // Arms
         if (animState == BuddyAnimationState.Stretching)
         {
-            P(2, 6, C_BODY, 2, 3);
-            P(12, 6, C_BODY, 2, 3);
+            P(2, 3, C_BODY, 2, 5);
+            P(12, 3, C_BODY, 2, 5);
         }
         else if (animState == BuddyAnimationState.Celebrating)
         {
-            P(2, 6, C_BODY, 2, 2);
-            P(1, 5, C_BODY, 2, 2);
-            P(12, 6, C_BODY, 2, 2);
-            P(13, 5, C_BODY, 2, 2);
+            P(1, 4, C_BODY, 2, 2);
+            P(2, 5, C_BODY, 2, 2);
+            P(12, 5, C_BODY, 2, 2);
+            P(13, 4, C_BODY, 2, 2);
+            uint[] confCols = { 0xFFFF5B7A, 0xFFFFD60A, 0xFF30D158, 0xFF0A84FF, 0xFFBF5AF2 };
+            for (int ci = 0; ci < 5; ci++)
+            {
+                int cx = (int)((timeMs * 0.03 + ci * 3) % 15);
+                int cy = (int)((timeMs * 0.025 + ci * 4) % 13);
+                Q(cx, cy, confCols[ci % confCols.Length]);
+            }
         }
         else if (animState == BuddyAnimationState.Dancing)
         {
@@ -730,6 +749,38 @@ public sealed class BuddySpriteControl : FrameworkElement
             Q(11, 12, 0xFFC98A4A, 3, 3);
             Q(10, 14, 0xFFE6C9A0, 5, 1);
             Q(14, 12, 0xFFE6C9A0, 1, 2);
+        }
+        else if (accessory == BuddyAccessory.PhonePhoto || animState == BuddyAnimationState.PhotoReview)
+        {
+            Q(10, 7, 0xFF1A1C24, 6, 8); // phone body
+            Q(11, 8, 0xFF389BFF, 4, 6); // photo display
+            Q(12, 9, 0xFF111218, 2, 1); // mini island pill on photo
+            Q(12, 11, 0xFFFFFFFF, 2, 2); // mini window
+            P(9, 10, C_BODY, 2, 2); // holding paws
+            P(15, 10, C_BODY, 2, 2);
+        }
+        else if (animState == BuddyAnimationState.Treadmill)
+        {
+            Q(1, 14, 0xFF2A2E3D, 14, 2);
+            int beltOffset = ((int)(timeMs * 0.12)) % 3;
+            Q(3 + beltOffset, 14, C_WHITE, 1, 1);
+            Q(7 + beltOffset, 14, C_WHITE, 1, 1);
+            Q(11 + beltOffset, 14, C_WHITE, 1, 1);
+            Q(2, 8, 0xFF3E4558, 1, 6);
+            Q(1, 7, 0xFF00E5FF, 3, 2);
+            int runStep = ((int)(timeMs / 85.0)) % 4;
+            int rby = (runStep % 2 == 1) ? -1 : 0;
+            P(6, 6 + rby, C_BODY, 7, 6);
+            P(8, 5 + rby, C_BODY, 4, 1);
+            P(6, 10 + rby, C_SHADE, 7, 2);
+            P(6, 7 + rby, C_EYE, 2, 2); P(6, 7 + rby, C_WHITE, 1, 1);
+            if (runStep < 2) { P(4, 9 + rby, C_BODY, 2, 2); P(12, 8 + rby, C_SHADE, 2, 2); }
+            else { P(6, 9 + rby, C_BODY, 2, 2); P(10, 8 + rby, C_SHADE, 2, 2); }
+            if (runStep == 0) { P(5, 12, C_FOOT, 2, 2); P(11, 11, C_FOOT, 2, 2); }
+            else if (runStep == 1) { P(7, 10, C_FOOT, 2, 2); P(9, 12, C_FOOT, 2, 2); }
+            else if (runStep == 2) { P(9, 12, C_FOOT, 2, 2); P(5, 11, C_FOOT, 2, 2); }
+            else { P(9, 10, C_FOOT, 2, 2); P(7, 12, C_FOOT, 2, 2); }
+            Q(12, 6 + rby, C_SWEAT, 1, 1);
         }
 
         // Render particles

@@ -691,6 +691,19 @@ public partial class BarWindow
             Mood = BuddyMood.Happy,
             Accessory = BuddyAccessory.Camera
         });
+        var reviewTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(850) };
+        reviewTimer.Tick += (_, _) =>
+        {
+            reviewTimer.Stop();
+            _buddyController?.Behavior.TriggerEvent(
+                2,
+                BuddyAnimationState.PhotoReview,
+                BuddyMood.Happy,
+                BuddyAccessory.PhonePhoto,
+                2.5
+            );
+        };
+        reviewTimer.Start();
     }
 
     public void OnBuddyCopied()
