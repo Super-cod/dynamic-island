@@ -569,6 +569,23 @@ public partial class BarWindow : Window, IDisposable
             case NativeMethods.WM_CLIPBOARDUPDATE:
                 App.ClipHistory?.OnClipboardUpdate(hwnd);
                 try { App.Clipboard?.OnClipboardUpdate(); } catch { }
+                Dispatcher.BeginInvoke(() =>
+                {
+                    try
+                    {
+                        if (System.Windows.Clipboard.ContainsImage())
+                        {
+                            OnBuddyScreenshotTaken();
+                            App.Bus?.Raise(BarEvent.Create(BarEventKind.Screenshot, "Screenshot", "Image copied", priority: 60));
+                        }
+                        else if (System.Windows.Clipboard.ContainsText())
+                        {
+                            OnBuddyCopied();
+                            App.Bus?.Raise(BarEvent.Create(BarEventKind.Clipboard, "Copied", "Text", priority: 10));
+                        }
+                    }
+                    catch { }
+                });
                 break;
 
             case NativeMethods.WM_DEVICECHANGE:

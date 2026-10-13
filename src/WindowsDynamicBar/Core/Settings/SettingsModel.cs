@@ -1,4 +1,4 @@
-﻿using WindowsDynamicBar.Core.Buddy;
+using WindowsDynamicBar.Core.Buddy;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -115,6 +115,21 @@ public sealed class SettingsModel
     public bool BuddyCommentSearch { get; set; } = true;
     public bool BuddyCommentCalendar { get; set; } = true;
     public bool BuddyCommentMusic { get; set; } = true;
+
+    // ---- Buddy System Reactions (Status Events) ----
+    public bool BuddyReactionsEnabled { get; set; } = true;
+    public bool BuddyQuietDuringCalls { get; set; } = true;
+    public bool BuddyReactScreenshot { get; set; } = true;
+    public bool BuddyReactWifi { get; set; } = true;
+    public bool BuddyReactBluetooth { get; set; } = true;
+    public bool BuddyReactVpn { get; set; } = true;
+    public bool BuddyReactPower { get; set; } = true;
+    public bool BuddyReactAudioOutput { get; set; } = true;
+    public bool BuddyReactPrivacy { get; set; } = true;
+    public bool BuddyReactCapsLock { get; set; } = true;
+    public bool BuddyReactAirplane { get; set; } = true;
+    public bool BuddyReactDnd { get; set; } = true;
+    public bool BuddyReactClipboard { get; set; } = true;
     public bool FeatureSearch { get; set; } = true;
     public bool FeatureMirror { get; set; } = true;
     public bool FeatureSpeedTest { get; set; } = true;

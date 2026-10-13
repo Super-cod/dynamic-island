@@ -106,6 +106,7 @@ public sealed class BuddyBehaviorController
 
         ActivePriority = priority;
         PriorityUntil = now.AddSeconds(durationSeconds);
+        if (Movement.IsWalking) Movement.SnapHome();
 
         CurrentAnimation = animation;
         CurrentMood = mood;
@@ -116,7 +117,7 @@ public sealed class BuddyBehaviorController
     }
 
     public bool CanPet(DateTime now) =>
-        now - _lastPetTime >= TimeSpan.FromSeconds(2.5);
+        now - _lastPetTime >= TimeSpan.FromSeconds(1.0);
 
     public bool Pet(DateTime now)
     {
@@ -206,6 +207,13 @@ public sealed class BuddyBehaviorController
         }
 
         ActivePriority = 1;
+        RestoreIdleState();
+    }
+
+    public void RestorePreviousSession()
+    {
+        ActivePriority = 1;
+        PriorityUntil = DateTime.MinValue;
         RestoreIdleState();
     }
 

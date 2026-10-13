@@ -517,6 +517,14 @@ public partial class BarWindow
 
             case Key.Enter:
                 e.Handled = true;
+                string queryText = SearchInput.Text.Trim();
+                if (queryText.StartsWith("buddy-", StringComparison.OrdinalIgnoreCase) || queryText.StartsWith("> buddy-", StringComparison.OrdinalIgnoreCase))
+                {
+                    string cleanCmd = queryText.TrimStart('>', ' ').Trim();
+                    ExecuteBuddyCommand(cleanCmd);
+                    CloseSearch();
+                    return;
+                }
                 if (_selectedResultIndex >= 0 && _selectedResultIndex < _searchResults.Count)
                     ExecuteResult(_searchResults[_selectedResultIndex]);
                 else if (!string.IsNullOrWhiteSpace(SearchInput.Text))

@@ -28,6 +28,7 @@ public sealed class BuddyController : IDisposable
 
     // Timers
     private readonly DispatcherTimer _lifeTimer;
+    private readonly DispatcherTimer _fastInputTimer;
     private readonly DispatcherTimer _typewriterTimer;
     private readonly DispatcherTimer _speechHoldTimer;
     private readonly DispatcherTimer _talkFrequencyTimer;
@@ -58,9 +59,11 @@ public sealed class BuddyController : IDisposable
     private bool _pointerOverIsland;
     private bool _isCardOpen;
     private bool _isDisposed;
+    private bool _lastCapsOn;
 
     public bool IsCardOpen => _isCardOpen;
     public BuddyBehaviorController Behavior => _behavior;
+    public BuddySpriteControl Sprite => _sprite;
 
     public sealed class SpeechOptions
     {
@@ -122,6 +125,26 @@ public sealed class BuddyController : IDisposable
         };
         _lifeTimer.Tick += OnLifeTick;
 
+        // Fast 25ms input watcher for instantaneous CapsLock & key response
+        _fastInputTimer = new DispatcherTimer(DispatcherPriority.Input)
+        {
+            Interval = TimeSpan.FromMilliseconds(25)
+        };
+        _fastInputTimer.Tick += (_, _) =>
+        {
+            try
+            {
+                bool caps = Console.CapsLock;
+                if (caps != _lastCapsOn)
+                {
+                    _lastCapsOn = caps;
+                    _window?.ReactionRouter?.OnCapsLockChanged(caps, DateTime.UtcNow);
+                }
+            }
+            catch { }
+        };
+        _fastInputTimer.Start();
+
         // Typewriter timer: 28 ms per char
         _typewriterTimer = new DispatcherTimer(DispatcherPriority.Normal)
         {
@@ -178,9 +201,9 @@ public sealed class BuddyController : IDisposable
         CheckVisibilityAndRun();
     }
 
-    public void UpdateLayout(IslandMode mode, double width, double height)
+    public void UpdateLayout(IslandMode mode, double width, double height, double statusIconsWidth = 0.0)
     {
-        _behavior.Movement.UpdateLayout(mode, width, height, _currentSpeech is not null);
+        _behavior.Movement.UpdateLayout(mode, width, height, _currentSpeech is not null, statusIconsWidth);
     }
 
     public void OnIslandResized(double width, double height)
@@ -239,6 +262,7 @@ public sealed class BuddyController : IDisposable
     public void StopLifeLoop()
     {
         if (_lifeTimer.IsEnabled) _lifeTimer.Stop();
+        _fastInputTimer.Stop();
     }
 
     // ---------------------------------------------------------------- Life loop & rendering
@@ -258,6 +282,18 @@ public sealed class BuddyController : IDisposable
 
         // Step behavior and movement controller (~71ms dt)
         _behavior.Update(0.071, DateTime.UtcNow);
+
+        // Check global Windows Caps Lock state instantly
+        try
+        {
+            bool caps = Console.CapsLock;
+            if (caps != _lastCapsOn)
+            {
+                _lastCapsOn = caps;
+                _window?.ReactionRouter?.OnCapsLockChanged(caps, DateTime.UtcNow);
+            }
+        }
+        catch { }
 
         // Update physical transform within island
         if (_buddyTransform is not null)
@@ -393,8 +429,18 @@ public sealed class BuddyController : IDisposable
     public void Say(string text, SpeechOptions? options = null)
     {
         var settings = App.Settings?.Current;
-        if (settings is null || !settings.FeatureBuddy || !settings.BuddySpeechEnabled) return;
-        if (settings.BuddyQuiet || IsQuietPeriodActive(settings)) return;
+        if (settings is null || !settings.FeatureBuddy) return;
+
+        options ??= new SpeechOptions();
+
+        if (options.Mood.HasValue) _behavior.BaselineMood = options.Mood.Value;
+        if (options.Accessory.HasValue) _behavior.BaselineAccessory = options.Accessory.Value;
+        if (options.Animation.HasValue)
+            _behavior.TriggerEvent(options.Priority, options.Animation.Value, options.Mood ?? _behavior.BaselineMood, options.Accessory ?? _behavior.BaselineAccessory, 3.0);
+        else if (options.Accessory.HasValue || options.Mood.HasValue)
+            _behavior.TriggerEvent(options.Priority, _behavior.CurrentAnimation, options.Mood ?? _behavior.CurrentMood, options.Accessory ?? _behavior.CurrentAccessory, 3.0);
+
+        if (settings.BuddyQuiet || IsQuietPeriodActive(settings) || !settings.BuddySpeechEnabled) return;
 
         options ??= new SpeechOptions();
 
@@ -797,6 +843,7 @@ public sealed class BuddyController : IDisposable
         _isDisposed = true;
 
         _lifeTimer.Stop();
+        _fastInputTimer.Stop();
         _typewriterTimer.Stop();
         _speechHoldTimer.Stop();
         _talkFrequencyTimer.Stop();

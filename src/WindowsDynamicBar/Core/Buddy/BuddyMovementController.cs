@@ -38,7 +38,7 @@ public sealed class BuddyMovementController
         _rng = rng ?? new Random();
     }
 
-    public void UpdateLayout(IslandMode mode, double islandWidth, double islandHeight, bool isSpeaking = false)
+    public void UpdateLayout(IslandMode mode, double islandWidth, double islandHeight, bool isSpeaking = false, double statusIconsWidth = 0.0)
     {
         var oldMode = CurrentMode;
         CurrentMode = mode;
@@ -46,8 +46,15 @@ public sealed class BuddyMovementController
         {
             case IslandMode.Collapsed:
                 MinX = 4.0;
+                double rawMax = Math.Min(48.0, Math.Max(24.0, islandWidth * 0.12));
+                // Exclude status icon zone docked on the right
+                if (statusIconsWidth > 0 && islandWidth > 80.0)
+                {
+                    double safeRightBoundary = Math.Max(MinX + 8.0, islandWidth - statusIconsWidth - 36.0);
+                    rawMax = Math.Min(rawMax, safeRightBoundary);
+                }
                 // If speaking, keep buddy strictly within far-left gutter (4..16) so it never clips text
-                MaxX = isSpeaking ? 16.0 : Math.Min(48.0, Math.Max(24.0, islandWidth * 0.12));
+                MaxX = isSpeaking ? 16.0 : rawMax;
                 MinY = Math.Max(0, (islandHeight - 32.0) / 2.0);
                 MaxY = MinY;
                 break;
@@ -55,14 +62,14 @@ public sealed class BuddyMovementController
             case IslandMode.ExpandedMusic:
                 MinX = 16.0;
                 MaxX = Math.Max(MinX + 20.0, islandWidth - 48.0);
-                MinY = Math.Max(40.0, islandHeight - 38.0);
+                MinY = Math.Max(0.0, (islandHeight - 32.0) / 2.0);
                 MaxY = MinY;
                 break;
 
             case IslandMode.ExpandedDashboard:
                 MinX = 20.0;
                 MaxX = Math.Max(MinX + 20.0, islandWidth - 52.0);
-                MinY = Math.Max(40.0, islandHeight - 38.0);
+                MinY = Math.Max(0.0, (islandHeight - 32.0) / 2.0);
                 MaxY = MinY;
                 break;
 

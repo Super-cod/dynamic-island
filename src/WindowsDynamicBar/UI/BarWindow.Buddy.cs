@@ -1,3 +1,4 @@
+using WindowsDynamicBar.Core.Events;
 using System;
 using System.Diagnostics;
 using System.Net.NetworkInformation;
@@ -20,6 +21,8 @@ namespace WindowsDynamicBar.UI;
 public partial class BarWindow
 {
     private Buddy.BuddyController? _buddyController;
+    private BuddyEventReactionRouter? _reactionRouter;
+    public BuddyEventReactionRouter? ReactionRouter => _reactionRouter;
     private bool _buddyTwoLines;
 
     // Real context state trackers
@@ -99,13 +102,16 @@ public partial class BarWindow
         {
             OnBuddyMediaUpdated(App.Media.Current);
         }
+        _reactionRouter = new BuddyEventReactionRouter(App.Bus, _buddyController, () => App.Settings?.Current ?? new SettingsModel());
         Log.Info("BuddyController successfully created and attached");
 
         // Network monitoring with 3-second debounce
         _lastInternetConnected = NetworkInterface.GetIsNetworkAvailable();
         NetworkChange.NetworkAvailabilityChanged += OnNetworkAvailabilityChanged;
         NetworkChange.NetworkAddressChanged += OnNetworkAddressChanged;
-        _netDebounceTimer.Tick += OnNetDebounceTick;
+        if (App.Toggles is not null) App.Toggles.Changed += () => Dispatcher.BeginInvoke(OnImmediateNetChange);
+        NetworkChange.NetworkAddressChanged += OnNetworkAddressChanged;
+        // Immediate network monitoring (no debounce)
 
         // RAM sustained monitor
         _ramHighTimer.Tick += OnRamHighTimerTick;
@@ -123,11 +129,13 @@ public partial class BarWindow
     {
         NetworkChange.NetworkAvailabilityChanged -= OnNetworkAvailabilityChanged;
         NetworkChange.NetworkAddressChanged -= OnNetworkAddressChanged;
-        _netDebounceTimer.Stop();
+        
         _ramHighTimer.Stop();
         _waterReminderTimer?.Stop();
         _eyeReminderTimer?.Stop();
 
+        _reactionRouter?.Dispose();
+        _reactionRouter = null;
         _buddyController?.Dispose();
         _buddyController = null;
     }
@@ -460,47 +468,34 @@ public partial class BarWindow
 
     private void OnNetworkAvailabilityChanged(object? sender, NetworkAvailabilityEventArgs e)
     {
-        Dispatcher.BeginInvoke(RestartNetDebounce);
+        Dispatcher.BeginInvoke(OnImmediateNetChange);
     }
 
     private void OnNetworkAddressChanged(object? sender, EventArgs e)
     {
-        Dispatcher.BeginInvoke(RestartNetDebounce);
+        Dispatcher.BeginInvoke(OnImmediateNetChange);
     }
 
-    private void RestartNetDebounce()
+    private void OnImmediateNetChange()
     {
-        _netDebounceTimer.Stop();
-        _netDebounceTimer.Start();
-    }
-
-    private void OnNetDebounceTick(object? sender, EventArgs e)
-    {
-        _netDebounceTimer.Stop();
         bool isConnected = NetworkInterface.GetIsNetworkAvailable();
         if (isConnected != _lastInternetConnected)
         {
             _lastInternetConnected = isConnected;
             var settings = App.Settings?.Current;
-            if (settings is null || !settings.FeatureBuddy || !settings.BuddySystemComments) return;
+            if (settings is null || !settings.FeatureBuddy) return;
 
             if (isConnected)
             {
-                _buddyController?.SetBaseline(BuddyMood.Happy);
-                _buddyController?.Say(BuddyLines.NetOnline, new Buddy.BuddyController.SpeechOptions
-                {
-                    Priority = 3,
-                    Mood = BuddyMood.Excited
-                });
+                // INSTANT Wi-Fi / Airplane OFF reaction: Hop with Wi-Fi arcs!
+                _buddyController?.Behavior.TriggerEvent(2, BuddyAnimationState.Hopping, BuddyMood.Happy, BuddyAccessory.WifiArcs, 2.5);
+                App.Bus?.Raise(BarEvent.Create(BarEventKind.Network, "Wi-Fi Connected", "Online", priority: 40, preempt: true));
             }
             else
             {
-                _buddyController?.SetBaseline(BuddyMood.Sad);
-                _buddyController?.Say(BuddyLines.NetOffline, new Buddy.BuddyController.SpeechOptions
-                {
-                    Priority = 3,
-                    Mood = BuddyMood.Sad
-                });
+                // INSTANT Airplane ON / Disconnect reaction: Glides like a plane!
+                _buddyController?.Behavior.TriggerEvent(2, BuddyAnimationState.GlidePlane, BuddyMood.Calm, BuddyAccessory.Plane, 3.0);
+                App.Bus?.Raise(BarEvent.Create(BarEventKind.Network, "Airplane Mode On", "Offline", priority: 40, preempt: true));
             }
         }
     }
@@ -753,12 +748,13 @@ public partial class BarWindow
 
         if (mbps >= 100.0)
         {
+            _buddyController?.Behavior.TriggerEvent(2, BuddyAnimationState.Treadmill, BuddyMood.Excited, BuddyAccessory.None, 4.0);
             string line = string.Format(BuddyLines.SpeedFast, Math.Round(mbps));
             _buddyController?.Say(line, new Buddy.BuddyController.SpeechOptions
             {
                 Priority = 2,
                 Mood = BuddyMood.Excited,
-                Accessory = BuddyAccessory.Run
+                Animation = BuddyAnimationState.Treadmill
             });
         }
         else if (mbps < 10.0)
@@ -894,23 +890,23 @@ public partial class BarWindow
         });
     }
 
-#if DEBUG
-    partial void RunDebugCommandExtra(string[] args)
+    public void ExecuteBuddyCommand(string cmd)
     {
+        string[] args = cmd.Split(' ', StringSplitOptions.RemoveEmptyEntries);
         if (args.Length == 0) return;
-        switch (args[0])
+        switch (args[0].ToLowerInvariant())
         {
             case "buddy-anim" when args.Length > 1:
                 if (Enum.TryParse<BuddyAnimationState>(args[1], true, out var anim))
-                    _buddyController?.Behavior.TriggerEvent(2, anim, BuddyMood.Happy, BuddyAccessory.None, 3.0);
+                    _buddyController?.Behavior.TriggerEvent(2, anim, BuddyMood.Happy, BuddyAccessory.None, 4.0);
                 break;
             case "buddy-mood" when args.Length > 1:
                 if (Enum.TryParse<BuddyMood>(args[1], true, out var mood))
-                    _buddyController?.SetOverride(mood, null, 3000);
+                    _buddyController?.SetOverride(mood, null, 4000);
                 break;
             case "buddy-acc" when args.Length > 1:
                 if (Enum.TryParse<BuddyAccessory>(args[1], true, out var acc))
-                    _buddyController?.SetOverride(BuddyMood.Happy, acc, 3000);
+                    _buddyController?.SetOverride(BuddyMood.Happy, acc, 4000);
                 break;
             case "buddy-outfit" when args.Length > 1:
                 if (Enum.TryParse<BuddyOutfit>(args[1], true, out var outfit))
@@ -921,7 +917,7 @@ public partial class BarWindow
                     _buddyController?.Behavior.Movement.MoveTo(wx);
                 break;
             case "buddy-peek":
-                _buddyController?.Behavior.TriggerEvent(2, BuddyAnimationState.EdgePeeking, BuddyMood.Curious, BuddyAccessory.None, 3.0);
+                _buddyController?.Behavior.TriggerEvent(2, BuddyAnimationState.Peek, BuddyMood.Curious, BuddyAccessory.None, 4.0);
                 break;
             case "buddy-card":
                 _buddyController?.ToggleCard();
@@ -935,6 +931,11 @@ public partial class BarWindow
             case "buddy-joke":
                 TriggerBuddyJoke();
                 break;
+            case "buddy-quiet" when args.Length > 1:
+                bool quiet = args[1].Equals("on", StringComparison.OrdinalIgnoreCase) || args[1].Equals("true", StringComparison.OrdinalIgnoreCase);
+                App.Settings?.Update(s => s.BuddyQuiet = quiet);
+                if (App.Settings?.Current is { } cur) _buddyController?.UpdateSettings(cur);
+                break;
             case "buddy-reset":
                 App.Settings?.Update(cfg =>
                 {
@@ -945,10 +946,19 @@ public partial class BarWindow
                     cfg.BuddyStreak = 1;
                     cfg.BuddyLastUsedDate = "";
                     cfg.BuddyFocusSessions = 0;
+                    cfg.BuddyQuiet = false;
                     cfg.BuddyOwnedPacks = new System.Collections.Generic.List<string>();
                 });
+                if (App.Settings?.Current is { } curReset) _buddyController?.UpdateSettings(curReset);
                 break;
         }
+    }
+
+#if DEBUG
+    partial void RunDebugCommandExtra(string[] args)
+    {
+        if (args.Length == 0) return;
+        ExecuteBuddyCommand(string.Join(' ', args));
     }
 #endif
 }

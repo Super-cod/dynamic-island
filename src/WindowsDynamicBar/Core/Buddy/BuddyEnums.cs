@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 
 namespace WindowsDynamicBar.Core.Buddy;
@@ -47,7 +47,20 @@ public enum BuddyAnimationState
     HeadBobbing,
     FootTapping,
     PhotoReview,
-    Treadmill
+    Treadmill,
+    Peek,
+    Shrug,
+    ScratchHead,
+    StandTaller,
+    Munch,
+    PatBelly,
+    LieDownNap,
+    Shh,
+    StraightenOutfit,
+    PuffUp,
+    GlidePlane,
+    Dizzy,
+    Yawn
 }
 
 public enum BuddyMusicActivity
@@ -86,7 +99,20 @@ public enum BuddyAccessory
     Sweat,
     Question,
     Exclamation,
-    PhonePhoto
+    PhonePhoto,
+    WifiArcs,
+    ShieldCheck,
+    Sunglasses,
+    CableSparks,
+    BatteryAlert,
+    Speaker,
+    Moon,
+    Clipboard,
+    PictureFrame,
+    Box,
+    Plane,
+    PopoutA,
+    DizzyStars
 }
 
 public enum BuddyOutfit

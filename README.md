@@ -1,4 +1,4 @@
-﻿# Windows Dynamic Bar
+# Windows Dynamic Bar
 
 **A modern, lightweight Dynamic-Island-style overlay for Windows 10 and Windows 11.**
 
@@ -30,6 +30,7 @@ The app is **100% local-only and privacy-first**: no background telemetry is tra
 - **Network & Speed Test** — RSSI signal bars (`wlanapi.dll`), live transfer throughput, ping latency probes (Gateway, DNS, Cloudflare, Google), and integrated bandwidth testing.
 - **Volume & Brightness HUD** — Dynamic on-screen display with dot-matrix spectrum visualization when system sliders or volume keys change.
 - **Customizable Appearance** — Dark, Light, and Translucent themes, 9 accent colors, adjustable corner radius, width, height, and animation speed.
+- **Living Desktop Companion (Dot)** — Pixel-art desktop companion reacting in real time to PC events: screenshots with smartphone photo review, Caps Lock pop-out "A", Wi-Fi wave arcs, VPN security shield, DJ headphones with beat LEDs, treadmill sprint on speed tests, and interactive petting with hearts. Easily controlled via search commands (`> buddy-acc`, `> buddy-pet`, `> buddy-anim`).
 - **Gaming & Fullscreen Protection** — Automatically hides in fullscreen games and video playback.
 
 ---
@@ -222,25 +223,31 @@ If you want to build or inspect the source code yourself:
 git clone https://github.com/Super-cod/dynamic-island.git
 cd dynamic-island
 
-# Restore dependencies
-dotnet restore WindowsDynamicBar.sln -m:1
+# Build project in Release configuration
+dotnet build src/WindowsDynamicBar/WindowsDynamicBar.csproj -c Release
 
-# Build solution in Release configuration
-dotnet build WindowsDynamicBar.sln -c Release --no-restore
-
-# Run automated tests (83 passing tests)
-dotnet run --project tests\WindowsDynamicBar.Tests\WindowsDynamicBar.Tests.csproj -c Release --no-build
+# Run automated test suite (150+ passing tests across Buddy, Audio, System, and Telemetry)
+dotnet run --project tests/WindowsDynamicBar.Tests/WindowsDynamicBar.Tests.csproj -c Release --no-build
 ```
 
-### 3. Generate Release Packages
-Run the automated packaging script to build the self-contained executable, compile the Inno Setup installer, and output SHA-256 checksums:
+### 3. Production Executable & Artifact Locations
+After building, production binaries are located at:
+- **Primary Release Executable:**
+  `src/WindowsDynamicBar/bin/Release/net8.0-windows10.0.19041.0/WindowsDynamicBar.exe`
+- **Self-Contained Standalone Executable (Publish):**
+  `src/WindowsDynamicBar/bin/Release/net8.0-windows10.0.19041.0/win-x64/publish/WindowsDynamicBar.exe`
+- **Mirrored Launcher Executable:**
+  `src/WindowsDynamicBar/bin/Release/net8.0-windows10.0.19041.0/win-x64/WindowsDynamicBar.exe`
+
+### 4. Generate Release Packages
+Run the automated packaging script to build self-contained executables, compile the Inno Setup installer, and output SHA-256 checksums:
 ```powershell
-.\build-release.ps1
+.uild-release.ps1
 ```
-Resulting artifacts will be located in the `release\` directory:
-- `release\WindowsDynamicBar-Setup.exe` (per-user installer)
-- `release\WindowsDynamicBar-Portable-win-x64.zip` (portable archive)
-- `release\checksums.txt` (cryptographic SHA-256 hashes)
+Resulting distributable artifacts will be generated in the `release/` directory:
+- `release/WindowsDynamicBar-Setup.exe` (per-user installer)
+- `release/WindowsDynamicBar-Portable-win-x64.zip` (portable archive)
+- `release/checksums.txt` (cryptographic SHA-256 hashes)
 
 ---
 

@@ -10,6 +10,7 @@ namespace WindowsDynamicBar.UI.Buddy;
 public sealed class BuddySpriteControl : FrameworkElement
 {
     public WriteableBitmap Bitmap => _bmp;
+    public uint? PeekAntennaColor { get; set; }
     private const int W = 16;
     private const int PixelCount = W * W;
     private readonly WriteableBitmap _bmp;
@@ -114,7 +115,8 @@ public sealed class BuddySpriteControl : FrameworkElement
         int walkFrame = 0,
         bool isMusicPlaying = false,
         float audioEnergy = 0f,
-        double dancePhase = 0.0)
+        double dancePhase = 0.0,
+        uint? eventColor = null)
     {
         Array.Clear(_pixels, 0, PixelCount);
 
@@ -139,12 +141,22 @@ public sealed class BuddySpriteControl : FrameworkElement
                 by = -2;
             else if (animState == BuddyAnimationState.EdgePeeking)
                 by = 5;
+            else if (animState == BuddyAnimationState.Peek)
+                by = 7; // Peek pose: only head and antenna above bottom edge!
+            else if (animState == BuddyAnimationState.StandTaller)
+                by = -1; // 1 px taller
+            else if (animState == BuddyAnimationState.LieDownNap)
+                by = 4; // Flat on floor nap
             else if (animState == BuddyAnimationState.Celebrating)
                 by = (int)Math.Round(-2.5 * Math.Abs(Math.Sin(timeMs / 180.0)));
             else if (animState == BuddyAnimationState.Surprise)
                 by = -2;
             else if (animState == BuddyAnimationState.SadReact)
                 by = 1;
+            else if (animState == BuddyAnimationState.Dizzy)
+                by = (int)Math.Round(Math.Sin(timeMs / 80.0) * 0.8);
+            else if (animState == BuddyAnimationState.Yawn)
+                by = -1;
             else if (animState == BuddyAnimationState.Dancing)
             {
                 if (!isMusicPlaying)
@@ -215,7 +227,7 @@ public sealed class BuddySpriteControl : FrameworkElement
         }
 
         // Antenna tip color
-        uint ac = mood switch
+        uint ac = (animState == BuddyAnimationState.Peek && eventColor.HasValue) ? eventColor.Value : mood switch
         {
             BuddyMood.Happy or BuddyMood.Cool => 0xFF6BF08A,
             BuddyMood.Sleepy => 0xFF8EA0FF,
@@ -390,6 +402,42 @@ public sealed class BuddySpriteControl : FrameworkElement
                 }
             }
         }
+        else if (animState == BuddyAnimationState.Shrug)
+        {
+            P(1, 8, C_BODY, 2, 2);
+            P(13, 8, C_BODY, 2, 2);
+        }
+        else if (animState == BuddyAnimationState.ScratchHead)
+        {
+            P(2, 9, C_BODY);
+            P(11, 2, C_BODY, 2, 2);
+        }
+        else if (animState == BuddyAnimationState.Shh)
+        {
+            P(2, 9, C_BODY);
+            P(8, 10, C_BODY, 2, 2);
+        }
+        else if (animState == BuddyAnimationState.StraightenOutfit)
+        {
+            P(5, 10, C_BODY, 2, 1);
+            P(9, 10, C_BODY, 2, 1);
+        }
+        else if (animState == BuddyAnimationState.PatBelly)
+        {
+            P(5, 11, C_BODY, 2, 2);
+            P(9, 11, C_BODY, 2, 2);
+        }
+        else if (animState == BuddyAnimationState.GlidePlane)
+        {
+            P(0, 8, C_BODY, 3, 1);
+            P(13, 8, C_BODY, 3, 1);
+        }
+        else if (animState == BuddyAnimationState.Peek)
+        {
+            // Paws gripping the bottom rim
+            P(4, 6, C_BODY, 2, 1);
+            P(10, 6, C_BODY, 2, 1);
+        }
         else
         {
             P(2, 9, C_BODY);
@@ -418,7 +466,24 @@ public sealed class BuddySpriteControl : FrameworkElement
         int ex = 5 + Math.Clamp(lx, -1, 1);
         int ey = 7 + ly;
 
-        if (mood == BuddyMood.Cool || animState == BuddyAnimationState.CoolPose || outfit == BuddyOutfit.Sunglasses)
+        if (animState == BuddyAnimationState.Dizzy)
+        {
+            // Dizzy spiral dazed eyes
+            P(5, 7, C_EYE); P(6, 8, C_EYE);
+            P(9, 7, C_EYE); P(10, 8, C_EYE);
+        }
+        else if (animState == BuddyAnimationState.Peek)
+        {
+            // Eyes looking left and slightly up toward capsule icon tile
+            P(4, 6, C_EYE, 2, 2); P(4, 6, C_WHITE);
+            P(8, 6, C_EYE, 2, 2); P(8, 6, C_WHITE);
+        }
+        else if (animState == BuddyAnimationState.LieDownNap)
+        {
+            P(5, 8, C_EYE, 2, 1);
+            P(9, 8, C_EYE, 2, 1);
+        }
+        else if (mood == BuddyMood.Cool || animState == BuddyAnimationState.CoolPose || outfit == BuddyOutfit.Sunglasses || accessory == BuddyAccessory.Sunglasses)
         {
             P(4, 7, C_EYE, 8, 2);
             P(5, 7, C_WHITE, 1, 1);
@@ -471,6 +536,16 @@ public sealed class BuddySpriteControl : FrameworkElement
         {
             P(7, 10, C_MOUTH, 2, 2);
             if (mood == BuddyMood.Hungry) P(7, 11, C_TONGUE, 2, 1);
+        }
+        else if (animState == BuddyAnimationState.Yawn)
+        {
+            P(6, 10, C_MOUTH, 4, 3);
+            P(7, 11, C_TONGUE, 2, 1);
+        }
+        else if (animState == BuddyAnimationState.Munch)
+        {
+            bool chomp = ((int)(timeMs / 140.0)) % 2 == 1;
+            P(7, 10, C_MOUTH, 2, chomp ? 2 : 1);
         }
         else if (mood == BuddyMood.Excited || mood == BuddyMood.Love || animState == BuddyAnimationState.Laughing)
         {
@@ -749,6 +824,87 @@ public sealed class BuddySpriteControl : FrameworkElement
             Q(11, 12, 0xFFC98A4A, 3, 3);
             Q(10, 14, 0xFFE6C9A0, 5, 1);
             Q(14, 12, 0xFFE6C9A0, 1, 2);
+        }
+        else if (accessory == BuddyAccessory.WifiArcs)
+        {
+            int step = ((int)(timeMs / 180.0)) % 3;
+            // Arc 1 (inner)
+            Q(12, 11, 0xFF389BFF, 2, 1);
+            // Arc 2 (mid)
+            if (step >= 1) { Q(11, 9, 0xFF389BFF, 4, 1); Q(11, 10, 0xFF389BFF, 1, 1); Q(14, 10, 0xFF389BFF, 1, 1); }
+            // Arc 3 (outer)
+            if (step >= 2) { Q(10, 7, 0xFF389BFF, 6, 1); Q(10, 8, 0xFF389BFF, 1, 1); Q(15, 8, 0xFF389BFF, 1, 1); }
+        }
+        else if (accessory == BuddyAccessory.ShieldCheck)
+        {
+            Q(10, 7, 0xFF30D158, 5, 5);
+            Q(11, 12, 0xFF30D158, 3, 1);
+            Q(12, 13, 0xFF30D158, 1, 1);
+            // Checkmark
+            Q(11, 9, C_WHITE, 1, 1); Q(12, 10, C_WHITE, 1, 1); Q(13, 8, C_WHITE, 1, 1);
+        }
+        else if (accessory == BuddyAccessory.CableSparks)
+        {
+            Q(13, 11, 0xFF2A2A30, 3, 1);
+            Q(12, 10, 0xFF8A8A90, 2, 2);
+            bool spark = ((int)(timeMs / 120.0)) % 2 == 1;
+            if (spark) { Q(11, 9, C_SPARKLE); Q(14, 9, C_SPARKLE); Q(12, 12, C_SPARKLE); }
+        }
+        else if (accessory == BuddyAccessory.BatteryAlert)
+        {
+            Q(11, 6, 0xFFD0D5DD, 5, 7);
+            Q(12, 5, 0xFFD0D5DD, 3, 1);
+            Q(12, 7, C_RED_ALERT, 3, 5);
+            Q(13, 8, C_WHITE, 1, 2);
+            Q(13, 11, C_WHITE, 1, 1);
+        }
+        else if (accessory == BuddyAccessory.Speaker)
+        {
+            Q(10, 7, 0xFF2B2F3D, 5, 6);
+            Q(11, 8, 0xFF858E9D, 3, 3);
+            Q(12, 9, C_WHITE, 1, 1);
+        }
+        else if (accessory == BuddyAccessory.Moon)
+        {
+            Q(12, 3, 0xFFFFD60A, 4, 5);
+            Q(11, 3, 0x00000000, 2, 5);
+        }
+        else if (accessory == BuddyAccessory.Clipboard)
+        {
+            Q(10, 7, 0xFFC98A4A, 5, 6);
+            Q(11, 6, 0xFFD0D5DD, 3, 1);
+            Q(11, 8, C_WHITE, 3, 4);
+        }
+        else if (accessory == BuddyAccessory.PictureFrame)
+        {
+            Q(10, 7, 0xFF8A5A2A, 6, 5);
+            Q(11, 8, 0xFF4AA3FF, 4, 3);
+            Q(12, 9, C_WHITE, 2, 1);
+        }
+        else if (accessory == BuddyAccessory.Box)
+        {
+            Q(10, 8, 0xFFC98A4A, 6, 5);
+            Q(12, 8, 0xFF8A5A2A, 2, 5);
+        }
+        else if (accessory == BuddyAccessory.Plane)
+        {
+            Q(11, 6, C_WHITE, 5, 2);
+            Q(13, 4, C_WHITE, 1, 5);
+            Q(12, 7, 0xFF389BFF, 3, 1);
+        }
+        else if (accessory == BuddyAccessory.PopoutA)
+        {
+            Q(12, 3, 0xFFFFD60A, 3, 4);
+            Q(13, 4, 0x00000000, 1, 1);
+        }
+        else if (accessory == BuddyAccessory.DizzyStars || animState == BuddyAnimationState.Dizzy)
+        {
+            int s1X = 8 + (int)(Math.Sin(timeMs / 100.0) * 4);
+            int s1Y = 1 + (int)(Math.Cos(timeMs / 100.0) * 1.5);
+            Q(s1X, s1Y, C_SPARKLE);
+            int s2X = 8 - (int)(Math.Sin(timeMs / 100.0) * 4);
+            int s2Y = 1 - (int)(Math.Cos(timeMs / 100.0) * 1.5);
+            Q(s2X, s2Y, C_SPARKLE);
         }
         else if (accessory == BuddyAccessory.PhonePhoto || animState == BuddyAnimationState.PhotoReview)
         {

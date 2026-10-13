@@ -88,6 +88,7 @@ internal static partial class Program
         Run("DotFont renders HH:mm on a 27x7 grid", TestDotFont);
         RunFeatureTests();
         RunBuddyTests();
+        BuddySystemReactionTests.RunAll();
         RunSearchRankingTests();
         RunAuditTests();
 
