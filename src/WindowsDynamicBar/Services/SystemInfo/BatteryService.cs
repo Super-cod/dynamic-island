@@ -6,16 +6,17 @@ using WindowsDynamicBar.Interop;
 
 namespace WindowsDynamicBar.Services.SystemInfo;
 
-public sealed record BatteryInfo(double Percent, bool Charging, bool EnergySaver, string? TimeRemaining);
+public sealed record BatteryInfo(double Percent, bool Charging, bool EnergySaver, string? TimeRemaining, bool HasBattery = true);
 
 public sealed class BatteryService : IDisposable
 {
     private readonly EventBus _bus;
     private readonly SettingsService _settings;
-    private BatteryInfo _last = new(0, false, false, null);
+    private BatteryInfo _last = new(0, false, false, null, false);
     private System.Threading.Timer? _pollTimer;
 
     public event Action<BatteryInfo>? BatteryChanged;
+    public BatteryInfo Current => _last;
 
     public BatteryService(EventBus bus, SettingsService settings)
     {
@@ -43,7 +44,9 @@ public sealed class BatteryService : IDisposable
         {
             var prev = _last;
             var cur = Query();
-            if (Math.Abs(cur.Percent - prev.Percent) >= 1 || cur.Charging != prev.Charging ||
+            if (cur.HasBattery != prev.HasBattery ||
+                Math.Abs(cur.Percent - prev.Percent) >= 1 ||
+                cur.Charging != prev.Charging ||
                 cur.EnergySaver != prev.EnergySaver)
             {
                 _last = cur;
@@ -61,9 +64,12 @@ public sealed class BatteryService : IDisposable
             return;
         var prev = _last;
         var cur = Query();
-        _last = cur;
-        if (cur.Charging != prev.Charging || cur.EnergySaver != prev.EnergySaver)
+        if (cur.HasBattery != prev.HasBattery ||
+            cur.Percent != prev.Percent ||
+            cur.Charging != prev.Charging ||
+            cur.EnergySaver != prev.EnergySaver)
         {
+            _last = cur;
             BatteryChanged?.Invoke(cur);
             RaiseBatteryEvent(prev, cur);
             Log.Info("Power state change", ("percent", cur.Percent), ("charging", cur.Charging));
@@ -78,25 +84,50 @@ public sealed class BatteryService : IDisposable
         BatteryChanged?.Invoke(cur);
     }
 
-    private void RaiseBatteryEvent(BatteryInfo prev, BatteryInfo cur)
+    internal static bool ShouldRaiseBatteryAlert(BatteryInfo prev, BatteryInfo cur)
     {
-        if (!_settings.Current.FeatureBattery) return;
+        if (!cur.HasBattery) return false;
 
-        bool chargingFlipped = cur.Charging != prev.Charging;
-        bool saverFlipped = cur.EnergySaver != prev.EnergySaver;
+        bool chargingFlipped = prev.HasBattery && cur.Charging != prev.Charging;
+        bool saverFlipped = prev.HasBattery && cur.EnergySaver != prev.EnergySaver;
         bool lowNow = cur.Percent <= 20 && !cur.Charging;
-        bool lowBefore = prev.Percent <= 20 && !prev.Charging;
+        bool lowBefore = prev.HasBattery && prev.Percent <= 20 && !prev.Charging;
 
         // Routine percent drift is not worth interrupting the user for — only
         // charging/saver flips and the one-shot low-battery crossing pop the bar.
-        if (!chargingFlipped && !saverFlipped && !(lowNow && !lowBefore)) return;
+        return chargingFlipped || saverFlipped || (lowNow && !lowBefore);
+    }
 
+    private void RaiseBatteryEvent(BatteryInfo prev, BatteryInfo cur)
+    {
+        if (!_settings.Current.FeatureBattery) return;
+        if (!ShouldRaiseBatteryAlert(prev, cur)) return;
+
+        bool lowNow = cur.Percent <= 20 && !cur.Charging;
+        bool lowBefore = prev.HasBattery && prev.Percent <= 20 && !prev.Charging;
         bool low = lowNow && !lowBefore;
+
         string title = cur.Charging ? "Charging" : cur.EnergySaver ? "Battery saver" : "Battery";
         string text = $"{Math.Round(cur.Percent)}%" + (cur.TimeRemaining is null ? "" : $" · {cur.TimeRemaining}");
         _bus.Raise(BarEvent.Create(BarEventKind.Battery, title, text,
             value: cur.Percent / 100.0, valueText: text, payload: cur,
             priority: low ? 95 : 40, displayDuration: TimeSpan.FromSeconds(low ? 6 : 3)));
+    }
+
+    internal static BatteryInfo FromPowerStatus(NativeMethods.SYSTEM_POWER_STATUS spsi, bool energySaver)
+    {
+        // BatteryFlag 128 = no system battery, 255 = unknown status.
+        // BatteryLifePercent 255 = unknown status.
+        bool hasBattery = spsi.BatteryFlag != 128 && spsi.BatteryFlag != 255 && spsi.BatteryLifePercent != 255;
+        double percent = hasBattery ? Math.Clamp((double)spsi.BatteryLifePercent, 0, 100) : 0;
+        bool charging = (spsi.ACLineStatus == 1);
+        string? remaining = null;
+        if (hasBattery && !charging && spsi.BatteryLifeTime != -1 && spsi.BatteryLifeTime > 0)
+        {
+            var ts = TimeSpan.FromSeconds(spsi.BatteryLifeTime);
+            remaining = $"{(int)ts.TotalHours}h {ts.Minutes:D2}m left";
+        }
+        return new BatteryInfo(percent, charging, energySaver, remaining, hasBattery);
     }
 
     public static BatteryInfo Query()
@@ -105,23 +136,14 @@ public sealed class BatteryService : IDisposable
         {
             if (NativeMethods.GetSystemPowerStatus(out var spsi))
             {
-                double percent = spsi.BatteryLifePercent == 255 ? 0 : spsi.BatteryLifePercent;
-                bool charging = (spsi.ACLineStatus == 1);
                 bool saver = false;
                 try { saver = Windows.System.Power.PowerManager.EnergySaverStatus ==
                              Windows.System.Power.EnergySaverStatus.On; } catch { }
-
-                string? remaining = null;
-                if (!charging && spsi.BatteryLifeTime != -1 && spsi.BatteryLifeTime > 0)
-                {
-                    var ts = TimeSpan.FromSeconds(spsi.BatteryLifeTime);
-                    remaining = $"{(int)ts.TotalHours}h {ts.Minutes:D2}m left";
-                }
-                return new BatteryInfo(percent, charging, saver, remaining);
+                return FromPowerStatus(spsi, saver);
             }
         }
         catch (Exception ex) { Log.Debug("Battery query failed", ("error", ex.Message)); }
-        return new BatteryInfo(0, false, false, null);
+        return new BatteryInfo(0, false, false, null, false);
     }
 
     public void Dispose()

@@ -409,6 +409,7 @@ public partial class BarWindow : Window, IDisposable
                 App.Bus.EventRaised += OnBusEvent;
                 App.Bus.Idle += OnBusIdle;
             }
+            if (App.Battery is not null) App.Battery.BatteryChanged += OnBatteryChanged;
             if (App.Media is not null)
             {
                 App.Media.MediaChanged += OnMediaChanged;
@@ -434,6 +435,7 @@ public partial class BarWindow : Window, IDisposable
                 App.Bus.EventRaised -= OnBusEvent;
                 App.Bus.Idle -= OnBusIdle;
             }
+            if (App.Battery is not null) App.Battery.BatteryChanged -= OnBatteryChanged;
             if (App.Media is not null) App.Media.MediaChanged -= OnMediaChanged;
             if (App.Timer is not null) App.Timer.TimerChanged -= OnTimerChanged;
             if (App.Stopwatch is not null) App.Stopwatch.StopwatchChanged -= OnStopwatchChanged;
@@ -465,7 +467,7 @@ public partial class BarWindow : Window, IDisposable
 
         RegisterHotkeys();
         try { App.Clipboard?.Attach(_hwnd); } catch { }
-        StartBatteryNotifications();
+        InitializeBatteryState();
 
         Reposition();
         RefreshBlur();
@@ -525,7 +527,6 @@ public partial class BarWindow : Window, IDisposable
             for (int id = 1; id <= 5; id++) NativeMethods.UnregisterHotKey(_hwnd, id);
         }
         catch { }
-        StopBatteryNotifications();
         try { _src?.RemoveHook(WndProc); } catch { }
         try { BlurHelper.Detach(); } catch { }
     }
@@ -605,10 +606,6 @@ public partial class BarWindow : Window, IDisposable
                     OnSecondTick();
                     Reposition();
                 });
-                break;
-
-            case NativeMethods.WM_POWERBROADCAST when IsBatteryBroadcast(wParam):
-                Dispatcher.BeginInvoke(OnBatteryChanged);
                 break;
 
             case NativeMethods.WM_DISPLAYCHANGE:
@@ -3576,7 +3573,12 @@ public partial class BarWindow : Window, IDisposable
     {
         bool charging = false;
         string? remaining = null;
-        if (evt.Payload is BatteryInfo b) { charging = b.Charging; remaining = b.TimeRemaining; }
+        if (evt.Payload is BatteryInfo b)
+        {
+            charging = b.Charging;
+            remaining = b.TimeRemaining;
+            ApplyBatteryInfo(b);
+        }
         HeaderGlyph.Text = charging ? IcBatteryCharging : IcBattery;
         HeaderText.Text = string.IsNullOrEmpty(evt.Title) ? "Battery" : evt.Title;
         HeaderSub.Text = evt.Subtitle ?? (charging ? "Charging" : "On battery");

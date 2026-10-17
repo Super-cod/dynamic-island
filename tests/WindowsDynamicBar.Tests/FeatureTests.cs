@@ -1,7 +1,9 @@
 using System.IO;
 using WindowsDynamicBar.Core.Clipboard;
 using WindowsDynamicBar.Core.Telemetry;
+using WindowsDynamicBar.Interop;
 using WindowsDynamicBar.Services.Media;
+using WindowsDynamicBar.Services.SystemInfo;
 
 namespace WindowsDynamicBar.Tests;
 
@@ -26,6 +28,8 @@ internal static partial class Program
         Run("TimerService end time persisted and restored", TestTimerPersistence);
         Run("Battery warning: 5 s at <=15% on battery, released by charger or >20%", TestBatteryWarning);
         Run("Battery glyphs: levels and charging variants", TestBatteryGlyphs);
+        Run("BatteryInfo: desktop without battery, unknown flags, and remaining time parsing", TestBatteryInfoFromPowerStatus);
+        Run("BatteryService: alert transitions and routine drift suppression", TestBatteryAlertTransitions);
         Run("LruCache never exceeds its limit and evicts least recently used", TestLruCache);
         Run("Settings: validation clamps bad values and broken hotkeys", TestSettingsValidation);
         Run("Settings: corrupt file is moved aside and defaults load", TestSettingsCorruption);
@@ -181,6 +185,123 @@ internal static partial class Program
         AssertEq("\uE83E", WindowsDynamicBar.UI.BarWindow.BatteryGlyph(98, true), "full + bolt");
         AssertEq("\uEA93", WindowsDynamicBar.UI.BarWindow.BatteryGlyph(91, true), "90% + bolt");
         AssertEq("\uE85F", WindowsDynamicBar.UI.BarWindow.BatteryGlyph(50, true), "half + bolt");
+    }
+
+    private static void TestBatteryInfoFromPowerStatus()
+    {
+        // 1. Desktop PC with no system battery (BatteryFlag = 128)
+        var desktopStatus = new NativeMethods.SYSTEM_POWER_STATUS
+        {
+            ACLineStatus = 1,
+            BatteryFlag = 128,
+            BatteryLifePercent = 255,
+            BatteryLifeTime = -1,
+            BatteryFullLifeTime = -1
+        };
+        var desktopInfo = BatteryService.FromPowerStatus(desktopStatus, energySaver: false);
+        Assert(!desktopInfo.HasBattery, "desktop has no battery");
+        AssertEq(0.0, desktopInfo.Percent, "desktop percent clamped to 0");
+        Assert(desktopInfo.Charging, "desktop is on AC line");
+        Assert(desktopInfo.TimeRemaining is null, "desktop has no remaining time");
+
+        // 2. Unknown battery status (BatteryFlag = 255)
+        var unknownStatus = new NativeMethods.SYSTEM_POWER_STATUS
+        {
+            ACLineStatus = 255,
+            BatteryFlag = 255,
+            BatteryLifePercent = 255
+        };
+        var unknownInfo = BatteryService.FromPowerStatus(unknownStatus, energySaver: false);
+        Assert(!unknownInfo.HasBattery, "unknown battery flag marks HasBattery false");
+
+        // 3. Unknown battery percent (BatteryLifePercent = 255)
+        var unknownPctStatus = new NativeMethods.SYSTEM_POWER_STATUS
+        {
+            ACLineStatus = 0,
+            BatteryFlag = 0,
+            BatteryLifePercent = 255
+        };
+        var unknownPctInfo = BatteryService.FromPowerStatus(unknownPctStatus, energySaver: false);
+        Assert(!unknownPctInfo.HasBattery, "unknown battery life percent marks HasBattery false");
+
+        // 4. Normal discharging battery (75%, 2h 15m remaining)
+        var dischargingStatus = new NativeMethods.SYSTEM_POWER_STATUS
+        {
+            ACLineStatus = 0,
+            BatteryFlag = 1,
+            BatteryLifePercent = 75,
+            BatteryLifeTime = 8100 // 2 hours 15 minutes
+        };
+        var dischargingInfo = BatteryService.FromPowerStatus(dischargingStatus, energySaver: false);
+        Assert(dischargingInfo.HasBattery, "laptop has battery");
+        AssertEq(75.0, dischargingInfo.Percent, "laptop percent is 75");
+        Assert(!dischargingInfo.Charging, "discharging");
+        AssertEq("2h 15m left", dischargingInfo.TimeRemaining, "time remaining parsed correctly");
+        Assert(!dischargingInfo.EnergySaver, "energy saver false");
+
+        // 5. Normal charging battery (90%, AC online, energy saver on)
+        var chargingStatus = new NativeMethods.SYSTEM_POWER_STATUS
+        {
+            ACLineStatus = 1,
+            BatteryFlag = 9, // High + Charging
+            BatteryLifePercent = 90,
+            BatteryLifeTime = -1
+        };
+        var chargingInfo = BatteryService.FromPowerStatus(chargingStatus, energySaver: true);
+        Assert(chargingInfo.HasBattery, "laptop has battery");
+        AssertEq(90.0, chargingInfo.Percent, "laptop percent is 90");
+        Assert(chargingInfo.Charging, "charging");
+        Assert(chargingInfo.TimeRemaining is null, "no time remaining when charging");
+        Assert(chargingInfo.EnergySaver, "energy saver true");
+    }
+
+    private static void TestBatteryAlertTransitions()
+    {
+        // Desktop PC (no battery) -> never raises alert
+        var desktopCur = new BatteryInfo(0, true, false, null, HasBattery: false);
+        var desktopPrev = new BatteryInfo(0, true, false, null, HasBattery: false);
+        Assert(!BatteryService.ShouldRaiseBatteryAlert(desktopPrev, desktopCur), "desktop without battery never alerts");
+
+        // Routine battery drift (discharging 80% -> 79%) -> suppressed
+        var b80 = new BatteryInfo(80, false, false, "3h 00m left", HasBattery: true);
+        var b79 = new BatteryInfo(79, false, false, "2h 58m left", HasBattery: true);
+        Assert(!BatteryService.ShouldRaiseBatteryAlert(b80, b79), "routine percent drift is suppressed");
+
+        // Routine battery drift while charging (50% -> 51%) -> suppressed
+        var c50 = new BatteryInfo(50, true, false, null, HasBattery: true);
+        var c51 = new BatteryInfo(51, true, false, null, HasBattery: true);
+        Assert(!BatteryService.ShouldRaiseBatteryAlert(c50, c51), "routine charging percent drift is suppressed");
+
+        // Charger connected (80% discharging -> 80% charging) -> raises alert
+        Assert(BatteryService.ShouldRaiseBatteryAlert(b80, new BatteryInfo(80, true, false, null, HasBattery: true)), "charger plug-in alerts");
+
+        // Charger disconnected (80% charging -> 80% discharging) -> raises alert
+        Assert(BatteryService.ShouldRaiseBatteryAlert(new BatteryInfo(80, true, false, null, HasBattery: true), b80), "charger unplug alerts");
+
+        // Battery saver toggled on -> raises alert
+        var saverOff = new BatteryInfo(60, false, false, "2h left", HasBattery: true);
+        var saverOn = new BatteryInfo(60, false, true, "2h 30m left", HasBattery: true);
+        Assert(BatteryService.ShouldRaiseBatteryAlert(saverOff, saverOn), "battery saver toggle alerts");
+
+        // Low-battery crossing: 21% -> 20% on discharge -> raises alert
+        var b21 = new BatteryInfo(21, false, false, "35m left", HasBattery: true);
+        var b20 = new BatteryInfo(20, false, false, "30m left", HasBattery: true);
+        Assert(BatteryService.ShouldRaiseBatteryAlert(b21, b20), "crossing <=20% raises alert");
+
+        // Duplicate low-battery alert: 20% -> 19% on discharge -> suppressed!
+        var b19 = new BatteryInfo(19, false, false, "28m left", HasBattery: true);
+        Assert(!BatteryService.ShouldRaiseBatteryAlert(b20, b19), "subsequent discharge at <=20% is suppressed");
+
+        // Continued discharge: 19% -> 15% -> suppressed!
+        var b15 = new BatteryInfo(15, false, false, "20m left", HasBattery: true);
+        Assert(!BatteryService.ShouldRaiseBatteryAlert(b19, b15), "further low discharge is suppressed");
+
+        // Low battery charging: 15% discharging -> 15% charging -> raises alert (plugged in)
+        var c15 = new BatteryInfo(15, true, false, null, HasBattery: true);
+        Assert(BatteryService.ShouldRaiseBatteryAlert(b15, c15), "charging at low battery raises alert");
+
+        // Unplugging while still low: 15% charging -> 15% discharging -> raises alert
+        Assert(BatteryService.ShouldRaiseBatteryAlert(c15, b15), "unplugging at low battery raises alert");
     }
 
     private static void TestTimerCommand()
