@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Net.Http;
 using System.Text.Json;
 using WindowsDynamicBar.Core.Logging;
+using WindowsDynamicBar.Core.Net;
 using WindowsDynamicBar.Core.Settings;
 
 namespace WindowsDynamicBar.Services.Weather;
@@ -92,7 +93,6 @@ public sealed class WeatherService : IDisposable
     private const string AirUrl = "https://air-quality-api.open-meteo.com/v1/air-quality";
     private const string GeocodeUrl = "https://geocoding-api.open-meteo.com/v1/search";
 
-    private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(20) };
     private readonly object _sync = new();
     private readonly CancellationTokenSource _cts = new();
     private System.Threading.Timer? _timer;
@@ -109,7 +109,6 @@ public sealed class WeatherService : IDisposable
 
     public WeatherService(SettingsService? settings = null)
     {
-        _http.DefaultRequestHeaders.UserAgent.ParseAdd("WindowsDynamicBar/1.0");
         _settings = settings ?? (App.Settings ?? SettingsService.Instance);
         if (_settings is not null)
         {
@@ -170,7 +169,8 @@ public sealed class WeatherService : IDisposable
                      "&hourly=temperature_2m,precipitation_probability,weather_code,uv_index" +
                      "&daily=sunrise,sunset&timezone=auto&forecast_days=2";
 
-        using var resp = await _http.GetAsync(url, token).ConfigureAwait(false);
+        using var deadline = SharedHttp.Deadline(TimeSpan.FromSeconds(20), token);
+        using var resp = await SharedHttp.Client.GetAsync(url, deadline.Token).ConfigureAwait(false);
         resp.EnsureSuccessStatusCode();
         using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(token).ConfigureAwait(false));
         var root = doc.RootElement;
@@ -310,10 +310,11 @@ public sealed class WeatherService : IDisposable
             try
             {
                 string geoUrl = $"{GeocodeUrl}?name={Uri.EscapeDataString(location)}&count=1&language=en&format=json";
-                using var resp = await _http.GetAsync(geoUrl, token).ConfigureAwait(false);
+                using var deadline = SharedHttp.Deadline(TimeSpan.FromSeconds(20), token);
+                using var resp = await SharedHttp.Client.GetAsync(geoUrl, deadline.Token).ConfigureAwait(false);
                 if (resp.IsSuccessStatusCode)
                 {
-                    using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(token).ConfigureAwait(false));
+                    using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(deadline.Token).ConfigureAwait(false));
                     var root = doc.RootElement;
                     if (root.TryGetProperty("results", out var resArr) && resArr.ValueKind == JsonValueKind.Array && resArr.GetArrayLength() > 0)
                     {
@@ -354,10 +355,11 @@ public sealed class WeatherService : IDisposable
         {
             try
             {
-                using var resp = await _http.GetAsync("https://ipwho.is/", token).ConfigureAwait(false);
+                using var deadline = SharedHttp.Deadline(TimeSpan.FromSeconds(20), token);
+                using var resp = await SharedHttp.Client.GetAsync("https://ipwho.is/", deadline.Token).ConfigureAwait(false);
                 if (resp.IsSuccessStatusCode)
                 {
-                    using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(token).ConfigureAwait(false));
+                    using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(deadline.Token).ConfigureAwait(false));
                     var root = doc.RootElement;
                     bool ok = !root.TryGetProperty("success", out var s) || s.ValueKind != JsonValueKind.False;
                     if (ok && TryCoords(root, out double la, out double lo))
@@ -371,10 +373,11 @@ public sealed class WeatherService : IDisposable
 
             try
             {
-                using var resp = await _http.GetAsync("https://ipapi.co/json/", token).ConfigureAwait(false);
+                using var deadline = SharedHttp.Deadline(TimeSpan.FromSeconds(20), token);
+                using var resp = await SharedHttp.Client.GetAsync("https://ipapi.co/json/", deadline.Token).ConfigureAwait(false);
                 if (resp.IsSuccessStatusCode)
                 {
-                    using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(token).ConfigureAwait(false));
+                    using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(deadline.Token).ConfigureAwait(false));
                     var root = doc.RootElement;
                     if (TryCoords(root, out double la, out double lo))
                     {
@@ -398,9 +401,10 @@ public sealed class WeatherService : IDisposable
         string url = $"{AirUrl}?latitude={lat.ToString("0.####", CultureInfo.InvariantCulture)}" +
                      $"&longitude={lon.ToString("0.####", CultureInfo.InvariantCulture)}" +
                      "&current=us_aqi&timezone=auto";
-        using var resp = await _http.GetAsync(url, token).ConfigureAwait(false);
+        using var deadline = SharedHttp.Deadline(TimeSpan.FromSeconds(20), token);
+        using var resp = await SharedHttp.Client.GetAsync(url, deadline.Token).ConfigureAwait(false);
         resp.EnsureSuccessStatusCode();
-        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(token).ConfigureAwait(false));
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(deadline.Token).ConfigureAwait(false));
         if (doc.RootElement.TryGetProperty("current", out var cur)
             && cur.TryGetProperty("us_aqi", out var aq) && aq.ValueKind == JsonValueKind.Number)
             return aq.GetDouble();
@@ -490,7 +494,6 @@ public sealed class WeatherService : IDisposable
         }
         try { _cts.Cancel(); } catch { }
         _timer?.Dispose();
-        _http.Dispose();
         _cts.Dispose();
     }
 }

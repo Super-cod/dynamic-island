@@ -9,6 +9,7 @@ using System.Net.NetworkInformation;
 using System.Threading;
 using System.Threading.Tasks;
 using WindowsDynamicBar.Core.Logging;
+using WindowsDynamicBar.Core.Net;
 using WindowsDynamicBar.Core.Settings;
 using WindowsDynamicBar.Core.Telemetry;
 using WindowsDynamicBar.Services.SystemInfo;
@@ -67,7 +68,6 @@ public sealed class NetworkMonitor : IDisposable
     private readonly SettingsService _settings;
     private readonly object _sync = new();
     private readonly System.Threading.Timer _timer;
-    private readonly HttpClient _http;
     private readonly CancellationTokenSource _disposeCts = new();
 
     private readonly TelemetryHistory _down = new(240);
@@ -96,8 +96,6 @@ public sealed class NetworkMonitor : IDisposable
     public NetworkMonitor(SettingsService settings)
     {
         _settings = settings;
-        _http = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
-        _http.DefaultRequestHeaders.UserAgent.ParseAdd("WindowsDynamicBar/1.0");
         foreach (NetTarget t in Enum.GetValues<NetTarget>())
         {
             _pingHistory[t] = new TelemetryHistory(240);
@@ -165,7 +163,6 @@ public sealed class NetworkMonitor : IDisposable
         try { CancelSpeedTest(); } catch { }
         _disposeCts.Cancel();
         _timer.Dispose();
-        _http.Dispose();
         _disposeCts.Dispose();
         Stop();
     }
@@ -482,7 +479,7 @@ public sealed class NetworkMonitor : IDisposable
         long lastReport = 0;
         try
         {
-            using var resp = await _http.GetAsync(
+            using var resp = await SharedHttp.Client.GetAsync(
                 "https://speed.cloudflare.com/__down?bytes=90000000",
                 HttpCompletionOption.ResponseHeadersRead, cts.Token).ConfigureAwait(false);
             resp.EnsureSuccessStatusCode();
@@ -561,7 +558,7 @@ public sealed class NetworkMonitor : IDisposable
                     catch (OperationCanceledException) { break; }
                 }
             });
-            using var resp = await _http.PostAsync("https://speed.cloudflare.com/__up", content, cts.Token).ConfigureAwait(false);
+            using var resp = await SharedHttp.Client.PostAsync("https://speed.cloudflare.com/__up", content, cts.Token).ConfigureAwait(false);
             sw.Stop();
             try { cts.Cancel(); } catch { }
             try { await reportTask.ConfigureAwait(false); } catch { }
@@ -619,7 +616,7 @@ public sealed class NetworkMonitor : IDisposable
         try
         {
             var sw = Stopwatch.StartNew();
-            using var resp = await _http.GetAsync("https://speed.cloudflare.com/__down?bytes=1",
+            using var resp = await SharedHttp.Client.GetAsync("https://speed.cloudflare.com/__down?bytes=1",
                 HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false);
             await resp.Content.ReadAsByteArrayAsync(token).ConfigureAwait(false);
             sw.Stop();

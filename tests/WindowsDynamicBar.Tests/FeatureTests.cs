@@ -1,6 +1,7 @@
 using System.IO;
 using WindowsDynamicBar.Core.Clipboard;
 using WindowsDynamicBar.Core.Events;
+using WindowsDynamicBar.Core.Net;
 using WindowsDynamicBar.Core.Settings;
 using WindowsDynamicBar.Core.Telemetry;
 using WindowsDynamicBar.Interop;
@@ -33,6 +34,7 @@ internal static partial class Program
         Run("BatteryInfo: desktop without battery, unknown flags, and remaining time parsing", TestBatteryInfoFromPowerStatus);
         Run("BatteryService: alert transitions and routine drift suppression", TestBatteryAlertTransitions);
         Run("BatteryService: alert publishing, priorities, durations, and FeatureBattery setting", TestBatteryAlertPublishing);
+        Run("SharedHttp: client configuration, pooling, and deadline cancellation", TestSharedHttpConfiguration);
         Run("LruCache never exceeds its limit and evicts least recently used", TestLruCache);
         Run("Settings: validation clamps bad values and broken hotkeys", TestSettingsValidation);
         Run("Settings: corrupt file is moved aside and defaults load", TestSettingsCorruption);
@@ -363,6 +365,32 @@ internal static partial class Program
         {
             settings.Update(s => s.FeatureBattery = origFeatureBattery);
         }
+    }
+
+    private static void TestSharedHttpConfiguration()
+    {
+        var client = SharedHttp.Client;
+        Assert(client != null, "SharedHttp.Client is initialized");
+        AssertEq(Timeout.InfiniteTimeSpan, client!.Timeout, "SharedHttp.Client has infinite timeout");
+        string ua = client.DefaultRequestHeaders.TryGetValues("User-Agent", out var values)
+            ? string.Join(" ", values)
+            : "";
+        Assert(ua.Contains("WindowsDynamicBar"), "User-Agent contains WindowsDynamicBar");
+        Assert(ua.Contains("github.com/dynamic-bar"), "User-Agent contains project repo link");
+
+        // Test deadline cancellation:
+        using var linkedCts = new CancellationTokenSource();
+        using var deadline = SharedHttp.Deadline(TimeSpan.FromMilliseconds(50), linkedCts.Token);
+        Assert(!deadline.Token.IsCancellationRequested, "deadline not cancelled initially");
+        Thread.Sleep(120);
+        Assert(deadline.Token.IsCancellationRequested, "deadline cancelled after timeout");
+
+        // Test linked outer cancellation:
+        using var outerCts = new CancellationTokenSource();
+        using var deadline2 = SharedHttp.Deadline(TimeSpan.FromMinutes(10), outerCts.Token);
+        Assert(!deadline2.Token.IsCancellationRequested, "deadline2 not cancelled initially");
+        outerCts.Cancel();
+        Assert(deadline2.Token.IsCancellationRequested, "deadline2 cancelled immediately on outer token cancellation");
     }
 
     private static void TestTimerCommand()
