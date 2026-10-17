@@ -2,6 +2,7 @@ using System.Runtime.InteropServices;
 using WindowsDynamicBar.Core.Events;
 using WindowsDynamicBar.Core.Logging;
 using WindowsDynamicBar.Core.Settings;
+using WindowsDynamicBar.Interop;
 
 namespace WindowsDynamicBar.Services.SystemInfo;
 
@@ -102,8 +103,7 @@ public sealed class BatteryService : IDisposable
     {
         try
         {
-            var spsi = new SYSTEM_POWER_STATUS();
-            if (GetSystemPowerStatus(ref spsi))
+            if (NativeMethods.GetSystemPowerStatus(out var spsi))
             {
                 double percent = spsi.BatteryLifePercent == 255 ? 0 : spsi.BatteryLifePercent;
                 bool charging = (spsi.ACLineStatus == 1);
@@ -123,19 +123,6 @@ public sealed class BatteryService : IDisposable
         catch (Exception ex) { Log.Debug("Battery query failed", ("error", ex.Message)); }
         return new BatteryInfo(0, false, false, null);
     }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct SYSTEM_POWER_STATUS
-    {
-        public byte ACLineStatus;
-        public byte BatteryFlag;
-        public byte BatteryLifePercent;
-        public byte SystemStatusFlag;
-        public int BatteryLifeTime;
-        public int BatteryFullLifeTime;
-    }
-
-    [DllImport("kernel32.dll")] private static extern bool GetSystemPowerStatus(ref SYSTEM_POWER_STATUS sps);
 
     public void Dispose()
     {

@@ -252,11 +252,11 @@ public sealed class SystemTelemetryService : IDisposable
         {
             if (_cpuQuery == IntPtr.Zero)
             {
-                if (PdhOpenQueryW(null, IntPtr.Zero, out _cpuQuery) == 0 &&
-                    PdhAddEnglishCounterW(_cpuQuery, @"\Processor(_Total)\% Processor Time",
+                if (NativeMethods.PdhOpenQueryW(null, IntPtr.Zero, out _cpuQuery) == 0 &&
+                    NativeMethods.PdhAddEnglishCounterW(_cpuQuery, @"\Processor(_Total)\% Processor Time",
                         IntPtr.Zero, out _cpuCounter) == 0)
                 {
-                    PdhCollectQueryData(_cpuQuery);
+                    NativeMethods.PdhCollectQueryData(_cpuQuery);
                     _cpuAvailable = true;
                 }
                 else _cpuAvailable = false;
@@ -264,11 +264,11 @@ public sealed class SystemTelemetryService : IDisposable
 
             if (_cpuCoresQuery == IntPtr.Zero)
             {
-                if (PdhOpenQueryW(null, IntPtr.Zero, out _cpuCoresQuery) == 0 &&
-                    PdhAddEnglishCounterW(_cpuCoresQuery, @"\Processor(*)\% Processor Time",
+                if (NativeMethods.PdhOpenQueryW(null, IntPtr.Zero, out _cpuCoresQuery) == 0 &&
+                    NativeMethods.PdhAddEnglishCounterW(_cpuCoresQuery, @"\Processor(*)\% Processor Time",
                         IntPtr.Zero, out _cpuCoresCounter) == 0)
                 {
-                    PdhCollectQueryData(_cpuCoresQuery);
+                    NativeMethods.PdhCollectQueryData(_cpuCoresQuery);
                     _cpuCoresAvailable = true;
                 }
                 else
@@ -280,11 +280,11 @@ public sealed class SystemTelemetryService : IDisposable
 
             if (!_engineExpanded)
             {
-                if (PdhOpenQueryW(null, IntPtr.Zero, out _engineQuery) == 0 &&
-                    PdhAddEnglishCounterW(_engineQuery, @"\GPU Engine(*)\Utilization Percentage",
+                if (NativeMethods.PdhOpenQueryW(null, IntPtr.Zero, out _engineQuery) == 0 &&
+                    NativeMethods.PdhAddEnglishCounterW(_engineQuery, @"\GPU Engine(*)\Utilization Percentage",
                         IntPtr.Zero, out _gpuEngineCounter) == 0)
                 {
-                    PdhCollectQueryData(_engineQuery);
+                    NativeMethods.PdhCollectQueryData(_engineQuery);
                     _engineExpanded = true;
                 }
                 else
@@ -297,13 +297,13 @@ public sealed class SystemTelemetryService : IDisposable
             if (_memQuery == IntPtr.Zero)
             {
                 var memInstances = ExpandInstances(@"\GPU Adapter Memory(*)\Dedicated Usage");
-                if (memInstances.Count > 0 && PdhOpenQueryW(null, IntPtr.Zero, out _memQuery) == 0)
+                if (memInstances.Count > 0 && NativeMethods.PdhOpenQueryW(null, IntPtr.Zero, out _memQuery) == 0)
                 {
                     foreach (string inst in memInstances)
                     {
-                        if (PdhAddEnglishCounterW(_memQuery, $@"\GPU Adapter Memory({inst})\Dedicated Usage",
+                        if (NativeMethods.PdhAddEnglishCounterW(_memQuery, $@"\GPU Adapter Memory({inst})\Dedicated Usage",
                                 IntPtr.Zero, out IntPtr u) == 0 &&
-                            PdhAddEnglishCounterW(_memQuery, $@"\GPU Adapter Memory({inst})\Dedicated Limit",
+                            NativeMethods.PdhAddEnglishCounterW(_memQuery, $@"\GPU Adapter Memory({inst})\Dedicated Limit",
                                 IntPtr.Zero, out IntPtr l) == 0)
                         {
                             long luid = 0;
@@ -314,7 +314,7 @@ public sealed class SystemTelemetryService : IDisposable
                     }
                     if (_vramCounters.Count > 0)
                     {
-                        PdhCollectQueryData(_memQuery);
+                        NativeMethods.PdhCollectQueryData(_memQuery);
                         _vramAvailable = true;
                     }
                 }
@@ -322,13 +322,13 @@ public sealed class SystemTelemetryService : IDisposable
 
             if (_diskQuery == IntPtr.Zero)
             {
-                if (PdhOpenQueryW(null, IntPtr.Zero, out _diskQuery) == 0 &&
-                    PdhAddEnglishCounterW(_diskQuery, @"\PhysicalDisk(_Total)\Disk Read Bytes/sec",
+                if (NativeMethods.PdhOpenQueryW(null, IntPtr.Zero, out _diskQuery) == 0 &&
+                    NativeMethods.PdhAddEnglishCounterW(_diskQuery, @"\PhysicalDisk(_Total)\Disk Read Bytes/sec",
                         IntPtr.Zero, out _diskReadCounter) == 0 &&
-                    PdhAddEnglishCounterW(_diskQuery, @"\PhysicalDisk(_Total)\Disk Write Bytes/sec",
+                    NativeMethods.PdhAddEnglishCounterW(_diskQuery, @"\PhysicalDisk(_Total)\Disk Write Bytes/sec",
                         IntPtr.Zero, out _diskWriteCounter) == 0)
                 {
-                    PdhCollectQueryData(_diskQuery);
+                    NativeMethods.PdhCollectQueryData(_diskQuery);
                     _diskAvailable = true;
                 }
                 else _diskAvailable = false;
@@ -337,23 +337,23 @@ public sealed class SystemTelemetryService : IDisposable
             if (_thermalQuery == IntPtr.Zero)
             {
                 var zones = ExpandInstances(@"\Thermal Zone Information(*)\Temperature");
-                if (zones.Count > 0 && PdhOpenQueryW(null, IntPtr.Zero, out _thermalQuery) == 0)
+                if (zones.Count > 0 && NativeMethods.PdhOpenQueryW(null, IntPtr.Zero, out _thermalQuery) == 0)
                 {
                     foreach (string z in zones)
-                        if (PdhAddEnglishCounterW(_thermalQuery, $@"\Thermal Zone Information({z})\Temperature",
+                        if (NativeMethods.PdhAddEnglishCounterW(_thermalQuery, $@"\Thermal Zone Information({z})\Temperature",
                                 IntPtr.Zero, out IntPtr tc) == 0)
                             _thermalCounters.Add(tc);
-                    if (_thermalCounters.Count > 0) PdhCollectQueryData(_thermalQuery);
+                    if (_thermalCounters.Count > 0) NativeMethods.PdhCollectQueryData(_thermalQuery);
                 }
             }
 
             if (_sysMemQuery == IntPtr.Zero)
             {
-                if (PdhOpenQueryW(null, IntPtr.Zero, out _sysMemQuery) == 0 &&
-                    PdhAddEnglishCounterW(_sysMemQuery, @"\Memory\Cache Bytes",
+                if (NativeMethods.PdhOpenQueryW(null, IntPtr.Zero, out _sysMemQuery) == 0 &&
+                    NativeMethods.PdhAddEnglishCounterW(_sysMemQuery, @"\Memory\Cache Bytes",
                         IntPtr.Zero, out _cacheCounter) == 0)
                 {
-                    PdhCollectQueryData(_sysMemQuery);
+                    NativeMethods.PdhCollectQueryData(_sysMemQuery);
                     _cacheAvailable = true;
                 }
                 else _cacheAvailable = false;
@@ -445,9 +445,9 @@ public sealed class SystemTelemetryService : IDisposable
     private void SampleCpu()
     {
         if (!_cpuAvailable || _cpuQuery == IntPtr.Zero) return;
-        PdhCollectQueryData(_cpuQuery);
-        var buf = new PDH_FMT_COUNTERVALUE_DOUBLE[1];
-        if (PdhGetFormattedCounterValue(_cpuCounter, 0x00000200, out _, buf) == 0)
+        NativeMethods.PdhCollectQueryData(_cpuQuery);
+        var buf = new NativeMethods.PDH_FMT_COUNTERVALUE_DOUBLE[1];
+        if (NativeMethods.PdhGetFormattedCounterValue(_cpuCounter, NativeMethods.PDH_FMT_DOUBLE, out _, buf) == 0)
             _cpu = Math.Round(Math.Clamp(buf[0].doubleValue, 0, 100), 1);
     }
 
@@ -456,16 +456,16 @@ public sealed class SystemTelemetryService : IDisposable
         if (!_cpuCoresAvailable || _cpuCoresQuery == IntPtr.Zero || _cpuCoresCounter == IntPtr.Zero)
             return;
 
-        PdhCollectQueryData(_cpuCoresQuery);
+        NativeMethods.PdhCollectQueryData(_cpuCoresQuery);
         uint bufferSize = 0, itemCount = 0;
-        int status = PdhGetFormattedCounterArrayW(_cpuCoresCounter, 0x00000200 /*PDH_FMT_DOUBLE*/,
+        int status = NativeMethods.PdhGetFormattedCounterArrayW(_cpuCoresCounter, NativeMethods.PDH_FMT_DOUBLE,
             ref bufferSize, ref itemCount, IntPtr.Zero);
-        if (status != PDH_MORE_DATA || itemCount == 0) return;
+        if (status != NativeMethods.PDH_MORE_DATA || itemCount == 0) return;
 
         IntPtr pBuf = Marshal.AllocHGlobal((int)bufferSize);
         try
         {
-            status = PdhGetFormattedCounterArrayW(_cpuCoresCounter, 0x00000200,
+            status = NativeMethods.PdhGetFormattedCounterArrayW(_cpuCoresCounter, NativeMethods.PDH_FMT_DOUBLE,
                 ref bufferSize, ref itemCount, pBuf);
             if (status != 0) return;
 
@@ -492,16 +492,16 @@ public sealed class SystemTelemetryService : IDisposable
         var engines = new Dictionary<long, GpuEngineParser.EngineBreakdown>();
         if (_engineQuery != IntPtr.Zero && _gpuEngineCounter != IntPtr.Zero)
         {
-            PdhCollectQueryData(_engineQuery);
+            NativeMethods.PdhCollectQueryData(_engineQuery);
             uint bufferSize = 0, itemCount = 0;
-            int status = PdhGetFormattedCounterArrayW(_gpuEngineCounter, 0x00000200 /*PDH_FMT_DOUBLE*/,
+            int status = NativeMethods.PdhGetFormattedCounterArrayW(_gpuEngineCounter, NativeMethods.PDH_FMT_DOUBLE,
                 ref bufferSize, ref itemCount, IntPtr.Zero);
-            if (status == unchecked((int)0x800007D2) && itemCount > 0)
+            if (status == NativeMethods.PDH_MORE_DATA && itemCount > 0)
             {
                 IntPtr pBuf = Marshal.AllocHGlobal((int)bufferSize);
                 try
                 {
-                    status = PdhGetFormattedCounterArrayW(_gpuEngineCounter, 0x00000200,
+                    status = NativeMethods.PdhGetFormattedCounterArrayW(_gpuEngineCounter, NativeMethods.PDH_FMT_DOUBLE,
                         ref bufferSize, ref itemCount, pBuf);
                     if (status == 0)
                     {
@@ -573,14 +573,14 @@ public sealed class SystemTelemetryService : IDisposable
 
         if (_vramAvailable && _memQuery != IntPtr.Zero && _vramCounters.Count > 0)
         {
-            PdhCollectQueryData(_memQuery);
+            NativeMethods.PdhCollectQueryData(_memQuery);
             for (int i = 0; i < _vramCounters.Count; i++)
             {
                 var vc = _vramCounters[i];
-                var ub = new PDH_FMT_COUNTERVALUE_DOUBLE[1];
-                var lb = new PDH_FMT_COUNTERVALUE_DOUBLE[1];
-                if (PdhGetFormattedCounterValue(vc.Usage, 0x00000200, out _, ub) != 0) continue;
-                if (PdhGetFormattedCounterValue(vc.Limit, 0x00000200, out _, lb) != 0) continue;
+                var ub = new NativeMethods.PDH_FMT_COUNTERVALUE_DOUBLE[1];
+                var lb = new NativeMethods.PDH_FMT_COUNTERVALUE_DOUBLE[1];
+                if (NativeMethods.PdhGetFormattedCounterValue(vc.Usage, NativeMethods.PDH_FMT_DOUBLE, out _, ub) != 0) continue;
+                if (NativeMethods.PdhGetFormattedCounterValue(vc.Limit, NativeMethods.PDH_FMT_DOUBLE, out _, lb) != 0) continue;
                 var track = _gpuTracks.FirstOrDefault(t => t.Luid == vc.Luid)
                          ?? (i < _gpuTracks.Count ? _gpuTracks[i] : null);
                 if (track != null)
@@ -601,11 +601,11 @@ public sealed class SystemTelemetryService : IDisposable
 
     private void SampleMemory()
     {
-        var mi = new MEMORYSTATUSEX
+        var mi = new NativeMethods.MEMORYSTATUSEX
         {
-            dwLength = (uint)Marshal.SizeOf<MEMORYSTATUSEX>()
+            dwLength = (uint)Marshal.SizeOf<NativeMethods.MEMORYSTATUSEX>()
         };
-        if (GlobalMemoryStatusEx(ref mi))
+        if (NativeMethods.GlobalMemoryStatusEx(ref mi))
         {
             _ramTotal = (long)mi.ullTotalPhys;
             long avail = (long)mi.ullAvailPhys;
@@ -624,22 +624,22 @@ public sealed class SystemTelemetryService : IDisposable
     {
         if (_diskAvailable && _diskQuery != IntPtr.Zero)
         {
-            PdhCollectQueryData(_diskQuery);
-            var rb = new PDH_FMT_COUNTERVALUE_DOUBLE[1];
-            if (PdhGetFormattedCounterValue(_diskReadCounter, 0x00000200, out _, rb) == 0)
+            NativeMethods.PdhCollectQueryData(_diskQuery);
+            var rb = new NativeMethods.PDH_FMT_COUNTERVALUE_DOUBLE[1];
+            if (NativeMethods.PdhGetFormattedCounterValue(_diskReadCounter, NativeMethods.PDH_FMT_DOUBLE, out _, rb) == 0)
                 _diskRead = (long)Math.Max(0, rb[0].doubleValue);
-            var wb = new PDH_FMT_COUNTERVALUE_DOUBLE[1];
-            if (PdhGetFormattedCounterValue(_diskWriteCounter, 0x00000200, out _, wb) == 0)
+            var wb = new NativeMethods.PDH_FMT_COUNTERVALUE_DOUBLE[1];
+            if (NativeMethods.PdhGetFormattedCounterValue(_diskWriteCounter, NativeMethods.PDH_FMT_DOUBLE, out _, wb) == 0)
                 _diskWrite = (long)Math.Max(0, wb[0].doubleValue);
         }
         if (_thermalCounters.Count > 0 && _thermalQuery != IntPtr.Zero)
         {
-            PdhCollectQueryData(_thermalQuery);
+            NativeMethods.PdhCollectQueryData(_thermalQuery);
             double? hottest = null;
             foreach (IntPtr tc in _thermalCounters)
             {
-                var tb = new PDH_FMT_COUNTERVALUE_DOUBLE[1];
-                if (PdhGetFormattedCounterValue(tc, 0x00000200, out _, tb) != 0) continue;
+                var tb = new NativeMethods.PDH_FMT_COUNTERVALUE_DOUBLE[1];
+                if (NativeMethods.PdhGetFormattedCounterValue(tc, NativeMethods.PDH_FMT_DOUBLE, out _, tb) != 0) continue;
                 double c = tb[0].doubleValue - 273.15;              // Kelvin -> Celsius
                 if (c is > -40 and < 150) hottest = Math.Max(hottest ?? double.MinValue, c);
             }
@@ -647,9 +647,9 @@ public sealed class SystemTelemetryService : IDisposable
         }
         if (_cacheAvailable && _sysMemQuery != IntPtr.Zero)
         {
-            PdhCollectQueryData(_sysMemQuery);
-            var cb = new PDH_FMT_COUNTERVALUE_DOUBLE[1];
-            if (PdhGetFormattedCounterValue(_cacheCounter, 0x00000200, out _, cb) == 0)
+            NativeMethods.PdhCollectQueryData(_sysMemQuery);
+            var cb = new NativeMethods.PDH_FMT_COUNTERVALUE_DOUBLE[1];
+            if (NativeMethods.PdhGetFormattedCounterValue(_cacheCounter, NativeMethods.PDH_FMT_DOUBLE, out _, cb) == 0)
                 _ramCache = (long)Math.Max(0, cb[0].doubleValue);
         }
     }
@@ -737,13 +737,13 @@ public sealed class SystemTelemetryService : IDisposable
         try
         {
             uint size = 0;
-            int status = PdhExpandWildCardPathW(null, wildcard, IntPtr.Zero, ref size, 0);
-            if (status != 0 && status != PDH_MORE_DATA) return list;
+            int status = NativeMethods.PdhExpandWildCardPathW(null, wildcard, IntPtr.Zero, ref size, 0);
+            if (status != 0 && status != NativeMethods.PDH_MORE_DATA) return list;
             if (size == 0) return list;
             IntPtr p = Marshal.AllocHGlobal((int)size * 2 + 8);
             try
             {
-                status = PdhExpandWildCardPathW(null, wildcard, p, ref size, 0);
+                status = NativeMethods.PdhExpandWildCardPathW(null, wildcard, p, ref size, 0);
                 if (status != 0) return list;
                 int offset = 0;
                 while (offset < (int)size * 2)
@@ -765,56 +765,22 @@ public sealed class SystemTelemetryService : IDisposable
         return list;
     }
 
-    private const int PDH_MORE_DATA = unchecked((int)0x800007D2);
-
     public void Dispose()
     {
         Deactivate();
         lock (_sync)
         {
-            if (_cpuQuery != IntPtr.Zero) { PdhCloseQuery(_cpuQuery); _cpuQuery = IntPtr.Zero; }
-            if (_cpuCoresQuery != IntPtr.Zero) { PdhCloseQuery(_cpuCoresQuery); _cpuCoresQuery = IntPtr.Zero; }
-            if (_engineQuery != IntPtr.Zero) { PdhCloseQuery(_engineQuery); _engineQuery = IntPtr.Zero; }
-            if (_memQuery != IntPtr.Zero) { PdhCloseQuery(_memQuery); _memQuery = IntPtr.Zero; }
-            if (_diskQuery != IntPtr.Zero) { PdhCloseQuery(_diskQuery); _diskQuery = IntPtr.Zero; }
-            if (_sysMemQuery != IntPtr.Zero) { PdhCloseQuery(_sysMemQuery); _sysMemQuery = IntPtr.Zero; }
-            if (_thermalQuery != IntPtr.Zero) { PdhCloseQuery(_thermalQuery); _thermalQuery = IntPtr.Zero; }
+            if (_cpuQuery != IntPtr.Zero) { NativeMethods.PdhCloseQuery(_cpuQuery); _cpuQuery = IntPtr.Zero; }
+            if (_cpuCoresQuery != IntPtr.Zero) { NativeMethods.PdhCloseQuery(_cpuCoresQuery); _cpuCoresQuery = IntPtr.Zero; }
+            if (_engineQuery != IntPtr.Zero) { NativeMethods.PdhCloseQuery(_engineQuery); _engineQuery = IntPtr.Zero; }
+            if (_memQuery != IntPtr.Zero) { NativeMethods.PdhCloseQuery(_memQuery); _memQuery = IntPtr.Zero; }
+            if (_diskQuery != IntPtr.Zero) { NativeMethods.PdhCloseQuery(_diskQuery); _diskQuery = IntPtr.Zero; }
+            if (_sysMemQuery != IntPtr.Zero) { NativeMethods.PdhCloseQuery(_sysMemQuery); _sysMemQuery = IntPtr.Zero; }
+            if (_thermalQuery != IntPtr.Zero) { NativeMethods.PdhCloseQuery(_thermalQuery); _thermalQuery = IntPtr.Zero; }
             _thermalCounters.Clear();
             _vramCounters.Clear();
             _nvml.Dispose();
         }
         _load.Dispose();
     }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct PDH_FMT_COUNTERVALUE_DOUBLE { public int status; public double doubleValue; }
-
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    private struct MEMORYSTATUSEX
-    {
-        public uint dwLength;
-        public uint dwMemoryLoad;
-        public ulong ullTotalPhys, ullAvailPhys, ullTotalPageFile, ullAvailPageFile;
-        public ulong ullTotalVirtual, ullAvailVirtual, ullAvailExtendedVirtual;
-    }
-
-    [DllImport("pdh.dll", CharSet = CharSet.Unicode)]
-    private static extern int PdhOpenQueryW(string? source, IntPtr userData, out IntPtr query);
-    [DllImport("pdh.dll", CharSet = CharSet.Unicode)]
-    private static extern int PdhAddEnglishCounterW(IntPtr query, string counterPath, IntPtr userData, out IntPtr counter);
-    [DllImport("pdh.dll")]
-    private static extern int PdhCollectQueryData(IntPtr query);
-    [DllImport("pdh.dll")]
-    private static extern int PdhGetFormattedCounterValue(IntPtr counter, int format, out int type,
-        [Out] PDH_FMT_COUNTERVALUE_DOUBLE[] value);
-    [DllImport("pdh.dll", CharSet = CharSet.Unicode)]
-    private static extern int PdhGetFormattedCounterArrayW(IntPtr counter, int format, ref uint bufferSize, ref uint itemCount, IntPtr buffer);
-    [DllImport("pdh.dll")]
-    private static extern int PdhCloseQuery(IntPtr query);
-    [DllImport("pdh.dll", CharSet = CharSet.Unicode)]
-    private static extern int PdhExpandWildCardPathW(string? szDataSource, string szWildCardPath,
-        IntPtr mszExpandedPathList, ref uint pcchPathListLength, uint dwFlags);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX lpBuffer);
 }

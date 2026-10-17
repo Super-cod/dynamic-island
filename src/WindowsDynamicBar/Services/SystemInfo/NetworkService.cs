@@ -1,6 +1,7 @@
 using WindowsDynamicBar.Core.Events;
 using WindowsDynamicBar.Core.Logging;
 using WindowsDynamicBar.Core.Settings;
+using WindowsDynamicBar.Interop;
 
 namespace WindowsDynamicBar.Services.SystemInfo;
 
@@ -105,10 +106,10 @@ public sealed class NetworkService : IDisposable
         // never fabricate a signal level.
         try
         {
-            if (WlanOpenHandle(2, IntPtr.Zero, out _, out IntPtr handle) != 0) return null;
+            if (NativeMethods.WlanOpenHandle(2, IntPtr.Zero, out _, out IntPtr handle) != 0) return null;
             try
             {
-                if (WlanEnumInterfaces(handle, IntPtr.Zero, out IntPtr list) != 0 || list == IntPtr.Zero)
+                if (NativeMethods.WlanEnumInterfaces(handle, IntPtr.Zero, out IntPtr list) != 0 || list == IntPtr.Zero)
                     return null;
                 try
                 {
@@ -121,19 +122,19 @@ public sealed class NetworkService : IDisposable
                         int state = System.Runtime.InteropServices.Marshal.ReadInt32(entry, 16 + 512);
                         if (state != 1 /* wlan_interface_state_connected */) continue;
                         Guid guid = System.Runtime.InteropServices.Marshal.PtrToStructure<Guid>(entry);
-                        if (WlanQueryInterface(handle, ref guid, 9 /* wlan_intf_opcode_rssi */,
+                        if (NativeMethods.WlanQueryInterface(handle, ref guid, 9 /* wlan_intf_opcode_rssi */,
                                 IntPtr.Zero, out uint size, out IntPtr data, IntPtr.Zero) == 0
                             && data != IntPtr.Zero)
                         {
                             try { return System.Runtime.InteropServices.Marshal.ReadInt32(data); }
-                            finally { WlanFreeMemory(data); }
+                            finally { NativeMethods.WlanFreeMemory(data); }
                         }
                     }
                     return null;
                 }
-                finally { WlanFreeMemory(list); }
+                finally { NativeMethods.WlanFreeMemory(list); }
             }
-            finally { WlanCloseHandle(handle, IntPtr.Zero); }
+            finally { NativeMethods.WlanCloseHandle(handle, IntPtr.Zero); }
         }
         catch { return null; }
     }
@@ -148,19 +149,6 @@ public sealed class NetworkService : IDisposable
         >= -80 => 1,
         _ => 0,
     };
-
-    [System.Runtime.InteropServices.DllImport("wlanapi.dll")]
-    private static extern uint WlanOpenHandle(uint clientVersion, IntPtr reserved,
-        out uint negotiatedVersion, out IntPtr handle);
-    [System.Runtime.InteropServices.DllImport("wlanapi.dll")]
-    private static extern uint WlanEnumInterfaces(IntPtr handle, IntPtr reserved, out IntPtr list);
-    [System.Runtime.InteropServices.DllImport("wlanapi.dll")]
-    private static extern uint WlanQueryInterface(IntPtr handle, ref Guid guid, int opcode,
-        IntPtr reserved, out uint dataSize, out IntPtr data, IntPtr dataType);
-    [System.Runtime.InteropServices.DllImport("wlanapi.dll")]
-    private static extern void WlanFreeMemory(IntPtr memory);
-    [System.Runtime.InteropServices.DllImport("wlanapi.dll")]
-    private static extern uint WlanCloseHandle(IntPtr handle, IntPtr reserved);
 
     public void Dispose()
     {

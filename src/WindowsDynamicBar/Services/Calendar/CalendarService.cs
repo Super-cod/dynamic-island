@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using Windows.ApplicationModel.Appointments;
 using WindowsDynamicBar.Core.Logging;
+using WindowsDynamicBar.Interop;
 
 namespace WindowsDynamicBar.Services.Calendar;
 
@@ -124,17 +125,10 @@ public sealed class CalendarService
 
     // ---------------------------------------------------------------- classic Outlook (COM / MAPI)
 
-    [DllImport("ole32.dll", CharSet = CharSet.Unicode)]
-    private static extern int CLSIDFromProgID(string progId, out Guid clsid);
-
-    [DllImport("oleaut32.dll")]
-    private static extern int GetActiveObject(ref Guid clsid, IntPtr reserved,
-        [MarshalAs(UnmanagedType.IUnknown)] out object? unknown);
-
     private static (bool, CalendarEvent?) QueryRunningOutlook(DateTime now, DateTime end)
     {
-        if (CLSIDFromProgID("Outlook.Application", out Guid clsid) != 0) return (false, null);
-        if (GetActiveObject(ref clsid, IntPtr.Zero, out object? app) != 0 || app is null) return (false, null);
+        if (NativeMethods.CLSIDFromProgID("Outlook.Application", out Guid clsid) != 0) return (false, null);
+        if (NativeMethods.GetActiveObject(ref clsid, IntPtr.Zero, out object? app) != 0 || app is null) return (false, null);
 
         dynamic? ns = null, folder = null, items = null, restricted = null;
         try

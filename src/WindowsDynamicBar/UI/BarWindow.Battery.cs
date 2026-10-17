@@ -2,6 +2,7 @@ using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Media;
 using WindowsDynamicBar.Core.Logging;
+using WindowsDynamicBar.Interop;
 
 namespace WindowsDynamicBar.UI;
 
@@ -37,16 +38,16 @@ public partial class BarWindow
         UpdateBatteryChips();
         if (!_hasBattery || _hwnd == IntPtr.Zero) return;
         Guid pct = GuidBatteryPercentage, ac = GuidAcDcPowerSource;
-        _powerNotifyPercent = RegisterPowerSettingNotification(_hwnd, ref pct, 0 /* DEVICE_NOTIFY_WINDOW_HANDLE */);
-        _powerNotifyAc = RegisterPowerSettingNotification(_hwnd, ref ac, 0);
+        _powerNotifyPercent = NativeMethods.RegisterPowerSettingNotification(_hwnd, ref pct, 0 /* DEVICE_NOTIFY_WINDOW_HANDLE */);
+        _powerNotifyAc = NativeMethods.RegisterPowerSettingNotification(_hwnd, ref ac, 0);
         if (_powerNotifyPercent == IntPtr.Zero || _powerNotifyAc == IntPtr.Zero)
             Log.Info("Battery change notifications unavailable; chip updates on power status events only");
     }
 
     private void StopBatteryNotifications()
     {
-        if (_powerNotifyPercent != IntPtr.Zero) { UnregisterPowerSettingNotification(_powerNotifyPercent); _powerNotifyPercent = IntPtr.Zero; }
-        if (_powerNotifyAc != IntPtr.Zero) { UnregisterPowerSettingNotification(_powerNotifyAc); _powerNotifyAc = IntPtr.Zero; }
+        if (_powerNotifyPercent != IntPtr.Zero) { NativeMethods.UnregisterPowerSettingNotification(_powerNotifyPercent); _powerNotifyPercent = IntPtr.Zero; }
+        if (_powerNotifyAc != IntPtr.Zero) { NativeMethods.UnregisterPowerSettingNotification(_powerNotifyAc); _powerNotifyAc = IntPtr.Zero; }
     }
 
     /// <summary>WM_POWERBROADCAST: true when it was a battery/AC change we care about.</summary>
@@ -65,7 +66,7 @@ public partial class BarWindow
 #if DEBUG
         if (_battSim is { } sim) { _hasBattery = true; _battPct = sim.Pct; _battOnAc = sim.OnAc; return; }
 #endif
-        if (!GetSystemPowerStatus(out var s)) { _hasBattery = false; return; }
+        if (!NativeMethods.GetSystemPowerStatus(out var s)) { _hasBattery = false; return; }
         // BatteryFlag 128 = no system battery, 255 = unknown status.
         _hasBattery = s.BatteryFlag != 128 && s.BatteryFlag != 255 && s.BatteryLifePercent != 255;
         _battPct = _hasBattery ? s.BatteryLifePercent : -1;
@@ -101,19 +102,4 @@ public partial class BarWindow
             return level switch { 10 => "", 9 => "", _ => ((char)(0xE85A + level)).ToString() };
         return level == 10 ? "" : ((char)(0xE850 + level)).ToString();
     }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct SYSTEM_POWER_STATUS
-    {
-        public byte ACLineStatus;
-        public byte BatteryFlag;
-        public byte BatteryLifePercent;
-        public byte SystemStatusFlag;
-        public int BatteryLifeTime;
-        public int BatteryFullLifeTime;
-    }
-
-    [DllImport("kernel32.dll")] private static extern bool GetSystemPowerStatus(out SYSTEM_POWER_STATUS status);
-    [DllImport("user32.dll")] private static extern IntPtr RegisterPowerSettingNotification(IntPtr recipient, ref Guid powerSetting, int flags);
-    [DllImport("user32.dll")] private static extern bool UnregisterPowerSettingNotification(IntPtr handle);
 }

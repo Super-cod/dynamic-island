@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using WindowsDynamicBar.Core.Logging;
 using WindowsDynamicBar.Core.Settings;
+using WindowsDynamicBar.Interop;
 
 namespace WindowsDynamicBar.Services.SystemMonitor;
 
@@ -43,8 +44,8 @@ public sealed class SystemMonitorService : IDisposable
     public SystemMonitorService(SettingsService settings)
     {
         _settings = settings;
-        var mi = new MEMORYSTATUSEX { dwLength = (uint)System.Runtime.InteropServices.Marshal.SizeOf<MEMORYSTATUSEX>() };
-        if (GlobalMemoryStatusEx(ref mi)) { _totalPhys = (long)mi.ullTotalPhys; }
+        var mi = new NativeMethods.MEMORYSTATUSEX { dwLength = (uint)System.Runtime.InteropServices.Marshal.SizeOf<NativeMethods.MEMORYSTATUSEX>() };
+        if (NativeMethods.GlobalMemoryStatusEx(ref mi)) { _totalPhys = (long)mi.ullTotalPhys; }
     }
 
     public void StartCounters()
@@ -52,18 +53,18 @@ public sealed class SystemMonitorService : IDisposable
         if (_cpuQuery != IntPtr.Zero) return;
         try
         {
-            if (PdhOpenQueryW(null, IntPtr.Zero, out _cpuQuery) == 0 &&
-                PdhAddEnglishCounterW(_cpuQuery, @"\Processor(_Total)\% Processor Time", IntPtr.Zero, out _cpuCounter) == 0)
+            if (NativeMethods.PdhOpenQueryW(null, IntPtr.Zero, out _cpuQuery) == 0 &&
+                NativeMethods.PdhAddEnglishCounterW(_cpuQuery, @"\Processor(_Total)\% Processor Time", IntPtr.Zero, out _cpuCounter) == 0)
             {
-                PdhCollectQueryData(_cpuQuery); // prime (first read is always 0)
+                NativeMethods.PdhCollectQueryData(_cpuQuery); // prime (first read is always 0)
                 _cpuAvailable = true;
             }
             else { _cpuAvailable = false; }
 
-            if (PdhOpenQueryW(null, IntPtr.Zero, out _gpuQuery) == 0 &&
-                PdhAddEnglishCounterW(_gpuQuery, @"\GPU Engine(*)\Utilization Percentage", IntPtr.Zero, out _gpuCounter) == 0)
+            if (NativeMethods.PdhOpenQueryW(null, IntPtr.Zero, out _gpuQuery) == 0 &&
+                NativeMethods.PdhAddEnglishCounterW(_gpuQuery, @"\GPU Engine(*)\Utilization Percentage", IntPtr.Zero, out _gpuCounter) == 0)
             {
-                PdhCollectQueryData(_gpuQuery);
+                NativeMethods.PdhCollectQueryData(_gpuQuery);
                 _gpuAvailable = true;
             }
             else { _gpuAvailable = false; Log.Info("GPU counters unavailable"); }
@@ -107,24 +108,24 @@ public sealed class SystemMonitorService : IDisposable
             double cpu = _cpu;
             if (_cpuAvailable)
             {
-                PdhCollectQueryData(_cpuQuery);
-                var buf = new PDH_FMT_COUNTERVALUE_DOUBLE[1];
-                if (PdhGetFormattedCounterValue(_cpuCounter, 0x00000200 /*PDH_FMT_DOUBLE*/, out _, buf) == 0)
+                NativeMethods.PdhCollectQueryData(_cpuQuery);
+                var buf = new NativeMethods.PDH_FMT_COUNTERVALUE_DOUBLE[1];
+                if (NativeMethods.PdhGetFormattedCounterValue(_cpuCounter, NativeMethods.PDH_FMT_DOUBLE, out _, buf) == 0)
                     cpu = Math.Clamp(buf[0].doubleValue, 0, 100);
             }
 
             double gpu = _gpu;
             if (_gpuAvailable)
             {
-                PdhCollectQueryData(_gpuQuery);
+                NativeMethods.PdhCollectQueryData(_gpuQuery);
                 // Sum across all GPU engine instances: query raw list.
                 gpu = SumGpuUtilization();
             }
 
             double ram = _ram;
             long avail = _availPhys;
-            var mi = new MEMORYSTATUSEX { dwLength = (uint)System.Runtime.InteropServices.Marshal.SizeOf<MEMORYSTATUSEX>() };
-            if (GlobalMemoryStatusEx(ref mi))
+            var mi = new NativeMethods.MEMORYSTATUSEX { dwLength = (uint)System.Runtime.InteropServices.Marshal.SizeOf<NativeMethods.MEMORYSTATUSEX>() };
+            if (NativeMethods.GlobalMemoryStatusEx(ref mi))
             {
                 avail = (long)mi.ullAvailPhys;
                 ram = _totalPhys > 0 ? (1.0 - (double)mi.ullAvailPhys / _totalPhys) * 100.0 : 0;
@@ -147,13 +148,13 @@ public sealed class SystemMonitorService : IDisposable
         try
         {
             uint bufferSize = 0, itemCount = 0;
-            int status = PdhGetFormattedCounterArrayW(_gpuCounter, 0x00000200 /*PDH_FMT_DOUBLE*/,
+            int status = NativeMethods.PdhGetFormattedCounterArrayW(_gpuCounter, NativeMethods.PDH_FMT_DOUBLE,
                 ref bufferSize, ref itemCount, IntPtr.Zero);
-            if (status != unchecked((int)0x800007D2) /*PDH_MORE_DATA*/ || itemCount == 0) return _gpu;
+            if (status != NativeMethods.PDH_MORE_DATA || itemCount == 0) return _gpu;
             IntPtr pBuf = System.Runtime.InteropServices.Marshal.AllocHGlobal((int)bufferSize);
             try
             {
-                status = PdhGetFormattedCounterArrayW(_gpuCounter, 0x00000200,
+                status = NativeMethods.PdhGetFormattedCounterArrayW(_gpuCounter, NativeMethods.PDH_FMT_DOUBLE,
                     ref bufferSize, ref itemCount, pBuf);
                 if (status != 0) return _gpu;
                 var samples = new List<(string Instance, double Value)>((int)itemCount);
@@ -178,39 +179,10 @@ public sealed class SystemMonitorService : IDisposable
         catch { return _gpu; }
     }
 
-    // ---- PDH interop ----
-    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
-    private struct PDH_FMT_COUNTERVALUE_DOUBLE { public int status; public double doubleValue; }
-
-    [System.Runtime.InteropServices.DllImport("pdh.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
-    private static extern int PdhOpenQueryW(string? source, IntPtr userData, out IntPtr query);
-    [System.Runtime.InteropServices.DllImport("pdh.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
-    private static extern int PdhAddEnglishCounterW(IntPtr query, string counterPath, IntPtr userData, out IntPtr counter);
-    [System.Runtime.InteropServices.DllImport("pdh.dll")]
-    private static extern int PdhCollectQueryData(IntPtr query);
-    [System.Runtime.InteropServices.DllImport("pdh.dll")]
-    private static extern int PdhGetFormattedCounterValue(IntPtr counter, int format, out int type, [System.Runtime.InteropServices.Out] PDH_FMT_COUNTERVALUE_DOUBLE[] value);
-    [System.Runtime.InteropServices.DllImport("pdh.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
-    private static extern int PdhGetFormattedCounterArrayW(IntPtr counter, int format, ref uint bufferSize, ref uint itemCount, IntPtr buffer);
-    [System.Runtime.InteropServices.DllImport("pdh.dll")]
-    private static extern int PdhCloseQuery(IntPtr query);
-
-    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
-    private struct MEMORYSTATUSEX
-    {
-        public uint dwLength;
-        public uint dwMemoryLoad;
-        public ulong ullTotalPhys, ullAvailPhys, ullTotalPageFile, ullAvailPageFile;
-        public ulong ullTotalVirtual, ullAvailVirtual, ullAvailExtendedVirtual;
-    }
-
-    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX lpBuffer);
-
     public void Dispose()
     {
         Deactivate();
-        if (_cpuQuery != IntPtr.Zero) { PdhCloseQuery(_cpuQuery); _cpuQuery = IntPtr.Zero; }
-        if (_gpuQuery != IntPtr.Zero) { PdhCloseQuery(_gpuQuery); _gpuQuery = IntPtr.Zero; }
+        if (_cpuQuery != IntPtr.Zero) { NativeMethods.PdhCloseQuery(_cpuQuery); _cpuQuery = IntPtr.Zero; }
+        if (_gpuQuery != IntPtr.Zero) { NativeMethods.PdhCloseQuery(_gpuQuery); _gpuQuery = IntPtr.Zero; }
     }
 }

@@ -6,6 +6,7 @@ using NAudio.CoreAudioApi.Interfaces;
 using Windows.Devices.Radios;
 using WindowsDynamicBar.Core.Logging;
 using WindowsDynamicBar.Core.Settings;
+using WindowsDynamicBar.Interop;
 
 namespace WindowsDynamicBar.Services.Toggles;
 
@@ -234,8 +235,8 @@ public sealed class QuickToggleService : IDisposable
         key.SetValue("AppsUseLightTheme", light, RegistryValueKind.DWord);
         key.SetValue("SystemUsesLightTheme", light, RegistryValueKind.DWord);
         // Tell running apps and the shell (taskbar/Start) to re-read the colour set.
-        SendMessageTimeout(HWND_BROADCAST, WM_SETTINGCHANGE, IntPtr.Zero, "ImmersiveColorSet",
-            SMTO_ABORTIFHUNG, 1000, out _);
+        NativeMethods.SendMessageTimeout(NativeMethods.HWND_BROADCAST, NativeMethods.WM_SETTINGCHANGE, IntPtr.Zero, "ImmersiveColorSet",
+            NativeMethods.SMTO_ABORTIFHUNG, 1000, out _);
     }
 
     // ------------------------------------------------------------------ do not disturb (island)
@@ -330,12 +331,4 @@ public sealed class QuickToggleService : IDisposable
         }
         _cts?.Dispose();
     }
-
-    private static readonly IntPtr HWND_BROADCAST = new(0xFFFF);
-    private const int WM_SETTINGCHANGE = 0x001A;
-    private const uint SMTO_ABORTIFHUNG = 0x0002;
-
-    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern IntPtr SendMessageTimeout(IntPtr hWnd, int msg, IntPtr wParam, string lParam,
-        uint flags, uint timeout, out IntPtr result);
 }

@@ -18,6 +18,7 @@ internal static class NativeMethods
     public const int GWL_EXSTYLE = -20;
     public const int GWL_STYLE = -16;
     public const int WS_EX_TOOLWINDOW = 0x00000080;
+    public const long WS_EX_APPWINDOW = 0x00040000;
     public const int WS_EX_NOACTIVATE = 0x08000000;
     public const int WS_EX_TOPMOST = 0x00000008;
     public const int WS_EX_LAYERED = 0x00080000;
@@ -103,10 +104,35 @@ internal static class NativeMethods
     public const int MA_NOACTIVATE = 3;
     public const int MA_NOACTIVATEANDEAT = 4;
 
-    // ---------- clipboard listener ----------
+    // ---------- clipboard listener & access ----------
     public const int WM_CLIPBOARDUPDATE = 0x031D;
     [DllImport("user32.dll", SetLastError = true)] public static extern bool AddClipboardFormatListener(IntPtr hwnd);
     [DllImport("user32.dll", SetLastError = true)] public static extern bool RemoveClipboardFormatListener(IntPtr hwnd);
+    [DllImport("user32.dll", SetLastError = true)] public static extern bool OpenClipboard(IntPtr hWndNewOwner);
+    [DllImport("user32.dll")] public static extern bool CloseClipboard();
+    [DllImport("user32.dll")] public static extern bool IsClipboardFormatAvailable(uint format);
+    [DllImport("user32.dll")] public static extern IntPtr GetClipboardData(uint format);
+    [DllImport("user32.dll")] public static extern IntPtr GetClipboardOwner();
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern uint RegisterClipboardFormat(string name);
+    [DllImport("kernel32.dll")] public static extern IntPtr GlobalLock(IntPtr h);
+    [DllImport("kernel32.dll")] public static extern bool GlobalUnlock(IntPtr h);
+    [DllImport("kernel32.dll")] public static extern UIntPtr GlobalSize(IntPtr h);
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    public static extern uint DragQueryFile(IntPtr hDrop, uint iFile, StringBuilder? lpszFile, uint cch);
+
+    // ---------- DPAPI data protection ----------
+    [StructLayout(LayoutKind.Sequential)]
+    public struct DATA_BLOB { public int cbData; public IntPtr pbData; }
+
+    [DllImport("crypt32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern bool CryptProtectData(ref DATA_BLOB pDataIn, string? szDataDescr, ref DATA_BLOB pOptionalEntropy,
+        IntPtr pvReserved, IntPtr pPromptStruct, int dwFlags, ref DATA_BLOB pDataOut);
+
+    [DllImport("crypt32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern bool CryptUnprotectData(ref DATA_BLOB pDataIn, IntPtr ppszDataDescr, ref DATA_BLOB pOptionalEntropy,
+        IntPtr pvReserved, IntPtr pPromptStruct, int dwFlags, ref DATA_BLOB pDataOut);
+
+    [DllImport("kernel32.dll")] public static extern IntPtr LocalFree(IntPtr hMem);
 
     // ---------- device change ----------
     public const int WM_DEVICECHANGE = 0x0219;
@@ -143,14 +169,49 @@ internal static class NativeMethods
 
     // ---------- DWM attributes ----------
     [DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
+    [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr hwnd, int attr, out int value, int size);
     public const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
     public const int DWMWCP_ROUND = 2;
     public const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+    public const int DWMWA_CLOAKED = 14;
+    public const int DWM_CLOAKED_APP = 1;
+    public const int DWM_CLOAKED_SHELL = 2;
+    public const int DWM_CLOAKED_INHERITED = 4;
 
     // ---------- window activation / focus ----------
     [DllImport("user32.dll")] public static extern IntPtr GetFocus();
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr hWnd, uint cmd);
+    public const uint GW_OWNER = 4;
+    [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint attach, uint to, bool fAttach);
+    [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
     [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT lpPoint);
+
+    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+    [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc cb, IntPtr lParam);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowTextLength(IntPtr hWnd);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder s, int n);
+    [DllImport("user32.dll", SetLastError = true)] public static extern bool DestroyIcon(IntPtr hIcon);
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct INPUT { public uint type; public InputUnion U; }
+
+    [StructLayout(LayoutKind.Explicit)]
+    public struct InputUnion
+    {
+        [FieldOffset(0)] public MOUSEINPUT mi;
+        [FieldOffset(0)] public KEYBDINPUT ki;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct KEYBDINPUT { public ushort wVk; public ushort wScan; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MOUSEINPUT { public int dx; public int dy; public uint mouseData; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }
+
+    [DllImport("user32.dll")] public static extern uint SendInput(uint n, INPUT[] inputs, int size);
 
     // ---------- fullscreen detection ----------
     public enum QUERY_USER_NOTIFICATION_STATE
@@ -252,4 +313,142 @@ internal static class NativeMethods
     public const int WM_POWERBROADCAST = 0x0218;
     public const int PBT_APMRESUMEAUTOMATIC = 0x0012;
     public const int PBT_APMSUSPEND = 0x0004;
+    public const int PBT_POWERSETTINGCHANGE = 0x8013;
+    public const int PBT_APMPOWERSTATUSCHANGE = 0x000A;
+
+    public static readonly IntPtr HWND_BROADCAST = new(0xFFFF);
+    public const uint SMTO_ABORTIFHUNG = 0x0002;
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern IntPtr SendMessageTimeout(IntPtr hWnd, int msg, IntPtr wParam, string lParam,
+        uint flags, uint timeout, out IntPtr result);
+
+    // ---------- system power & battery status ----------
+    [StructLayout(LayoutKind.Sequential)]
+    public struct SYSTEM_POWER_STATUS
+    {
+        public byte ACLineStatus;
+        public byte BatteryFlag;
+        public byte BatteryLifePercent;
+        public byte SystemStatusFlag;
+        public int BatteryLifeTime;
+        public int BatteryFullLifeTime;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool GetSystemPowerStatus(out SYSTEM_POWER_STATUS sps);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr RegisterPowerSettingNotification(IntPtr recipient, ref Guid powerSetting, int flags);
+
+    [DllImport("user32.dll")]
+    public static extern bool UnregisterPowerSettingNotification(IntPtr handle);
+
+    // ---------- system memory & CPU times ----------
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct MEMORYSTATUSEX
+    {
+        public uint dwLength;
+        public uint dwMemoryLoad;
+        public ulong ullTotalPhys;
+        public ulong ullAvailPhys;
+        public ulong ullTotalPageFile;
+        public ulong ullAvailPageFile;
+        public ulong ullTotalVirtual;
+        public ulong ullAvailVirtual;
+        public ulong ullAvailExtendedVirtual;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX lpBuffer);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool GetSystemTimes(out long idleTime, out long kernelTime, out long userTime);
+
+    // ---------- PDH performance data helper ----------
+    public const int PDH_FMT_DOUBLE = 0x00000200;
+    public const int PDH_MORE_DATA = unchecked((int)0x800007D2);
+    public const int PDH_NO_DATA = unchecked((int)0x800007D5);
+    public const int PDH_CSTATUS_NO_INSTANCE = unchecked((int)0x800007D1);
+    public const int PDH_CSTATUS_VALID_DATA = 0x00000000;
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct PDH_FMT_COUNTERVALUE_DOUBLE
+    {
+        public int status;
+        public double doubleValue;
+    }
+
+    [DllImport("pdh.dll", CharSet = CharSet.Unicode)]
+    public static extern int PdhOpenQueryW(string? source, IntPtr userData, out IntPtr query);
+
+    [DllImport("pdh.dll", CharSet = CharSet.Unicode)]
+    public static extern int PdhAddEnglishCounterW(IntPtr query, string counterPath, IntPtr userData, out IntPtr counter);
+
+    [DllImport("pdh.dll")]
+    public static extern int PdhCollectQueryData(IntPtr query);
+
+    [DllImport("pdh.dll")]
+    public static extern int PdhGetFormattedCounterValue(IntPtr counter, int format, out int type,
+        [Out] PDH_FMT_COUNTERVALUE_DOUBLE[] value);
+
+    [DllImport("pdh.dll", CharSet = CharSet.Unicode)]
+    public static extern int PdhGetFormattedCounterArrayW(IntPtr counter, int format, ref uint bufferSize, ref uint itemCount, IntPtr buffer);
+
+    [DllImport("pdh.dll")]
+    public static extern int PdhCloseQuery(IntPtr query);
+
+    [DllImport("pdh.dll", CharSet = CharSet.Unicode)]
+    public static extern int PdhExpandWildCardPathW(string? szDataSource, string szWildCardPath,
+        IntPtr mszExpandedPathList, ref uint pcchPathListLength, uint dwFlags);
+
+    // ---------- WLAN (wlanapi.dll) ----------
+    [DllImport("wlanapi.dll")]
+    public static extern uint WlanOpenHandle(uint clientVersion, IntPtr reserved,
+        out uint negotiatedVersion, out IntPtr handle);
+
+    [DllImport("wlanapi.dll")]
+    public static extern uint WlanEnumInterfaces(IntPtr handle, IntPtr reserved, out IntPtr list);
+
+    [DllImport("wlanapi.dll")]
+    public static extern uint WlanQueryInterface(IntPtr handle, ref Guid guid, int opcode,
+        IntPtr reserved, out uint dataSize, out IntPtr data, IntPtr dataType);
+
+    [DllImport("wlanapi.dll")]
+    public static extern void WlanFreeMemory(IntPtr memory);
+
+    [DllImport("wlanapi.dll")]
+    public static extern uint WlanCloseHandle(IntPtr handle, IntPtr reserved);
+
+    // ---------- Shell file info & items (shell32.dll) ----------
+    public const uint SHGFI_ICON = 0x100;
+    public const uint SHGFI_LARGEICON = 0x0;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct SHFILEINFO
+    {
+        public IntPtr hIcon;
+        public int iIcon;
+        public uint dwAttributes;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string szDisplayName;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 80)] public string szTypeName;
+    }
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    public static extern IntPtr SHGetFileInfo(string path, uint attrs, ref SHFILEINFO info, uint size, uint flags);
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
+    public static extern int SHCreateItemFromParsingName(
+        [MarshalAs(UnmanagedType.LPWStr)] string pszPath,
+        IntPtr pbc,
+        [MarshalAs(UnmanagedType.LPStruct)] Guid riid,
+        [MarshalAs(UnmanagedType.Interface)] out object ppv);
+
+    // ---------- COM activation (ole32.dll / oleaut32.dll) ----------
+    [DllImport("ole32.dll", CharSet = CharSet.Unicode)]
+    public static extern int CLSIDFromProgID(string progId, out Guid clsid);
+
+    [DllImport("oleaut32.dll")]
+    public static extern int GetActiveObject(ref Guid clsid, IntPtr reserved,
+        [MarshalAs(UnmanagedType.IUnknown)] out object? unknown);
 }
