@@ -494,6 +494,7 @@ public partial class BarWindow : Window, IDisposable
         IconRow.MetricUnhovered -= OnIconMetricUnhovered;
         IconRow.MetricClicked -= OnIconMetricClicked;
         IconRow.PageChanged -= OnIconPageChanged;
+        DetailPanelComponent.GpuCycleRequested -= OnGpuCycleRequested;
         TogglesPanelComponent.ToggleRequested -= OnToggleRequested;
         if (_hookedToggles is not null) _hookedToggles.Changed -= OnTogglesChanged;
         App.ServiceToggled -= OnServiceToggled;
@@ -503,6 +504,11 @@ public partial class BarWindow : Window, IDisposable
         TimerPanelComponent.StopRequested -= OnTimerStopRequested;
         TimerPanelComponent.PauseRequested -= OnTimerPauseRequested;
         TimerPanelComponent.ResumeRequested -= OnTimerResumeRequested;
+        NetPanelComponent.TestToggleRequested -= OnNetTestToggle;
+        MirrorPanelComponent.CameraStateChanged -= OnMirrorCameraStateChanged;
+        VolumeHudBar.Scrub -= OnVolumeHudScrub;
+        TeardownSearch();
+        try { _displayChangeDebounceTimer?.Stop(); } catch { }
         try { _collapseDelay.Stop(); } catch { }
         try { _hoverCheckTimer.Stop(); } catch { }
         try { _clockTimer.Stop(); } catch { }
@@ -2682,6 +2688,7 @@ public partial class BarWindow : Window, IDisposable
 
     private void OnBusEvent(BarEvent evt)
     {
+        if (_disposed) return;
         try
         {
             if (evt.Kind == BarEventKind.Screenshot)
@@ -2794,6 +2801,7 @@ public partial class BarWindow : Window, IDisposable
 
     private void OnBusIdle()
     {
+        if (_disposed) return;
         _shown = null;
         VolumeHudGlow.Visibility = Visibility.Collapsed;
         VolumeHudGlowStop.Color = Colors.Transparent;
@@ -2805,10 +2813,11 @@ public partial class BarWindow : Window, IDisposable
     {
         if (!Dispatcher.CheckAccess())
         {
-            Dispatcher.BeginInvoke(() => OnMediaChanged(info));
+            try { Dispatcher.BeginInvoke(() => OnMediaChanged(info)); } catch (TaskCanceledException) { }
             return;
         }
 
+        if (_disposed) return;
         _lastMedia = info;
         OnBuddyMediaUpdated(info);
         ApplyLayoutMode();
@@ -2832,6 +2841,14 @@ public partial class BarWindow : Window, IDisposable
 
     private void OnTimerChanged(TimerInfo info)
     {
+        if (!Dispatcher.CheckAccess())
+        {
+            try { Dispatcher.BeginInvoke(() => OnTimerChanged(info)); }
+            catch (TaskCanceledException) { /* dispatcher shutting down */ }
+            return;
+        }
+
+        if (_disposed) return;
         var prev = _lastTimer;
         _lastTimer = info;
         long second = (long)Math.Ceiling(info.Remaining.TotalSeconds);
@@ -2839,8 +2856,7 @@ public partial class BarWindow : Window, IDisposable
         if (second != _timerUiSecond || info.State != prev?.State)
         {
             _timerUiSecond = info.State == TimerState.Running ? second : -1;
-            try { Dispatcher.BeginInvoke(() => OnTimerUi(info, finishedNow)); }
-            catch (TaskCanceledException) { /* dispatcher shutting down */ }
+            OnTimerUi(info, finishedNow);
         }
         RerenderCurrent(BarEventKind.Timer, () => BarEvent.Create(BarEventKind.Timer,
             info.Label, TimerService.Format(info.Remaining), value: info.Progress,
@@ -2850,8 +2866,16 @@ public partial class BarWindow : Window, IDisposable
 
     private void OnStopwatchChanged(StopwatchInfo info)
     {
+        if (!Dispatcher.CheckAccess())
+        {
+            try { Dispatcher.BeginInvoke(() => OnStopwatchChanged(info)); }
+            catch (TaskCanceledException) { }
+            return;
+        }
+
+        if (_disposed) return;
         _lastStopwatch = info;
-        try { Dispatcher.BeginInvoke(() => { if (_islandState == IslandVisualState.Collapsed || !_expanded) UpdateCollapsed(); }); } catch { }
+        if (_islandState == IslandVisualState.Collapsed || !_expanded) UpdateCollapsed();
         RerenderCurrent(BarEventKind.Stopwatch, () => BarEvent.Create(
             BarEventKind.Stopwatch, "Stopwatch", StopwatchService.FormatMs(info.Elapsed),
             valueText: StopwatchService.FormatMs(info.Elapsed), payload: info, priority: 60,
@@ -2860,8 +2884,16 @@ public partial class BarWindow : Window, IDisposable
 
     private void OnFocusChanged(FocusInfo info)
     {
+        if (!Dispatcher.CheckAccess())
+        {
+            try { Dispatcher.BeginInvoke(() => OnFocusChanged(info)); }
+            catch (TaskCanceledException) { }
+            return;
+        }
+
+        if (_disposed) return;
         _lastFocus = info;
-        try { Dispatcher.BeginInvoke(() => OnFocusUi(info)); } catch { }
+        OnFocusUi(info);
         RerenderCurrent(BarEventKind.Focus, () => BarEvent.Create(BarEventKind.Focus,
             "Focus", info.Phase, valueText: TimerService.Format(info.Remaining),
             payload: info, priority: 70, displayDuration: TimeSpan.FromSeconds(4)));
@@ -2870,13 +2902,9 @@ public partial class BarWindow : Window, IDisposable
     /// <summary>Re-render the visible widget from a fresh local state (never expands).</summary>
     private void RerenderCurrent(BarEventKind kind, Func<BarEvent> make)
     {
-        if (!_expanded || _shown?.Kind != kind) return;
-        Dispatcher.BeginInvoke(() =>
-        {
-            if (!_expanded || _shown?.Kind != kind) return;
-            _shown = make();
-            RenderEvent(_shown);
-        });
+        if (_disposed || !_expanded || _shown?.Kind != kind) return;
+        _shown = make();
+        RenderEvent(_shown);
     }
 
     private void OnStatsChanged(SystemStats s)

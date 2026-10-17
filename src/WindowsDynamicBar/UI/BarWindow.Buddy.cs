@@ -109,8 +109,7 @@ public partial class BarWindow
         _lastInternetConnected = NetworkInterface.GetIsNetworkAvailable();
         NetworkChange.NetworkAvailabilityChanged += OnNetworkAvailabilityChanged;
         NetworkChange.NetworkAddressChanged += OnNetworkAddressChanged;
-        if (App.Toggles is not null) App.Toggles.Changed += () => Dispatcher.BeginInvoke(OnImmediateNetChange);
-        NetworkChange.NetworkAddressChanged += OnNetworkAddressChanged;
+        if (App.Toggles is not null) App.Toggles.Changed += OnBuddyTogglesChanged;
         // Immediate network monitoring (no debounce)
 
         // RAM sustained monitor
@@ -129,7 +128,9 @@ public partial class BarWindow
     {
         NetworkChange.NetworkAvailabilityChanged -= OnNetworkAvailabilityChanged;
         NetworkChange.NetworkAddressChanged -= OnNetworkAddressChanged;
-        
+        if (App.Toggles is not null) App.Toggles.Changed -= OnBuddyTogglesChanged;
+
+        _ramHighTimer.Tick -= OnRamHighTimerTick;
         _ramHighTimer.Stop();
         _waterReminderTimer?.Stop();
         _eyeReminderTimer?.Stop();
@@ -466,18 +467,24 @@ public partial class BarWindow
 
     // ---------------------------------------------------------------- Real Context: Internet
 
+    private void OnBuddyTogglesChanged()
+    {
+        try { Dispatcher.BeginInvoke(OnImmediateNetChange); } catch { }
+    }
+
     private void OnNetworkAvailabilityChanged(object? sender, NetworkAvailabilityEventArgs e)
     {
-        Dispatcher.BeginInvoke(OnImmediateNetChange);
+        try { Dispatcher.BeginInvoke(OnImmediateNetChange); } catch { }
     }
 
     private void OnNetworkAddressChanged(object? sender, EventArgs e)
     {
-        Dispatcher.BeginInvoke(OnImmediateNetChange);
+        try { Dispatcher.BeginInvoke(OnImmediateNetChange); } catch { }
     }
 
     private void OnImmediateNetChange()
     {
+        if (_disposed) return;
         bool isConnected = NetworkInterface.GetIsNetworkAvailable();
         if (isConnected != _lastInternetConnected)
         {
