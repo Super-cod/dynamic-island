@@ -1,5 +1,7 @@
 using System.IO;
 using WindowsDynamicBar.Core.Clipboard;
+using WindowsDynamicBar.Core.Events;
+using WindowsDynamicBar.Core.Settings;
 using WindowsDynamicBar.Core.Telemetry;
 using WindowsDynamicBar.Interop;
 using WindowsDynamicBar.Services.Media;
@@ -30,6 +32,7 @@ internal static partial class Program
         Run("Battery glyphs: levels and charging variants", TestBatteryGlyphs);
         Run("BatteryInfo: desktop without battery, unknown flags, and remaining time parsing", TestBatteryInfoFromPowerStatus);
         Run("BatteryService: alert transitions and routine drift suppression", TestBatteryAlertTransitions);
+        Run("BatteryService: alert publishing, priorities, durations, and FeatureBattery setting", TestBatteryAlertPublishing);
         Run("LruCache never exceeds its limit and evicts least recently used", TestLruCache);
         Run("Settings: validation clamps bad values and broken hotkeys", TestSettingsValidation);
         Run("Settings: corrupt file is moved aside and defaults load", TestSettingsCorruption);
@@ -302,6 +305,64 @@ internal static partial class Program
 
         // Unplugging while still low: 15% charging -> 15% discharging -> raises alert
         Assert(BatteryService.ShouldRaiseBatteryAlert(c15, b15), "unplugging at low battery raises alert");
+    }
+
+    private static void TestBatteryAlertPublishing()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+        bool origFeatureBattery = settings.Current.FeatureBattery;
+        try
+        {
+            var service = new BatteryService(bus, settings);
+            BarEvent? lastEvent = null;
+            bus.EventRaised += e => lastEvent = e;
+
+            // 1. FeatureBattery = false -> alert is suppressed even on transition
+            settings.Update(s => s.FeatureBattery = false);
+            var b21 = new BatteryInfo(21, false, false, "35m left", HasBattery: true);
+            var b20 = new BatteryInfo(20, false, false, "30m left", HasBattery: true);
+            service.RaiseBatteryEvent(b21, b20);
+            Assert(lastEvent == null, "alert suppressed when FeatureBattery is false");
+
+            // 2. FeatureBattery = true -> low battery alert (priority 95, duration 6s)
+            settings.Update(s => s.FeatureBattery = true);
+            service.RaiseBatteryEvent(b21, b20);
+            Assert(lastEvent != null, "alert raised when FeatureBattery is true");
+            AssertEq(BarEventKind.Battery, lastEvent!.Kind, "kind is Battery");
+            AssertEq("Battery", lastEvent.Title, "title is Battery");
+            AssertEq(95, lastEvent.Priority, "low battery priority is 95");
+            AssertEq(TimeSpan.FromSeconds(6), lastEvent.DisplayDuration, "low battery duration is 6s");
+
+            // 3. Low battery duplicate (20% -> 19%) -> no new event
+            lastEvent = null;
+            var b19 = new BatteryInfo(19, false, false, "28m left", HasBattery: true);
+            service.RaiseBatteryEvent(b20, b19);
+            Assert(lastEvent == null, "duplicate low battery alert suppressed");
+
+            // 4. Charger connected (80% dc -> 80% ac) -> standard alert (priority 40, duration 3s)
+            var b80dc = new BatteryInfo(80, false, false, "3h left", HasBattery: true);
+            var b80ac = new BatteryInfo(80, true, false, null, HasBattery: true);
+            service.RaiseBatteryEvent(b80dc, b80ac);
+            Assert(lastEvent != null, "charger connected raises alert");
+            AssertEq("Charging", lastEvent!.Title, "title is Charging");
+            AssertEq(40, lastEvent.Priority, "charging alert priority is 40");
+            AssertEq(TimeSpan.FromSeconds(3), lastEvent.DisplayDuration, "charging alert duration is 3s");
+
+            // 5. Battery saver toggled on (60% saver off -> 60% saver on) -> standard alert
+            lastEvent = null;
+            var saverOff = new BatteryInfo(60, false, false, "2h left", HasBattery: true);
+            var saverOn = new BatteryInfo(60, false, true, "2h 30m left", HasBattery: true);
+            service.RaiseBatteryEvent(saverOff, saverOn);
+            Assert(lastEvent != null, "battery saver raises alert");
+            AssertEq("Battery saver", lastEvent!.Title, "title is Battery saver");
+            AssertEq(40, lastEvent.Priority, "battery saver alert priority is 40");
+            AssertEq(TimeSpan.FromSeconds(3), lastEvent.DisplayDuration, "battery saver alert duration is 3s");
+        }
+        finally
+        {
+            settings.Update(s => s.FeatureBattery = origFeatureBattery);
+        }
     }
 
     private static void TestTimerCommand()

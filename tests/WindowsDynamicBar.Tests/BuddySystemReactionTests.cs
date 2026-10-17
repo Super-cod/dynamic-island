@@ -33,7 +33,7 @@ public static class BuddySystemReactionTests
         Test("Do Not Disturb -> Sleeping with Moon prop; stretch on exit", TestDndReaction);
         Test("Clipboard copied -> Clipboard, PictureFrame, Box props", TestClipboardReactions);
         Test("Capsule open triggers Peek pose and event color on antenna", TestCapsuleOpenPeekPose);
-        Test("Event storm (5 events in 4 s) triggers Dizzy once and 15 s quiet suppression", TestEventStormSuppression);
+        Test("Event storm (12 events in 10 s) triggers Dizzy once and 15 s quiet suppression", TestEventStormSuppression);
         Test("Resume from sleep: 5 s quiet suppression, then Stretch + Yawn", TestResumeFromSleep);
         Test("Per-event toggle in settings disables reaction", TestPerEventSettingsToggle);
         Test("Master switch BuddyReactionsEnabled disables all reactions", TestMasterSwitchToggle);
@@ -236,17 +236,21 @@ public static class BuddySystemReactionTests
     private static void TestEventStormSuppression()
     {
         var (bus, behavior, router, _) = CreateHarness();
-        var now = DateTime.UtcNow;
 
-        // Fire 5 events in rapid succession
-        for (int i = 0; i < 5; i++)
+        // Fire 12 events in rapid succession to trigger storm Dizzy
+        for (int i = 0; i < 12; i++)
         {
-            bus.Raise(BarEvent.Create(BarEventKind.Volume, $"Volume {i * 10}%", priority: 20));
+            bus.Raise(BarEvent.Create(BarEventKind.Volume, $"Volume {i * 5}%", priority: 20));
         }
 
         // Must trigger Dizzy with DizzyStars
         Assert(behavior.CurrentAnimation == BuddyAnimationState.Dizzy, "Dizzy triggered on storm");
         Assert(behavior.CurrentAccessory == BuddyAccessory.DizzyStars, "DizzyStars equipped");
+
+        // Subsequent event during storm / quiet window must be suppressed and not interrupt Dizzy
+        bus.Raise(BarEvent.Create(BarEventKind.Volume, "Headphones connected", priority: 20));
+        Assert(behavior.CurrentAnimation == BuddyAnimationState.Dizzy, "Dizzy persists and is not interrupted during quiet suppression");
+        Assert(behavior.CurrentAccessory == BuddyAccessory.DizzyStars, "DizzyStars still equipped during suppression");
     }
 
     private static void TestResumeFromSleep()

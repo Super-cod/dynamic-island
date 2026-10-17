@@ -12,11 +12,21 @@ public sealed class BatteryService : IDisposable
 {
     private readonly EventBus _bus;
     private readonly SettingsService _settings;
+    private readonly object _stateLock = new();
     private BatteryInfo _last = new(0, false, false, null, false);
     private System.Threading.Timer? _pollTimer;
 
     public event Action<BatteryInfo>? BatteryChanged;
-    public BatteryInfo Current => _last;
+    public BatteryInfo Current
+    {
+        get
+        {
+            lock (_stateLock)
+            {
+                return _last;
+            }
+        }
+    }
 
     public BatteryService(EventBus bus, SettingsService settings)
     {
@@ -31,8 +41,12 @@ public sealed class BatteryService : IDisposable
         Microsoft.Win32.SystemEvents.PowerModeChanged += OnPowerModeChanged;
         Microsoft.Win32.SystemEvents.SessionSwitch += OnSessionSwitch;
 
-        _last = Query();
-        BatteryChanged?.Invoke(_last);
+        var initial = Query();
+        lock (_stateLock)
+        {
+            _last = initial;
+        }
+        BatteryChanged?.Invoke(initial);
 
         int pollMs = _settings.Current.PerformanceMode switch
         {
@@ -42,16 +56,26 @@ public sealed class BatteryService : IDisposable
         };
         _pollTimer = new System.Threading.Timer(_ =>
         {
-            var prev = _last;
             var cur = Query();
-            if (cur.HasBattery != prev.HasBattery ||
-                Math.Abs(cur.Percent - prev.Percent) >= 1 ||
-                cur.Charging != prev.Charging ||
-                cur.EnergySaver != prev.EnergySaver)
+            BatteryInfo? toNotify = null;
+            BatteryInfo? alertPrev = null;
+            lock (_stateLock)
             {
-                _last = cur;
-                BatteryChanged?.Invoke(cur);
-                RaiseBatteryEvent(prev, cur);
+                var prev = _last;
+                if (cur.HasBattery != prev.HasBattery ||
+                    Math.Abs(cur.Percent - prev.Percent) >= 1 ||
+                    cur.Charging != prev.Charging ||
+                    cur.EnergySaver != prev.EnergySaver)
+                {
+                    _last = cur;
+                    toNotify = cur;
+                    alertPrev = prev;
+                }
+            }
+            if (toNotify != null)
+            {
+                BatteryChanged?.Invoke(toNotify);
+                RaiseBatteryEvent(alertPrev!, toNotify);
             }
         }, null, pollMs, pollMs);
     }
@@ -62,17 +86,27 @@ public sealed class BatteryService : IDisposable
         // so charging flips pop the bar immediately instead of at the next poll.
         if (e.Mode is not (Microsoft.Win32.PowerModes.Resume or Microsoft.Win32.PowerModes.StatusChange))
             return;
-        var prev = _last;
         var cur = Query();
-        if (cur.HasBattery != prev.HasBattery ||
-            cur.Percent != prev.Percent ||
-            cur.Charging != prev.Charging ||
-            cur.EnergySaver != prev.EnergySaver)
+        BatteryInfo? toNotify = null;
+        BatteryInfo? alertPrev = null;
+        lock (_stateLock)
         {
-            _last = cur;
-            BatteryChanged?.Invoke(cur);
-            RaiseBatteryEvent(prev, cur);
-            Log.Info("Power state change", ("percent", cur.Percent), ("charging", cur.Charging));
+            var prev = _last;
+            if (cur.HasBattery != prev.HasBattery ||
+                cur.Percent != prev.Percent ||
+                cur.Charging != prev.Charging ||
+                cur.EnergySaver != prev.EnergySaver)
+            {
+                _last = cur;
+                toNotify = cur;
+                alertPrev = prev;
+            }
+        }
+        if (toNotify != null)
+        {
+            BatteryChanged?.Invoke(toNotify);
+            RaiseBatteryEvent(alertPrev!, toNotify);
+            Log.Info("Power state change", ("percent", toNotify.Percent), ("charging", toNotify.Charging));
         }
     }
 
@@ -80,8 +114,13 @@ public sealed class BatteryService : IDisposable
     {
         if (e.Reason != Microsoft.Win32.SessionSwitchReason.SessionUnlock) return;
         var cur = Query();
-        _last = cur;
-        BatteryChanged?.Invoke(cur);
+        BatteryInfo? toNotify = null;
+        lock (_stateLock)
+        {
+            _last = cur;
+            toNotify = cur;
+        }
+        BatteryChanged?.Invoke(toNotify);
     }
 
     internal static bool ShouldRaiseBatteryAlert(BatteryInfo prev, BatteryInfo cur)
@@ -98,7 +137,7 @@ public sealed class BatteryService : IDisposable
         return chargingFlipped || saverFlipped || (lowNow && !lowBefore);
     }
 
-    private void RaiseBatteryEvent(BatteryInfo prev, BatteryInfo cur)
+    internal void RaiseBatteryEvent(BatteryInfo prev, BatteryInfo cur)
     {
         if (!_settings.Current.FeatureBattery) return;
         if (!ShouldRaiseBatteryAlert(prev, cur)) return;
