@@ -172,7 +172,7 @@ public sealed class WeatherService : IDisposable
         using var deadline = SharedHttp.Deadline(TimeSpan.FromSeconds(20), token);
         using var resp = await SharedHttp.Client.GetAsync(url, deadline.Token).ConfigureAwait(false);
         resp.EnsureSuccessStatusCode();
-        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(token).ConfigureAwait(false));
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(deadline.Token).ConfigureAwait(false));
         var root = doc.RootElement;
 
         double offsetSeconds = GetDouble(root, "utc_offset_seconds");
