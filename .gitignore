@@ -14,6 +14,7 @@ release/*.exe
 release/*.zip
 release/*.pdb
 release/*.msi
+versions/
 
 # Visual Studio & VS Code
 .vs/
