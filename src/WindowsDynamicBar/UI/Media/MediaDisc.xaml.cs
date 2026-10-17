@@ -21,6 +21,12 @@ public partial class MediaDisc : UserControl
         Interval = TimeSpan.FromMilliseconds(33)
     };
     private readonly System.Collections.Generic.List<TweenAnimation> _tweens = new();
+    private bool _isControlLoaded;
+
+    internal bool IsSpinTimerRunningForTesting => _spin.IsEnabled;
+    internal int ActiveTweenCountForTesting => _tweens.Count;
+    internal void RaiseLoadedForTesting() => OnLoaded(this, new RoutedEventArgs(LoadedEvent));
+    internal void RaiseUnloadedForTesting() => OnUnloaded(this, new RoutedEventArgs(UnloadedEvent));
 
     public static readonly DependencyProperty DiameterProperty =
         DependencyProperty.Register(nameof(Diameter), typeof(double), typeof(MediaDisc),
@@ -46,8 +52,25 @@ public partial class MediaDisc : UserControl
     {
         InitializeComponent();
         _spin.Tick += OnSpinTick;
+        Loaded += OnLoaded;
+        Unloaded += OnUnloaded;
         IsVisibleChanged += (_, _) => SyncSpin();
         OnDiameterChanged(this, new DependencyPropertyChangedEventArgs(DiameterProperty, 36.0, Diameter));
+    }
+
+    private void OnLoaded(object sender, RoutedEventArgs e)
+    {
+        _isControlLoaded = true;
+        SyncSpin();
+    }
+
+    private void OnUnloaded(object sender, RoutedEventArgs e)
+    {
+        _isControlLoaded = false;
+        _spin.Stop();
+        foreach (var t in _tweens) t.Dispose();
+        _tweens.Clear();
+        ArtFront.Opacity = 1;
     }
 
     public void SetArtwork(BitmapSource? art, bool playing)
@@ -128,6 +151,11 @@ public partial class MediaDisc : UserControl
 
     private void SyncSpin()
     {
+        if (!_isControlLoaded)
+        {
+            _spin.Stop();
+            return;
+        }
         if (ReduceMotion || !IsVisible)
         {
             _spin.Stop();

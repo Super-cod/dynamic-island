@@ -10,6 +10,8 @@ using WindowsDynamicBar.Interop;
 using WindowsDynamicBar.Services.Media;
 using WindowsDynamicBar.Services.Settings;
 using WindowsDynamicBar.Services.SystemInfo;
+using WindowsDynamicBar.UI.Media;
+using Windows.Storage.Streams;
 
 namespace WindowsDynamicBar.Tests;
 
@@ -51,6 +53,15 @@ internal static partial class Program
         Run("FirstRunDone: property alias keeps backward compatibility", TestFirstRunDoneAlias);
         Run("WindowSwitcher: fuzzy title and process matching", TestWindowSwitcherMatching);
         Run("Fullscreen: invalid handles return false safely", TestFullscreenCheck);
+        Run("MediaService: concurrent StartAsync calls are idempotent without duplicate requests", TestMediaLifecycle_ConcurrentStart_IsIdempotent);
+        Run("MediaService: Stop during in-flight startup cancels startup and does not start", TestMediaLifecycle_StopDuringStartup_CancelsAndDoesNotStart);
+        Run("MediaService: Dispose during in-flight startup cancels startup and suppresses MediaChanged", TestMediaLifecycle_DisposeDuringStartup_CancelsAndSuppressesMediaChanged);
+        Run("MediaService: runtime Stop emits ClearToNoMedia", TestMediaLifecycle_RuntimeStop_EmitsNoMedia);
+        Run("MediaService: Dispose marks service disposed and suppresses MediaChanged", TestMediaLifecycle_Dispose_SuppressesMediaChanged);
+        Run("MediaDisc: Unloaded stops spin timer, clears tweens, and suppresses SyncSpin until Loaded", TestMediaDisc_Lifecycle);
+        Run("MediaService: TryGetArtworkAsync bounds timeout, reads bytes, and disposes streams safely", TestMediaArtwork_BoundedTimeout_RecoversAndDisposesStream);
+        Run("MediaService: Stop vs startup completion race keeps service stopped without attached handlers", TestMediaLifecycle_StopVsStartupCompletion_RaceCondition);
+        Run("MediaService: pending artwork async operation bounds timeout and disposes resources safely", TestMediaArtwork_PendingAsyncOperation_SafeDisposal);
     }
 
     private static string ScratchDir()
@@ -842,5 +853,539 @@ internal static partial class Program
     private static void TestFullscreenCheck()
     {
         Assert(!WindowsDynamicBar.Interop.NativeMethods.IsWindowFullscreen(IntPtr.Zero), "IntPtr.Zero is not fullscreen");
+    }
+
+    private static void TestMediaLifecycle_ConcurrentStart_IsIdempotent()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        using var svc = new MediaService(bus);
+
+        int requestCount = 0;
+        var tcs = new TaskCompletionSource<Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager?>();
+        MediaService.ManagerRequesterForTesting = ct =>
+        {
+            Interlocked.Increment(ref requestCount);
+            return tcs.Task;
+        };
+
+        try
+        {
+            var task1 = svc.StartAsync();
+            var task2 = svc.StartAsync();
+
+            Assert(ReferenceEquals(task1, task2), "Concurrent StartAsync calls must return the same in-flight task");
+            AssertEq(1, Volatile.Read(ref requestCount), "Manager requester invoked exactly once for concurrent starts");
+
+            tcs.SetResult(null);
+            Pump(50);
+            Assert(task1.IsCompleted, "Task completed after manager provider finished");
+
+            var task3 = svc.StartAsync();
+            Pump(20);
+            Assert(task3.IsCompleted, "Subsequent StartAsync completes safely");
+        }
+        finally
+        {
+            MediaService.ManagerRequesterForTesting = null;
+        }
+    }
+
+    private static void TestMediaLifecycle_StopDuringStartup_CancelsAndDoesNotStart()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        using var svc = new MediaService(bus);
+
+        var cancellationObserved = new ManualResetEventSlim(false);
+        var tcs = new TaskCompletionSource<Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager?>();
+        MediaService.ManagerRequesterForTesting = async ct =>
+        {
+            using (ct.Register(() =>
+            {
+                cancellationObserved.Set();
+                tcs.TrySetCanceled(ct);
+            }))
+            {
+                return await tcs.Task;
+            }
+        };
+
+        try
+        {
+            var startTask = svc.StartAsync();
+            Assert(!svc.IsRunning, "Not running while startup is in-flight");
+
+            svc.Stop();
+            Assert(cancellationObserved.Wait(TimeSpan.FromSeconds(2)), "In-flight startup cancellation token signaled on Stop");
+            Pump(50);
+
+            Assert(!svc.IsRunning, "Service must not be running after stop during in-flight start");
+        }
+        finally
+        {
+            MediaService.ManagerRequesterForTesting = null;
+        }
+    }
+
+    private static void TestMediaLifecycle_DisposeDuringStartup_CancelsAndSuppressesMediaChanged()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var svc = new MediaService(bus);
+
+        bool mediaChangedFired = false;
+        svc.MediaChanged += _ => mediaChangedFired = true;
+
+        var cancellationObserved = new ManualResetEventSlim(false);
+        var tcs = new TaskCompletionSource<Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager?>();
+        MediaService.ManagerRequesterForTesting = async ct =>
+        {
+            using (ct.Register(() =>
+            {
+                cancellationObserved.Set();
+                tcs.TrySetCanceled(ct);
+            }))
+            {
+                return await tcs.Task;
+            }
+        };
+
+        try
+        {
+            var startTask = svc.StartAsync();
+            svc.Dispose();
+
+            Assert(cancellationObserved.Wait(TimeSpan.FromSeconds(2)), "In-flight startup cancellation token signaled on Dispose");
+            Pump(50);
+
+            Assert(!mediaChangedFired, "MediaChanged must be suppressed on Dispose");
+            Assert(!svc.IsRunning, "Service must not be running after Dispose");
+
+            var followUp = svc.StartAsync();
+            Assert(followUp.IsCompleted, "StartAsync on disposed service returns immediately");
+            Assert(!svc.IsRunning, "Service remains stopped when disposed");
+        }
+        finally
+        {
+            MediaService.ManagerRequesterForTesting = null;
+        }
+    }
+
+    private static void TestMediaLifecycle_RuntimeStop_EmitsNoMedia()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        using var svc = new MediaService(bus);
+
+        svc.SetStartedForTesting(true);
+        Assert(svc.IsRunning, "Service is marked running");
+
+        MediaInfo? emitted = null;
+        svc.MediaChanged += m => emitted = m;
+
+        svc.Stop();
+
+        Assert(!svc.IsRunning, "Service is stopped");
+        Assert(emitted is not null, "Runtime Stop must emit ClearToNoMedia");
+        AssertEq("", emitted!.Title, "Empty title emitted");
+        AssertEq("", emitted.Artist, "Empty artist emitted");
+        AssertEq(false, emitted.IsPlaying, "IsPlaying false");
+    }
+
+    private static void TestMediaLifecycle_Dispose_SuppressesMediaChanged()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var svc = new MediaService(bus);
+
+        svc.SetStartedForTesting(true);
+        Assert(svc.IsRunning, "Service is running");
+
+        bool mediaChangedFired = false;
+        svc.MediaChanged += _ => mediaChangedFired = true;
+
+        svc.Dispose();
+
+        Assert(!svc.IsRunning, "Service stopped on dispose");
+        Assert(!mediaChangedFired, "MediaChanged must be suppressed on Dispose");
+
+        // Multiple calls to Dispose / Stop are safe and still emit nothing
+        svc.Stop();
+        svc.Dispose();
+        Assert(!mediaChangedFired, "Repeated Stop/Dispose after Dispose still suppresses MediaChanged");
+    }
+
+    private static void TestMediaDisc_Lifecycle()
+    {
+        var win = new System.Windows.Window
+        {
+            Width = 100,
+            Height = 100,
+            ShowInTaskbar = false,
+            WindowStyle = System.Windows.WindowStyle.None
+        };
+        var disc = new MediaDisc();
+        win.Content = disc;
+
+        try
+        {
+            // 1. Initially before window is shown (unloaded): SetPlaying(true) must NOT run the timer
+            disc.SetPlaying(true);
+            Assert(!disc.IsSpinTimerRunningForTesting, "Spin timer must not run while unloaded");
+
+            // 2. When window is shown (Loaded & Visible): spin timer starts
+            win.Show();
+            Pump(50);
+            Assert(disc.IsSpinTimerRunningForTesting, "Spin timer starts on Loaded when playing and visible");
+
+            // 3. Remove from window (Unloaded): timer stops and tweens are cleared
+            win.Content = null;
+            Pump(50);
+            Assert(!disc.IsSpinTimerRunningForTesting, "Spin timer stops on Unloaded");
+            AssertEq(0, disc.ActiveTweenCountForTesting, "Tweens cleared on Unloaded");
+
+            // 4. While unloaded, SetPlaying or SyncSpin must NOT start timer
+            disc.SetPlaying(true);
+            Assert(!disc.IsSpinTimerRunningForTesting, "SyncSpin must not start spin timer while unloaded");
+
+            // 5. Put back in window when NOT playing must NOT start timer
+            disc.SetPlaying(false);
+            win.Content = disc;
+            Pump(50);
+            Assert(!disc.IsSpinTimerRunningForTesting, "Spin timer does not start on Loaded when not playing");
+
+            // 6. SetPlaying(true) while loaded starts timer
+            disc.SetPlaying(true);
+            Assert(disc.IsSpinTimerRunningForTesting, "Spin timer starts on SetPlaying when loaded");
+        }
+        finally
+        {
+            win.Close();
+            Pump(50);
+        }
+    }
+
+    private static void TestMediaArtwork_BoundedTimeout_RecoversAndDisposesStream()
+    {
+        // 1. Null stream returns null immediately
+        var nullTask = MediaService.TryGetArtworkAsync(null, TimeSpan.FromSeconds(2.5));
+        Assert(nullTask.Result is null, "Null stream reference returns null");
+
+        // 2. Empty stream returns null
+        using (var emptyStream = new InMemoryRandomAccessStream())
+        {
+            var streamRef = RandomAccessStreamReference.CreateFromStream(emptyStream);
+            var emptyTask = MediaService.TryGetArtworkAsync(streamRef, TimeSpan.FromSeconds(2.5));
+            Assert(emptyTask.Result is null, "Empty stream returns null");
+        }
+
+        // 3. Valid stream returns byte content
+        byte[] expected = new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
+        using (var validStream = new InMemoryRandomAccessStream())
+        {
+            using (var writer = new DataWriter(validStream))
+            {
+                writer.WriteBytes(expected);
+                writer.StoreAsync().AsTask().GetAwaiter().GetResult();
+                writer.DetachStream();
+            }
+            validStream.Seek(0);
+            var streamRef = RandomAccessStreamReference.CreateFromStream(validStream);
+            var validTask = MediaService.TryGetArtworkAsync(streamRef, TimeSpan.FromSeconds(2.5));
+            var bytes = validTask.Result;
+            Assert(bytes is not null, "Artwork bytes retrieved from valid stream");
+            AssertEq(expected.Length, bytes!.Length, "Byte count matches");
+            AssertEq(expected[0], bytes[0], "First byte matches PNG header");
+        }
+
+        // 4. Zero/expired timeout handles timeout gracefully and returns null
+        using (var slowStream = new InMemoryRandomAccessStream())
+        {
+            var streamRef = RandomAccessStreamReference.CreateFromStream(slowStream);
+            var timedOutTask = MediaService.TryGetArtworkAsync(streamRef, TimeSpan.FromMilliseconds(0));
+            Assert(timedOutTask.Result is null, "Zero timeout returns null safely without throwing");
+        }
+    }
+
+    private static void TestMediaLifecycle_StopVsStartupCompletion_RaceCondition()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        using var svc = new MediaService(bus);
+
+        int subscribeCount = 0;
+        int unsubscribeCount = 0;
+        MediaService.OnManagerSubscribedForTesting = () => Interlocked.Increment(ref subscribeCount);
+        MediaService.OnManagerUnsubscribedForTesting = () => Interlocked.Increment(ref unsubscribeCount);
+
+        // Try getting a real SMTC manager if available on the system, or null
+        Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager? manager = null;
+        try
+        {
+            manager = Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager.RequestAsync().AsTask().GetAwaiter().GetResult();
+        }
+        catch { }
+
+        var startupCompletedManagerAcquisition = new ManualResetEventSlim(false);
+        MediaService.ManagerRequesterForTesting = ct =>
+        {
+            startupCompletedManagerAcquisition.Set();
+            return Task.FromResult(manager);
+        };
+
+        // When StartCoreAsync finishes requesting manager and is about to acquire the lifecycle lock,
+        // force Stop() to execute and acquire the lock first.
+        MediaService.BeforeStartupLockAcquiredForTesting = () =>
+        {
+            svc.Stop();
+        };
+
+        try
+        {
+            var startTask = svc.StartAsync();
+            Assert(startupCompletedManagerAcquisition.Wait(TimeSpan.FromSeconds(2)), "Manager request completed");
+            Pump(50);
+            startTask.GetAwaiter().GetResult();
+
+            Assert(!svc.IsRunning, "Service must remain stopped when Stop races with startup completion");
+            Assert(!svc.HasManagerForTesting, "Manager must not be attached to service");
+            Assert(!svc.IsDisposedForTesting, "Service must not be marked disposed");
+            Assert(!svc.HasManagerSubscriptionsForTesting, "Service must report no active manager subscriptions");
+            AssertEq(0, Volatile.Read(ref subscribeCount), "Manager event subscriptions must not be attached during stopped race");
+
+            // Verify the service can start cleanly after the race condition was handled
+            MediaService.BeforeStartupLockAcquiredForTesting = null;
+            var restartTask = svc.StartAsync();
+            Pump(50);
+            restartTask.GetAwaiter().GetResult();
+
+            if (manager is not null)
+            {
+                Assert(svc.IsRunning, "Service started successfully on subsequent StartAsync");
+                Assert(svc.HasManagerForTesting, "Manager attached on restart");
+                Assert(svc.HasManagerSubscriptionsForTesting, "Service has active manager subscriptions on restart");
+                AssertEq(1, Volatile.Read(ref subscribeCount), "Manager event handlers subscribed on restart");
+
+                svc.Stop();
+                Assert(!svc.IsRunning, "Service stopped cleanly after restart");
+                Assert(!svc.HasManagerSubscriptionsForTesting, "Manager subscriptions cleared after stop");
+                AssertEq(1, Volatile.Read(ref unsubscribeCount), "Manager event handlers unsubscribed on stop");
+            }
+        }
+        finally
+        {
+            MediaService.ManagerRequesterForTesting = null;
+            MediaService.BeforeStartupLockAcquiredForTesting = null;
+            MediaService.OnManagerSubscribedForTesting = null;
+            MediaService.OnManagerUnsubscribedForTesting = null;
+        }
+    }
+
+    private sealed class MockPendingAsyncOperation<T> : Windows.Foundation.IAsyncOperation<T>
+    {
+        private readonly TaskCompletionSource<T> _tcs = new();
+        private Windows.Foundation.AsyncOperationCompletedHandler<T>? _completed;
+        private Windows.Foundation.AsyncStatus _status = Windows.Foundation.AsyncStatus.Started;
+
+        public bool CancelInvoked { get; private set; }
+        public bool CloseInvoked { get; private set; }
+
+        public void Cancel()
+        {
+            CancelInvoked = true;
+        }
+
+        public void Close()
+        {
+            CloseInvoked = true;
+        }
+
+        public Windows.Foundation.AsyncOperationCompletedHandler<T>? Completed
+        {
+            get => _completed;
+            set
+            {
+                _completed = value;
+                if (_status != Windows.Foundation.AsyncStatus.Started)
+                {
+                    _completed?.Invoke(this, _status);
+                }
+            }
+        }
+
+        public Exception? ErrorCode { get; private set; }
+        public uint Id => 1;
+        public Windows.Foundation.AsyncStatus Status => _status;
+
+        public T GetResults() => _tcs.Task.GetAwaiter().GetResult();
+
+        public void CompleteSuccess(T result)
+        {
+            _status = Windows.Foundation.AsyncStatus.Completed;
+            _tcs.TrySetResult(result);
+            _completed?.Invoke(this, _status);
+        }
+
+        public void CompleteCanceled()
+        {
+            _status = Windows.Foundation.AsyncStatus.Canceled;
+            _tcs.TrySetCanceled();
+            _completed?.Invoke(this, _status);
+        }
+
+        public void CompleteError(Exception ex)
+        {
+            _status = Windows.Foundation.AsyncStatus.Error;
+            ErrorCode = ex;
+            _tcs.TrySetException(ex);
+            _completed?.Invoke(this, _status);
+        }
+    }
+
+    private sealed class MockPendingStreamReference : IRandomAccessStreamReference
+    {
+        private readonly Windows.Foundation.IAsyncOperation<IRandomAccessStreamWithContentType> _op;
+
+        public MockPendingStreamReference(Windows.Foundation.IAsyncOperation<IRandomAccessStreamWithContentType> op)
+        {
+            _op = op;
+        }
+
+        public Windows.Foundation.IAsyncOperation<IRandomAccessStreamWithContentType> OpenReadAsync() => _op;
+    }
+
+    private sealed class StreamWithContentType : IRandomAccessStreamWithContentType
+    {
+        private readonly IRandomAccessStream _inner;
+        public string ContentType { get; }
+        public bool IsDisposed { get; private set; }
+
+        public StreamWithContentType(IRandomAccessStream inner, string contentType = "image/png")
+        {
+            _inner = inner;
+            ContentType = contentType;
+        }
+
+        public bool CanRead => _inner.CanRead;
+        public bool CanWrite => _inner.CanWrite;
+        public ulong Position => _inner.Position;
+        public ulong Size { get => _inner.Size; set => _inner.Size = value; }
+
+        public IRandomAccessStream CloneStream() => _inner.CloneStream();
+        public void Dispose()
+        {
+            IsDisposed = true;
+            _inner.Dispose();
+        }
+        public void Seek(ulong position) => _inner.Seek(position);
+        public Windows.Foundation.IAsyncOperation<bool> FlushAsync() => _inner.FlushAsync();
+        public IInputStream GetInputStreamAt(ulong position) => _inner.GetInputStreamAt(position);
+        public IOutputStream GetOutputStreamAt(ulong position) => _inner.GetOutputStreamAt(position);
+        public Windows.Foundation.IAsyncOperationWithProgress<IBuffer, uint> ReadAsync(IBuffer buffer, uint count, InputStreamOptions options) => _inner.ReadAsync(buffer, count, options);
+        public Windows.Foundation.IAsyncOperationWithProgress<uint, uint> WriteAsync(IBuffer buffer) => _inner.WriteAsync(buffer);
+    }
+
+    private static void TestMediaArtwork_PendingAsyncOperation_SafeDisposal()
+    {
+        try
+        {
+            // 1. OpenReadAsync remains pending beyond timeout:
+            // Verify public method returns null within configured deadline, cancellation is signaled on op,
+            // stream is not disposed prematurely, and late-arriving stream is explicitly disposed afterward.
+            var mockOpenOp = new MockPendingAsyncOperation<IRandomAccessStreamWithContentType>();
+            var streamRef = new MockPendingStreamReference(mockOpenOp);
+
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var task = MediaService.TryGetArtworkAsync(streamRef, TimeSpan.FromMilliseconds(50));
+            var result = task.GetAwaiter().GetResult();
+            sw.Stop();
+
+            Assert(result is null, "Pending thumbnail operation reports null artwork on timeout");
+            Assert(sw.Elapsed < TimeSpan.FromSeconds(1), $"Timeout returned within bounded time: {sw.ElapsedMilliseconds}ms");
+            Assert(mockOpenOp.CancelInvoked, "Cancellation was requested on the underlying WinRT open operation");
+            Assert(!mockOpenOp.CloseInvoked, "Underlying operation Close was not prematurely called while pending");
+
+            // Complete the abandoned open operation with a stream; verify deferred disposal explicitly cleans it up
+            using var lateInnerStream = new InMemoryRandomAccessStream();
+            var lateStreamWrapper = new StreamWithContentType(lateInnerStream);
+            Assert(!lateStreamWrapper.IsDisposed, "Late stream wrapper is initially undisposed");
+
+            mockOpenOp.CompleteSuccess(lateStreamWrapper);
+            PumpUntil(() => lateStreamWrapper.IsDisposed, 1000);
+
+            Assert(lateStreamWrapper.IsDisposed, "Late-arriving stream was explicitly disposed after timed-out operation completed");
+
+            // 2. Pending LoadAsync operation:
+            // Verify caller returns null within deadline, cancellation is requested, reader and stream remain alive
+            // while pending, and both are explicitly disposed once the underlying load operation reaches terminal state.
+            using var loadInnerStream = new InMemoryRandomAccessStream();
+            var loadTrackableStream = new StreamWithContentType(loadInnerStream);
+
+            var promptOpenOp = new MockPendingAsyncOperation<IRandomAccessStreamWithContentType>();
+            var loadStreamRef = new MockPendingStreamReference(promptOpenOp);
+            promptOpenOp.CompleteSuccess(loadTrackableStream);
+
+            var mockLoadOp = new MockPendingAsyncOperation<uint>();
+            Windows.Storage.Streams.DataReader? capturedReader = null;
+            MediaService.LoadOperationProviderForTesting = (reader, stream, count) =>
+            {
+                if (ReferenceEquals(stream, loadTrackableStream))
+                {
+                    capturedReader = reader;
+                    return mockLoadOp;
+                }
+                return reader.LoadAsync(count);
+            };
+
+            var loadSw = System.Diagnostics.Stopwatch.StartNew();
+            var loadTask = MediaService.TryGetArtworkAsync(loadStreamRef, TimeSpan.FromMilliseconds(50));
+            var loadResult = loadTask.GetAwaiter().GetResult();
+            loadSw.Stop();
+
+            Assert(loadResult is null, "Pending load operation reports null artwork on timeout");
+            Assert(loadSw.Elapsed < TimeSpan.FromSeconds(1), $"Load timeout returned within bounded time: {loadSw.ElapsedMilliseconds}ms");
+            Assert(mockLoadOp.CancelInvoked, "Cancellation was requested on the underlying WinRT load operation");
+            Assert(mockLoadOp.Status == Windows.Foundation.AsyncStatus.Started, "Underlying load operation is still in pending/started state");
+            Assert(!loadTrackableStream.IsDisposed, "Stream must NOT be prematurely disposed while load operation is still in flight");
+            Assert(capturedReader is not null, "DataReader was instantiated for stream");
+
+            bool readerDisposedEarly = false;
+            try { _ = capturedReader!.UnconsumedBufferLength; }
+            catch (Exception) { readerDisposedEarly = true; }
+            Assert(!readerDisposedEarly, "DataReader must NOT be prematurely disposed while load operation is still in flight");
+
+            // Now signal terminal completion on the underlying load operation (e.g. cancellation completed)
+            mockLoadOp.CompleteCanceled();
+            PumpUntil(() => loadTrackableStream.IsDisposed, 1000);
+
+            Assert(loadTrackableStream.IsDisposed, "Stream is explicitly disposed after pending load operation reaches terminal state");
+            bool readerDisposedTerminal = false;
+            try { _ = capturedReader!.UnconsumedBufferLength; }
+            catch (Exception) { readerDisposedTerminal = true; }
+            Assert(readerDisposedTerminal, "DataReader is explicitly disposed after pending load operation reaches terminal state");
+
+            MediaService.LoadOperationProviderForTesting = null;
+
+            // 3. Operation completes before timeout: extracts bytes normally
+            byte[] expected = new byte[] { 0x01, 0x02, 0x03, 0x04 };
+            using var validStream = new InMemoryRandomAccessStream();
+            using (var writer = new DataWriter(validStream))
+            {
+                writer.WriteBytes(expected);
+                writer.StoreAsync().AsTask().GetAwaiter().GetResult();
+                writer.DetachStream();
+            }
+            validStream.Seek(0);
+
+            MediaService.LoadOperationProviderForTesting = null;
+            var successOp = new MockPendingAsyncOperation<IRandomAccessStreamWithContentType>();
+            var successRef = new MockPendingStreamReference(successOp);
+            var successTask = MediaService.TryGetArtworkAsync(successRef, TimeSpan.FromSeconds(2.5));
+            successOp.CompleteSuccess(new StreamWithContentType(validStream));
+
+            var successBytes = successTask.GetAwaiter().GetResult();
+            Assert(successBytes is not null, "Artwork bytes retrieved on prompt completion");
+            AssertEq(expected.Length, successBytes!.Length, "Byte length matches expected");
+            AssertEq(expected[0], successBytes[0], "First byte matches expected");
+        }
+        finally
+        {
+            MediaService.LoadOperationProviderForTesting = null;
+        }
     }
 }
