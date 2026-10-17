@@ -386,7 +386,10 @@ public partial class NetDetailPanel : UserControl
         System.Windows.Media.CompositionTarget.Rendering += OnRendering;
     }
 
-    private void StopRenderLoop()
+    /// <summary>Explicitly stops the CompositionTarget render loop. Idempotent.</summary>
+    internal void Stop() => StopRenderLoop();
+
+    internal void StopRenderLoop()
     {
         if (!_rendering) return;
         _rendering = false;

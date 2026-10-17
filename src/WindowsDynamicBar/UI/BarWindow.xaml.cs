@@ -371,6 +371,7 @@ public partial class BarWindow : Window, IDisposable
             {
                 Dispatcher.InvokeAsync(() =>
                 {
+                    if (_disposed) return;
                     HoverEq.SetSpectrum(bands);
                     _buddyController?.SetAudioSpectrum(bands);
                 });
@@ -505,6 +506,7 @@ public partial class BarWindow : Window, IDisposable
         TimerPanelComponent.PauseRequested -= OnTimerPauseRequested;
         TimerPanelComponent.ResumeRequested -= OnTimerResumeRequested;
         NetPanelComponent.TestToggleRequested -= OnNetTestToggle;
+        try { NetPanelComponent.Stop(); } catch { }
         MirrorPanelComponent.CameraStateChanged -= OnMirrorCameraStateChanged;
         VolumeHudBar.Scrub -= OnVolumeHudScrub;
         TeardownSearch();
@@ -1020,6 +1022,7 @@ public partial class BarWindow : Window, IDisposable
 
     private void ApplyTelemetry(TelemetrySnapshot snap)
     {
+        if (_disposed) return;
         _telemetry = snap;
         if (_islandState == IslandVisualState.Detail)
         {
@@ -1666,7 +1669,7 @@ public partial class BarWindow : Window, IDisposable
 
     private void UpdateVolumeControls()
     {
-        if (App.Volume is null) return;
+        if (_disposed || App.Volume is null) return;
         _syncingHoverVol = true;
         try
         {
@@ -2138,6 +2141,7 @@ public partial class BarWindow : Window, IDisposable
         {
             Dispatcher.BeginInvoke(() =>
             {
+                if (_disposed) return;
                 if (IslandExpandedHost.Visibility != Visibility.Visible) return;
                 UpdateClipRing();
                 if (_islandState == IslandVisualState.Detail && _activeMetric == IslandMetric.Clipboard) RenderClipboard();
@@ -2243,6 +2247,7 @@ public partial class BarWindow : Window, IDisposable
         {
             Dispatcher.BeginInvoke(() =>
             {
+                if (_disposed) return;
                 if (IslandExpandedHost.Visibility != Visibility.Visible) return;
                 UpdateTogglesRing();
                 if (_islandState == IslandVisualState.Detail && _activeMetric == IslandMetric.Toggles) RenderToggles();
@@ -2331,7 +2336,10 @@ public partial class BarWindow : Window, IDisposable
         {
             Dispatcher.BeginInvoke(() =>
             {
-                var testState = _netMonitor?.TestState;
+                if (_disposed) return;
+                var net = _netMonitor;
+                if (net is null) return;
+                var testState = net.TestState;
                 if (testState is not null)
                 {
                     if (testState.Phase == NetTestPhase.Done && _lastNetTestPhase != NetTestPhase.Done)
@@ -2342,8 +2350,8 @@ public partial class BarWindow : Window, IDisposable
                 }
                 if (IslandExpandedHost.Visibility != Visibility.Visible) return;
                 UpdateNetIcon();
-                if (_islandState == IslandVisualState.Detail && _activeMetric == IslandMetric.Net && _netMonitor is not null)
-                    NetPanelComponent.Render(_netMonitor);
+                if (_islandState == IslandVisualState.Detail && _activeMetric == IslandMetric.Net)
+                    NetPanelComponent.Render(net);
             });
         }
         catch { }
@@ -2380,10 +2388,14 @@ public partial class BarWindow : Window, IDisposable
         {
             Dispatcher.BeginInvoke(() =>
             {
-                OnBuddyWeatherUpdated(_weather?.Snapshot);
+                if (_disposed) return;
+                var weather = _weather;
+                if (weather is null) return;
+                var snapshot = weather.Snapshot;
+                OnBuddyWeatherUpdated(snapshot);
                 if (IslandExpandedHost.Visibility == Visibility.Visible) UpdateWeatherIcon();
-                if (_islandState == IslandVisualState.Detail && _activeMetric == IslandMetric.Weather && _weather is not null)
-                    WeatherPanelComponent.Render(_weather.Snapshot);
+                if (_islandState == IslandVisualState.Detail && _activeMetric == IslandMetric.Weather)
+                    WeatherPanelComponent.Render(snapshot);
             });
         }
         catch { }
