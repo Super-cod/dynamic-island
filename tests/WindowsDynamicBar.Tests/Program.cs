@@ -7,6 +7,7 @@ using WindowsDynamicBar.Core.Settings;
 using WindowsDynamicBar.Core.Telemetry;
 using WindowsDynamicBar.Core.Search;
 using WindowsDynamicBar.Services.Media;
+using WindowsDynamicBar.Services.Settings;
 using WindowsDynamicBar.Services.SystemInfo;
 using WindowsDynamicBar.Services.SystemMonitor;
 using WindowsDynamicBar.Services.Timers;

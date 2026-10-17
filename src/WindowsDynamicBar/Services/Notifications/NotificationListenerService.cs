@@ -1,6 +1,7 @@
 using WindowsDynamicBar.Core.Events;
 using WindowsDynamicBar.Core.Logging;
 using WindowsDynamicBar.Core.Settings;
+using WindowsDynamicBar.Services.Settings;
 
 namespace WindowsDynamicBar.Services.Notifications;
 

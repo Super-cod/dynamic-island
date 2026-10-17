@@ -15,6 +15,7 @@ using System.Windows.Threading;
 using WindowsDynamicBar.Core.Clipboard;
 using WindowsDynamicBar.Core.Settings;
 using WindowsDynamicBar.Core.Telemetry;
+using WindowsDynamicBar.Services.Settings;
 using WindowsDynamicBar.Services.SystemMonitor;
 using WindowsDynamicBar.Services.Timers;
 using WindowsDynamicBar.Services.Weather;

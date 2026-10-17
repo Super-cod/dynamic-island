@@ -7,6 +7,7 @@ using Windows.Devices.Radios;
 using WindowsDynamicBar.Core.Logging;
 using WindowsDynamicBar.Core.Settings;
 using WindowsDynamicBar.Interop;
+using WindowsDynamicBar.Services.Settings;
 
 namespace WindowsDynamicBar.Services.Toggles;
 

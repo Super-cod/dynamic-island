@@ -8,6 +8,7 @@ using WindowsDynamicBar.Core.Events;
 using WindowsDynamicBar.Core.Media;
 using WindowsDynamicBar.Core.Settings;
 using WindowsDynamicBar.Services.Privacy;
+using WindowsDynamicBar.Services.Settings;
 using WindowsDynamicBar.Services.SystemMonitor;
 using WindowsDynamicBar.Services.Updates;
 using WindowsDynamicBar.UI;

@@ -4,6 +4,7 @@ using System.Text.Json;
 using WindowsDynamicBar.Core.Logging;
 using WindowsDynamicBar.Core.Net;
 using WindowsDynamicBar.Core.Settings;
+using WindowsDynamicBar.Services.Settings;
 
 namespace WindowsDynamicBar.Services.Weather;
 

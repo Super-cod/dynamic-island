@@ -12,6 +12,7 @@ using WindowsDynamicBar.Core.Logging;
 using WindowsDynamicBar.Core.Net;
 using WindowsDynamicBar.Core.Settings;
 using WindowsDynamicBar.Core.Telemetry;
+using WindowsDynamicBar.Services.Settings;
 using WindowsDynamicBar.Services.SystemInfo;
 
 namespace WindowsDynamicBar.Services.SystemMonitor;

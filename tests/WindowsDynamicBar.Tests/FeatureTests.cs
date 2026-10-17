@@ -1,4 +1,6 @@
+using System.Collections.Generic;
 using System.IO;
+using System.Threading;
 using WindowsDynamicBar.Core.Clipboard;
 using WindowsDynamicBar.Core.Events;
 using WindowsDynamicBar.Core.Net;
@@ -6,6 +8,7 @@ using WindowsDynamicBar.Core.Settings;
 using WindowsDynamicBar.Core.Telemetry;
 using WindowsDynamicBar.Interop;
 using WindowsDynamicBar.Services.Media;
+using WindowsDynamicBar.Services.Settings;
 using WindowsDynamicBar.Services.SystemInfo;
 
 namespace WindowsDynamicBar.Tests;
@@ -38,6 +41,10 @@ internal static partial class Program
         Run("LruCache never exceeds its limit and evicts least recently used", TestLruCache);
         Run("Settings: validation clamps bad values and broken hotkeys", TestSettingsValidation);
         Run("Settings: corrupt file is moved aside and defaults load", TestSettingsCorruption);
+        Run("Settings: persistent read failure preserves file on disk", TestSettingsLoad_PersistentReadFailure_PreservesFile);
+        Run("Settings: transient read failure recovers via retry", TestSettingsLoad_TransientReadFailure_Recovers);
+        Run("Settings: save failure preserves previous valid file", TestSettingsSave_Failure_PreservesPreviousValidFile);
+        Run("Settings: concurrent readers and atomic save coexist safely", TestSettingsSave_ConcurrentReaders_DoesNotThrow);
         Run("Settings: v1 file migrates Reduce Motion", TestSettingsMigration);
         Run("Hotkeys: format, compare, duplicates", TestHotkeyHelpers);
         Run("SemVer comparison for updates", TestSemVer);
@@ -61,7 +68,7 @@ internal static partial class Program
             WarnBatteryPercent = 1, MonitorIndex = -9, HotkeySearch = "Ctrl+Banana", HotkeyMedia = "",
             AccentColor = "blue", ClockFormat = (WindowsDynamicBar.Core.Settings.ClockFormat)42,
         };
-        WindowsDynamicBar.Core.Settings.SettingsService.Validate(m);
+        SettingsService.Validate(m);
         AssertEq(1.0, m.Opacity, "opacity clamped");
         AssertEq(260.0, m.BarWidth, "NaN width -> default");
         AssertEq(50, m.ClipboardLimit, "clipboard limit clamped");
@@ -78,7 +85,7 @@ internal static partial class Program
     {
         string dir = ScratchDir();
         string path = Path.Combine(dir, "settings.json");
-        var svc = WindowsDynamicBar.Core.Settings.SettingsService.Instance;
+        var svc = SettingsService.Instance;
         try
         {
             File.WriteAllText(path, "{ this is not json ]");
@@ -97,17 +104,187 @@ internal static partial class Program
         }
     }
 
+    private static void TestSettingsLoad_PersistentReadFailure_PreservesFile()
+    {
+        string dir = ScratchDir();
+        string path = Path.Combine(dir, "settings.json");
+        var svc = SettingsService.Instance;
+        try
+        {
+            File.WriteAllText(path, "{ \"MonitorIndex\": 3, \"Opacity\": 0.9 }");
+            svc.ClearLoadProblem();
+
+            // Lock file exclusively to simulate an unreadable file due to persistent lock
+            using (var lockStream = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            {
+                var loaded = svc.Load(path);
+                Assert(File.Exists(path), "locked file is preserved on disk (not deleted)");
+                AssertEq(0, Directory.GetFiles(dir, "settings.bad-*.json").Length, "locked file is NOT moved to .bad");
+                Assert(svc.LoadProblem is not null && svc.LoadProblem.Contains("could not be read"), "LoadProblem reports unreadable file");
+            }
+
+            svc.ClearLoadProblem();
+            Assert(svc.LoadProblem is null, "LoadProblem cleared");
+        }
+        finally
+        {
+            svc.ClearLoadProblem();
+            Directory.Delete(dir, recursive: true);
+            svc.Load();
+        }
+    }
+
+    private static void TestSettingsLoad_TransientReadFailure_Recovers()
+    {
+        string dir = ScratchDir();
+        string path = Path.Combine(dir, "settings.json");
+        var svc = SettingsService.Instance;
+        try
+        {
+            File.WriteAllText(path, "{ \"MonitorIndex\": 5, \"Opacity\": 0.95 }");
+            svc.ClearLoadProblem();
+
+            int attempts = 0;
+            SettingsService.StreamOpenerForTesting = p =>
+            {
+                attempts++;
+                if (attempts == 1)
+                {
+                    throw new IOException("Simulated transient file sharing violation");
+                }
+                return new FileStream(p, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            };
+
+            var loaded = svc.Load(path);
+            AssertEq(2, attempts, "retried after transient failure and succeeded on attempt 2");
+            AssertEq(5, loaded.MonitorIndex, "loaded valid settings after retry");
+            AssertEq(0.95, loaded.Opacity, "opacity loaded after retry");
+            Assert(svc.LoadProblem is null, "no LoadProblem reported for recovered transient error");
+            Assert(File.Exists(path), "file remains intact on disk");
+            AssertEq(0, Directory.GetFiles(dir, "settings.bad-*.json").Length, "not treated as corrupt");
+        }
+        finally
+        {
+            SettingsService.StreamOpenerForTesting = null;
+            Directory.Delete(dir, recursive: true);
+            svc.Load();
+        }
+    }
+
+    private static void TestSettingsSave_Failure_PreservesPreviousValidFile()
+    {
+        string dir = ScratchDir();
+        string path = Path.Combine(dir, "settings.json");
+        var svc = SettingsService.Instance;
+        string originalPath = svc.SettingsPath;
+        try
+        {
+            svc.SettingsPath = path;
+            var initial = new WindowsDynamicBar.Core.Settings.SettingsModel { MonitorIndex = 1, Opacity = 0.75 };
+            svc.Save(initial);
+            Assert(File.Exists(path), "initial settings saved");
+
+            // Exclusively lock destination file with FileShare.None so File.Replace cannot replace it
+            using (var lockStream = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            {
+                var failedUpdate = new WindowsDynamicBar.Core.Settings.SettingsModel { MonitorIndex = 9, Opacity = 1.0 };
+                svc.Save(failedUpdate);
+            }
+
+            // Verify original file is intact and not truncated or corrupted
+            Assert(File.Exists(path), "original settings file preserved on disk");
+            string contents = File.ReadAllText(path);
+            Assert(contents.Contains("\"MonitorIndex\": 1"), "original settings values preserved intact");
+            Assert(!contents.Contains("\"MonitorIndex\": 9"), "failed update was not written into file");
+
+            // Verify temporary files cleaned up in finally
+            string[] tmpFiles = Directory.GetFiles(dir, "*.tmp");
+            AssertEq(0, tmpFiles.Length, "temporary files cleaned up in finally block");
+        }
+        finally
+        {
+            svc.SettingsPath = originalPath;
+            Directory.Delete(dir, recursive: true);
+            svc.Load();
+        }
+    }
+
+    private static void TestSettingsSave_ConcurrentReaders_DoesNotThrow()
+    {
+        string dir = ScratchDir();
+        string path = Path.Combine(dir, "settings.json");
+        var svc = SettingsService.Instance;
+        string originalPath = svc.SettingsPath;
+        try
+        {
+            svc.SettingsPath = path;
+            var initial = new WindowsDynamicBar.Core.Settings.SettingsModel { MonitorIndex = 2 };
+            svc.Save(initial);
+
+            // Open reader stream with FileShare.ReadWrite | FileShare.Delete
+            using (var readerStream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            using (var reader = new StreamReader(readerStream))
+            {
+                string json = reader.ReadToEnd();
+                Assert(json.Contains("\"MonitorIndex\": 2"), "reader read initial data");
+
+                // Save while reader stream handle is held open
+                var updated = new WindowsDynamicBar.Core.Settings.SettingsModel { MonitorIndex = 4 };
+                svc.Save(updated);
+            }
+
+            var loaded = svc.Load(path);
+            AssertEq(4, loaded.MonitorIndex, "atomic replace succeeded alongside concurrent reader");
+
+            // Multi-threaded concurrent reads and updates
+            var exceptions = new System.Collections.Concurrent.ConcurrentBag<Exception>();
+            var threads = new List<Thread>();
+            for (int i = 0; i < 4; i++)
+            {
+                int threadId = i;
+                threads.Add(new Thread(() =>
+                {
+                    try
+                    {
+                        for (int j = 0; j < 10; j++)
+                        {
+                            svc.Load(path);
+                            if (threadId % 2 == 0)
+                            {
+                                svc.Save(new WindowsDynamicBar.Core.Settings.SettingsModel { MonitorIndex = (threadId + j) % 5 });
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        exceptions.Add(ex);
+                    }
+                }));
+            }
+            foreach (var t in threads) t.Start();
+            foreach (var t in threads) t.Join();
+
+            AssertEq(0, exceptions.Count, "no unhandled exceptions during concurrent read/write operations");
+        }
+        finally
+        {
+            svc.SettingsPath = originalPath;
+            Directory.Delete(dir, recursive: true);
+            svc.Load();
+        }
+    }
+
     private static void TestSettingsMigration()
     {
         string dir = ScratchDir();
         string path = Path.Combine(dir, "settings.json");
-        var svc = WindowsDynamicBar.Core.Settings.SettingsService.Instance;
+        var svc = SettingsService.Instance;
         try
         {
             File.WriteAllText(path, "{ \"ReduceMotion\": true, \"Opacity\": 0.8 }");   // v1 file: no SettingsVersion
             var m = svc.Load(path);
             AssertEq(WindowsDynamicBar.Core.Settings.ReduceMotionMode.Always, m.ReduceMotionMode, "v1 Reduce Motion -> Always");
-            AssertEq(WindowsDynamicBar.Core.Settings.SettingsService.CurrentVersion, m.SettingsVersion, "version bumped");
+            AssertEq(SettingsService.CurrentVersion, m.SettingsVersion, "version bumped");
             AssertEq(0.8, m.Opacity, "other values kept");
         }
         finally
@@ -426,7 +603,7 @@ internal static partial class Program
         try
         {
             var bus = new WindowsDynamicBar.Core.Events.EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
-            using var timer = new WindowsDynamicBar.Services.Timers.TimerService(bus, WindowsDynamicBar.Core.Settings.SettingsService.Instance);
+            using var timer = new WindowsDynamicBar.Services.Timers.TimerService(bus, SettingsService.Instance);
             timer.Start(TimeSpan.FromSeconds(3), "t");
             Pump(1000);
             var info = timer.Current;
@@ -443,7 +620,7 @@ internal static partial class Program
         try
         {
             var bus = new WindowsDynamicBar.Core.Events.EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
-            using var timer = new WindowsDynamicBar.Services.Timers.TimerService(bus, WindowsDynamicBar.Core.Settings.SettingsService.Instance);
+            using var timer = new WindowsDynamicBar.Services.Timers.TimerService(bus, SettingsService.Instance);
             timer.Start(TimeSpan.FromSeconds(5), "PauseTest");
             Pump(250);
             timer.Pause();
@@ -468,13 +645,13 @@ internal static partial class Program
         try
         {
             var bus = new WindowsDynamicBar.Core.Events.EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
-            using (var timer = new WindowsDynamicBar.Services.Timers.TimerService(bus, WindowsDynamicBar.Core.Settings.SettingsService.Instance))
+            using (var timer = new WindowsDynamicBar.Services.Timers.TimerService(bus, SettingsService.Instance))
             {
                 timer.Start(TimeSpan.FromMinutes(10), "Tea");
                 var st = WindowsDynamicBar.Core.Settings.RuntimeState.Instance.Current;
                 Assert(st.TimerEndUtc is DateTime end && Math.Abs((end - DateTime.UtcNow).TotalMinutes - 10) < 0.05, "end time written");
             }
-            using (var restored = new WindowsDynamicBar.Services.Timers.TimerService(bus, WindowsDynamicBar.Core.Settings.SettingsService.Instance))
+            using (var restored = new WindowsDynamicBar.Services.Timers.TimerService(bus, SettingsService.Instance))
             {
                 restored.RestoreFromState();     // "app restart"
                 var info = restored.Current;

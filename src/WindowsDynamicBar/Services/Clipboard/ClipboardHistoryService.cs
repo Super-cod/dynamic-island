@@ -8,6 +8,7 @@ using WindowsDynamicBar.Core.Clipboard;
 using WindowsDynamicBar.Core.Logging;
 using WindowsDynamicBar.Core.Settings;
 using WindowsDynamicBar.Interop;
+using WindowsDynamicBar.Services.Settings;
 
 namespace WindowsDynamicBar.Services.Clipboard;
 
