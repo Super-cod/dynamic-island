@@ -86,6 +86,12 @@ internal static partial class Program
         Run("DownloadService: temporary-extension filtering, name cleaning, and speed formatting", TestDownloadService_ExtensionFilteringAndCleanName);
         Run("DownloadService: rename transitions and completion announcements respect feature settings", TestDownloadService_RenameAndCompletion);
         Run("DownloadService: progress ticks compute speed, estimate ETA, and suppress stalled updates", TestDownloadService_ProgressSpeedAndETA);
+        Run("PrivacyService: Start and Dispose are idempotent, thread-safe, and reject calls after disposal", TestPrivacyService_StartAndDisposeIdempotency);
+        Run("PrivacyService: Current returns consistent thread-safe snapshots under concurrent recompute", TestPrivacyService_CurrentThreadSafeSnapshot);
+        Run("PrivacyService: in-flight scan racing with Dispose suppresses state mutation and event dispatch", TestPrivacyService_InFlightScanVsDisposeRace);
+        Run("PrivacyService: post-disposal callbacks and BarEvents are suppressed", TestPrivacyService_PostDisposalSuppression);
+        Run("PrivacyService: consent-store subkey parsing, path decoding, and active calculation", TestPrivacyService_ParsingAndDecoding);
+        Run("PrivacyService: state transitions and BarEvent publishing respect feature settings", TestPrivacyService_StateTransitionsAndBarEvents);
     }
 
     private static string ScratchDir()
@@ -2583,5 +2589,323 @@ internal static partial class Program
         var t3 = t2.AddSeconds(1);
         svc.TickProgress(p => null, t3);
         AssertEq(0, svc.ActiveCount, "Disappeared file removed from active downloads");
+    }
+
+    private static void TestPrivacyService_StartAndDisposeIdempotency()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+
+        // 1. Repeated sequential Start()
+        var svc = new PrivacyService(bus, settings, now => new PrivacyState(false, false, null, null));
+        Assert(!svc.IsStarted, "Initially not started");
+        Assert(!svc.IsDisposed, "Initially not disposed");
+        Assert(!svc.HasTimer, "Initially has no timer");
+
+        svc.Start();
+        Assert(svc.IsStarted, "Started after Start()");
+        Assert(svc.HasTimer, "Has timer after Start()");
+
+        svc.Start(); // Idempotent repeat
+        Assert(svc.IsStarted, "Still started after repeat Start()");
+        Assert(svc.HasTimer, "Timer retained after repeat Start()");
+
+        // 2. Repeated sequential Dispose()
+        svc.Dispose();
+        Assert(svc.IsDisposed, "Disposed after Dispose()");
+        Assert(!svc.IsStarted, "Not started after Dispose()");
+        Assert(!svc.HasTimer, "Timer nulled after Dispose()");
+
+        svc.Dispose(); // Idempotent repeat
+        Assert(svc.IsDisposed, "Still disposed after repeat Dispose()");
+
+        // 3. Start() after Dispose() is rejected
+        svc.Start();
+        Assert(!svc.IsStarted, "Start after Dispose is rejected (IsStarted is false)");
+        Assert(!svc.HasTimer, "Start after Dispose creates no timer");
+        Assert(svc.IsDisposed, "IsDisposed remains true");
+
+        // 4. Concurrent Start() calls from multiple threads
+        var concurrentSvc = new PrivacyService(bus, settings, now => new PrivacyState(false, false, null, null));
+        const int threadCount = 10;
+        var startBarrier = new Barrier(threadCount);
+        var threads = new List<Thread>();
+        var errors = new List<Exception>();
+
+        for (int i = 0; i < threadCount; i++)
+        {
+            var t = new Thread(() =>
+            {
+                try
+                {
+                    startBarrier.SignalAndWait();
+                    concurrentSvc.Start();
+                }
+                catch (Exception ex)
+                {
+                    lock (errors) errors.Add(ex);
+                }
+            });
+            threads.Add(t);
+            t.Start();
+        }
+
+        foreach (var t in threads) t.Join();
+
+        AssertEq(0, errors.Count, "Zero errors during concurrent Start()");
+        Assert(concurrentSvc.IsStarted, "Service started after concurrent Start()");
+        Assert(concurrentSvc.HasTimer, "Single timer owned after concurrent Start()");
+
+        concurrentSvc.Dispose();
+        Assert(concurrentSvc.IsDisposed, "Concurrent service disposed");
+    }
+
+    private static void TestPrivacyService_CurrentThreadSafeSnapshot()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+
+        // Toggle state between CameraOnly ("Teams") and MicOnly ("Discord")
+        int toggle = 0;
+        var svc = new PrivacyService(bus, settings, now =>
+        {
+            int v = Interlocked.Increment(ref toggle);
+            return (v % 2 == 0)
+                ? new PrivacyState(true, false, "Teams", null)
+                : new PrivacyState(false, true, null, "Discord");
+        });
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        var readerErrors = new List<string>();
+        const int readerCount = 8;
+        var threads = new List<Thread>();
+
+        for (int i = 0; i < readerCount; i++)
+        {
+            var t = new Thread(() =>
+            {
+                while (!cts.IsCancellationRequested)
+                {
+                    var cur = svc.Current;
+                    // Invariant check: snapshot must be coherent
+                    if (cur.CameraInUse && (cur.MicInUse || cur.CameraApp != "Teams" || cur.MicApp is not null))
+                    {
+                        lock (readerErrors) readerErrors.Add($"Torn camera state: {cur}");
+                        break;
+                    }
+                    if (cur.MicInUse && (cur.CameraInUse || cur.MicApp != "Discord" || cur.CameraApp is not null))
+                    {
+                        lock (readerErrors) readerErrors.Add($"Torn mic state: {cur}");
+                        break;
+                    }
+                    if (!cur.CameraInUse && !cur.MicInUse && (cur.CameraApp is not null || cur.MicApp is not null))
+                    {
+                        lock (readerErrors) readerErrors.Add($"Torn idle state: {cur}");
+                        break;
+                    }
+                }
+            });
+            threads.Add(t);
+            t.Start();
+        }
+
+        // Run recompute loop on main test thread for 200 iterations
+        for (int i = 0; i < 200; i++)
+        {
+            svc.RecomputeCore();
+        }
+
+        cts.Cancel();
+        foreach (var t in threads) t.Join();
+
+        AssertEq(0, readerErrors.Count, "Zero torn snapshots observed across concurrent readers");
+        svc.Dispose();
+    }
+
+    private static void TestPrivacyService_InFlightScanVsDisposeRace()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+
+        var scanStarted = new ManualResetEventSlim(false);
+        var allowScanToFinish = new ManualResetEventSlim(false);
+        int privacyChangedFired = 0;
+        var busEvents = new List<BarEvent>();
+
+        bus.EventRaised += evt =>
+        {
+            if (evt.Kind == BarEventKind.Privacy) busEvents.Add(evt);
+        };
+
+        var svc = new PrivacyService(bus, settings, now =>
+        {
+            scanStarted.Set();
+            allowScanToFinish.Wait(TimeSpan.FromSeconds(5));
+            return new PrivacyState(true, true, "CameraInFlight", "MicInFlight");
+        });
+
+        svc.PrivacyChanged += _ => Interlocked.Increment(ref privacyChangedFired);
+
+        // Start in-flight scan on background thread
+        var scanTask = Task.Run(() => svc.RecomputeCore());
+
+        // Wait until scan has started and is actively inside the scanner seam
+        bool started = scanStarted.Wait(TimeSpan.FromSeconds(3));
+        Assert(started, "Scan started signal received");
+
+        // Dispose service while scan is paused in-flight
+        svc.Dispose();
+        Assert(svc.IsDisposed, "Service is disposed immediately without deadlock");
+
+        // Unblock scan
+        allowScanToFinish.Set();
+        scanTask.Wait(TimeSpan.FromSeconds(3));
+
+        // State mutation and event dispatch from in-flight scan must be completely suppressed
+        AssertEq(new PrivacyState(false, false, null, null), svc.Current, "Current state was not mutated by in-flight scan");
+        AssertEq(0, privacyChangedFired, "PrivacyChanged was not fired for discarded in-flight scan");
+        AssertEq(0, busEvents.Count, "BarEvent was not published for discarded in-flight scan");
+    }
+
+    private static void TestPrivacyService_PostDisposalSuppression()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+        var busEvents = new List<BarEvent>();
+        bus.EventRaised += evt =>
+        {
+            if (evt.Kind == BarEventKind.Privacy) busEvents.Add(evt);
+        };
+
+        var curState = new PrivacyState(true, false, "CameraApp", null);
+        var svc = new PrivacyService(bus, settings, now => curState);
+
+        int callbacks = 0;
+        svc.PrivacyChanged += _ => callbacks++;
+
+        // 1. Initial pre-disposal recompute
+        svc.RecomputeCore();
+        AssertEq(1, callbacks, "PrivacyChanged fired once pre-disposal");
+        AssertEq(1, busEvents.Count, "1 BarEvent published pre-disposal");
+        AssertEq("Camera", busEvents[0].Title, "Pre-disposal event title is Camera");
+
+        // 2. Dispose
+        svc.Dispose();
+        Assert(svc.IsDisposed, "Service is disposed");
+
+        // 3. Attempt post-disposal recomputes
+        curState = new PrivacyState(false, true, null, "MicApp");
+        svc.RecomputeCore();
+        svc.RecomputeCore();
+
+        AssertEq(1, callbacks, "Zero additional PrivacyChanged callbacks fired after disposal");
+        AssertEq(1, busEvents.Count, "Zero additional BarEvents published after disposal");
+        AssertEq(new PrivacyState(true, false, "CameraApp", null), svc.Current, "Current was not mutated after disposal");
+    }
+
+    private static void TestPrivacyService_ParsingAndDecoding()
+    {
+        // 1. PackageFriendlyName
+        AssertEq("WhatsAppDesktop", PrivacyService.PackageFriendlyName("5319275A.WhatsAppDesktop_cv1g1gvanyjgm"), "PackageFriendlyName WhatsApp");
+        AssertEq("WindowsCamera", PrivacyService.PackageFriendlyName("Microsoft.WindowsCamera_8wekyb3d8bbwe"), "PackageFriendlyName Camera");
+        AssertEq("MSTeams", PrivacyService.PackageFriendlyName("MSTeams_8wekyb3d8bbwe"), "PackageFriendlyName Teams");
+        AssertEq("App", PrivacyService.PackageFriendlyName(""), "PackageFriendlyName empty fallback");
+
+        // 2. DecodePath
+        AssertEq(@"C:\Program Files\App\app.exe", PrivacyService.DecodePath(@"#C:\Program Files\App\app.exe:-1001"), "DecodePath leading # and trailing id");
+        AssertEq(Path.GetFullPath(@"C:\Users\User\AppData\app.exe"), PrivacyService.DecodePath(@"C:#Users#User#AppData#app.exe"), "DecodePath # replaced by separator");
+
+        // 3. FriendlyName
+        AssertEq("zoom", PrivacyService.FriendlyName(@"#C:\Program Files\Zoom\bin\zoom.exe:-1001"), "FriendlyName zoom");
+        AssertEq("notepad", PrivacyService.FriendlyName(@"#C:\Windows\System32\notepad.exe"), "FriendlyName notepad");
+
+        // 4. IsActiveCore
+        long now = 1000000;
+        Assert(PrivacyService.IsActiveCore(500000, null, now), "Active when start > 0 and stop is null");
+        Assert(PrivacyService.IsActiveCore(500000, 0, now), "Active when start > 0 and stop is 0");
+        Assert(PrivacyService.IsActiveCore(500000, 400000, now), "Active when start > stop and start <= now");
+        Assert(!PrivacyService.IsActiveCore(500000, 600000, now), "Inactive when start <= stop");
+        Assert(!PrivacyService.IsActiveCore(1500000, 400000, now), "Inactive when start > now (future drift)");
+        Assert(!PrivacyService.IsActiveCore(0, null, now), "Inactive when start is 0");
+        Assert(!PrivacyService.IsActiveCore(null, null, now), "Inactive when start is null");
+
+        // 5. IsOwnProcessCore
+        string ownExe = @"C:\App\WindowsDynamicBar.exe";
+        Assert(PrivacyService.IsOwnProcessCore(@"#C:\App\WindowsDynamicBar.exe:-1001", ownExe), "Matches own process executable");
+        Assert(!PrivacyService.IsOwnProcessCore(@"#C:\Other\Other.exe:-1001", ownExe), "Does not match other executable");
+        Assert(!PrivacyService.IsOwnProcessCore(@"#C:\App\WindowsDynamicBar.exe:-1001", null), "Returns false for null own path");
+    }
+
+    private static void TestPrivacyService_StateTransitionsAndBarEvents()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+        settings.Update(s => s.FeaturePrivacyIndicators = true);
+
+        var busEvents = new List<BarEvent>();
+        bus.EventRaised += evt =>
+        {
+            if (evt.Kind == BarEventKind.Privacy) busEvents.Add(evt);
+        };
+
+        PrivacyState state = new(false, false, null, null);
+        var svc = new PrivacyService(bus, settings, now => state);
+
+        // 1. Camera active
+        state = new PrivacyState(true, false, "CameraApp", null);
+        svc.RecomputeCore();
+        AssertEq(1, busEvents.Count, "1 event after camera active");
+        AssertEq("Camera", busEvents[0].Title, "Title is Camera");
+        AssertEq("CameraApp", busEvents[0].Subtitle, "Subtitle is CameraApp");
+        AssertEq(90, busEvents[0].Priority, "Priority is 90");
+        AssertEq(TimeSpan.FromSeconds(4), busEvents[0].DisplayDuration, "Duration is 4s");
+        Assert(busEvents[0].Payload is PrivacyState, "Payload is PrivacyState");
+
+        // Dismiss active card on bus so subsequent events fire deterministically
+        bus.Dismiss();
+
+        // 2. Both Camera and Mic active
+        state = new PrivacyState(true, true, "CameraApp", "MicApp");
+        svc.RecomputeCore();
+        AssertEq(2, busEvents.Count, "2 events after both active");
+        AssertEq("Camera + Microphone", busEvents[1].Title, "Title is Camera + Microphone");
+        AssertEq("CameraApp / MicApp", busEvents[1].Subtitle, "Subtitle is CameraApp / MicApp");
+        AssertEq(90, busEvents[1].Priority, "Priority is 90");
+        AssertEq(TimeSpan.FromSeconds(4), busEvents[1].DisplayDuration, "Duration is 4s");
+
+        bus.Dismiss();
+
+        // 3. Camera released, Mic stays active
+        state = new PrivacyState(false, true, null, "MicApp");
+        svc.RecomputeCore();
+        AssertEq(3, busEvents.Count, "3 events after mic only active");
+        AssertEq("Microphone", busEvents[2].Title, "Title is Microphone");
+        AssertEq("MicApp", busEvents[2].Subtitle, "Subtitle is MicApp");
+        AssertEq(90, busEvents[2].Priority, "Priority is 90");
+
+        bus.Dismiss();
+
+        // 4. All released
+        state = new PrivacyState(false, false, null, null);
+        svc.RecomputeCore();
+        AssertEq(4, busEvents.Count, "4 events after all released");
+        AssertEq("Privacy", busEvents[3].Title, "Title is Privacy");
+        AssertEq("Released", busEvents[3].Subtitle, "Subtitle is Released");
+        AssertEq(20, busEvents[3].Priority, "Off priority is 20");
+        AssertEq(TimeSpan.FromSeconds(2), busEvents[3].DisplayDuration, "Off duration is 2s");
+
+        // 5. Duplicate tick with no state change
+        svc.RecomputeCore();
+        AssertEq(4, busEvents.Count, "Zero events for duplicate unchanged tick");
+
+        // 6. FeaturePrivacyIndicators disabled
+        settings.Update(s => s.FeaturePrivacyIndicators = false);
+        state = new PrivacyState(true, false, "CameraApp2", null);
+        svc.RecomputeCore();
+        AssertEq(4, busEvents.Count, "Zero events when FeaturePrivacyIndicators is false");
+        AssertEq("CameraApp2", svc.Current.CameraApp, "Current state was still updated when feature toggle is off");
+
+        settings.Update(s => s.FeaturePrivacyIndicators = true);
+        svc.Dispose();
     }
 }

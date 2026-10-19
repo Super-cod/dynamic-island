@@ -22,60 +22,167 @@ public sealed class PrivacyService : IDisposable
 {
     private readonly EventBus _bus;
     private readonly SettingsService _settings;
+    private readonly Func<long, PrivacyState>? _scanner;
+    private readonly object _sync = new();
+
     private PrivacyState _last = new(false, false, null, null);
     private System.Threading.Timer? _pollTimer;
     private bool _started;
+    private bool _disposed;
 
     public event Action<PrivacyState>? PrivacyChanged;
-    public PrivacyState Current => _last;
+
+    public PrivacyState Current
+    {
+        get
+        {
+            lock (_sync) return _last;
+        }
+    }
+
+    public bool IsStarted
+    {
+        get
+        {
+            lock (_sync) return _started;
+        }
+    }
+
+    public bool IsDisposed
+    {
+        get
+        {
+            lock (_sync) return _disposed;
+        }
+    }
+
+    internal bool HasTimer
+    {
+        get
+        {
+            lock (_sync) return _pollTimer is not null;
+        }
+    }
 
     public PrivacyService(EventBus bus, SettingsService settings)
+        : this(bus, settings, scanner: null)
+    {
+    }
+
+    internal PrivacyService(EventBus bus, SettingsService settings, Func<long, PrivacyState>? scanner)
     {
         _bus = bus;
         _settings = settings;
+        _scanner = scanner;
     }
 
     public void Start()
     {
-        if (_started) return;
+        lock (_sync)
+        {
+            if (_disposed || _started) return;
+            _started = true;
+        }
+
+        System.Threading.Timer? timer = null;
         try
         {
-            // Registry change notification via RegNotifyChangeKeyValue is possible, but the
-            // consent store lives under HKCU with volatile semantics that differ per Windows
-            // build. We therefore re-read four small registry values on a 1s timer
-            // (~0.001% CPU; each read is microseconds) — far cheaper than WMI/events and
-            // fully reliable. Documented in README under performance notes.
-            Recompute();
-            _pollTimer = new System.Threading.Timer(_ => Recompute(), null,
+            // Re-read four small registry values on a 1s timer (~0.001% CPU; each read is microseconds)
+            RecomputeCore();
+
+            timer = new System.Threading.Timer(_ => RecomputeCore(), null,
                 TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
-            _started = true;
+
+            lock (_sync)
+            {
+                if (_disposed)
+                {
+                    timer.Dispose();
+                    return;
+                }
+                _pollTimer = timer;
+            }
+
             Log.Info("Privacy service started");
         }
         catch (Exception ex)
         {
+            lock (_sync)
+            {
+                _started = false;
+                _pollTimer = null;
+            }
+            try { timer?.Dispose(); } catch { }
             Log.Warning("Privacy service failed to start", ("error", ex.Message));
         }
     }
 
-    private void Recompute()
+    internal void RecomputeCore(long? nowFileTimeUtc = null)
     {
         try
         {
-            bool cam = false, mic = false;
-            string? camApp = null, micApp = null;
-            var now = DateTime.Now.ToFileTimeUtc();
+            lock (_sync)
+            {
+                if (_disposed) return;
+            }
 
-            ScanStore("webcam", ref cam, ref camApp, now);
-            ScanStore("microphone", ref mic, ref micApp, now);
+            long now = nowFileTimeUtc ?? DateTime.Now.ToFileTimeUtc();
+            PrivacyState state;
 
-            var state = new PrivacyState(cam, mic, camApp, micApp);
-            if (state == _last) return;
-            var prev = _last;
-            _last = state;
-            PrivacyChanged?.Invoke(state);
-            RaiseIfChanged(prev, state);
+            if (_scanner is not null)
+            {
+                state = _scanner(now);
+            }
+            else
+            {
+                bool cam = false, mic = false;
+                string? camApp = null, micApp = null;
+                ScanStore("webcam", ref cam, ref camApp, now);
+                ScanStore("microphone", ref mic, ref micApp, now);
+                state = new PrivacyState(cam, mic, camApp, micApp);
+            }
+
+            Action<PrivacyState>? notify = null;
+            BarEvent? eventToRaise = null;
+            PrivacyState? stateToNotify = null;
+
+            lock (_sync)
+            {
+                if (_disposed) return;
+                if (state == _last) return;
+
+                var prev = _last;
+                _last = state;
+                stateToNotify = state;
+                notify = PrivacyChanged;
+
+                if (_settings.Current.FeaturePrivacyIndicators &&
+                    (state.CameraInUse != prev.CameraInUse || state.MicInUse != prev.MicInUse))
+                {
+                    eventToRaise = CreateBarEvent(prev, state);
+                }
+            }
+
+            // Gated dispatch outside locks
+            lock (_sync)
+            {
+                if (_disposed) return;
+            }
+            notify?.Invoke(stateToNotify!);
+
+            if (eventToRaise is not null)
+            {
+                lock (_sync)
+                {
+                    if (_disposed) return;
+                }
+                _bus.Raise(eventToRaise);
+            }
         }
-        catch (Exception ex) { Log.Debug("Privacy recompute failed", ("error", ex.Message)); }
+        catch (Exception ex)
+        {
+            Log.Debug("Privacy recompute failed", ("error", ex.Message));
+        }
     }
 
     private static void ScanStore(string store, ref bool active, ref string? app, long now)
@@ -125,15 +232,24 @@ public sealed class PrivacyService : IDisposable
         {
             _ownPath ??= Environment.ProcessPath
                          ?? Process.GetCurrentProcess().MainModule?.FileName;
-            if (string.IsNullOrEmpty(_ownPath)) return false;
-            return string.Equals(DecodePath(keyName), Path.GetFullPath(_ownPath),
+            return IsOwnProcessCore(keyName, _ownPath);
+        }
+        catch { return false; }
+    }
+
+    internal static bool IsOwnProcessCore(string keyName, string? ownExecutablePath)
+    {
+        if (string.IsNullOrEmpty(ownExecutablePath)) return false;
+        try
+        {
+            return string.Equals(DecodePath(keyName), Path.GetFullPath(ownExecutablePath),
                 StringComparison.OrdinalIgnoreCase);
         }
         catch { return false; }
     }
 
     /// <summary>Decodes a ConsentStore subkey (e.g. "#C:\app\a.exe:-1001" or "C:#app#a.exe") to a path.</summary>
-    private static string DecodePath(string keyName)
+    internal static string DecodePath(string keyName)
     {
         string s = keyName;
         if (s.StartsWith("#", StringComparison.Ordinal)) s = s[1..];
@@ -145,21 +261,28 @@ public sealed class PrivacyService : IDisposable
 
     private static bool IsActive(RegistryKey key, long now)
     {
-        object? start = key.GetValue("LastUsedTimeStart");
-        object? stop = key.GetValue("LastUsedTimeStop");
-        if (start is not long s) return false;
-        if (stop is not long st) return s > 0; // no stop => still open
+        object? startObj = key.GetValue("LastUsedTimeStart");
+        object? stopObj = key.GetValue("LastUsedTimeStop");
+        long? start = startObj is long s ? s : null;
+        long? stop = stopObj is long st ? st : null;
+        return IsActiveCore(start, stop, now);
+    }
+
+    internal static bool IsActiveCore(long? start, long? stop, long now)
+    {
+        if (start is not long s || s <= 0) return false;
+        if (stop is not long st) return true; // no stop => still open
         return s > st && s <= now;
     }
 
-    private static string FriendlyName(string keyName)
+    internal static string FriendlyName(string keyName)
     {
-        // keyName looks like "#C:\path\app.exe:-1001"
-        string path = keyName;
-        int idx = path.LastIndexOf(':');
-        if (idx > 0) path = path[..idx];
-        if (path.StartsWith("#", StringComparison.Ordinal)) path = path[1..];
-        try { return Path.GetFileNameWithoutExtension(path); }
+        try
+        {
+            string decoded = DecodePath(keyName);
+            string name = Path.GetFileNameWithoutExtension(decoded);
+            return string.IsNullOrEmpty(name) ? "App" : name;
+        }
         catch { return "App"; }
     }
 
@@ -174,26 +297,34 @@ public sealed class PrivacyService : IDisposable
         return s.Length > 0 ? s : "App";
     }
 
-    private void RaiseIfChanged(PrivacyState prev, PrivacyState cur)
+    internal static BarEvent CreateBarEvent(PrivacyState prev, PrivacyState cur)
     {
-        if (!_settings.Current.FeaturePrivacyIndicators) return;
-        if (cur.CameraInUse != prev.CameraInUse || cur.MicInUse != prev.MicInUse)
-        {
-            string title = (cur.CameraInUse && cur.MicInUse) ? "Camera + Microphone"
-                : cur.CameraInUse ? "Camera" : cur.MicInUse ? "Microphone" : "Privacy";
-            string sub = cur.CameraInUse && cur.MicInUse
-                ? $"{cur.CameraApp} / {cur.MicApp}"
-                : cur.CameraInUse ? cur.CameraApp ?? "In use"
-                : cur.MicInUse ? cur.MicApp ?? "In use" : "Released";
-            bool off = !cur.CameraInUse && !cur.MicInUse;
-            _bus.Raise(BarEvent.Create(BarEventKind.Privacy, title, sub,
-                payload: cur, priority: off ? 20 : 90,
-                displayDuration: TimeSpan.FromSeconds(off ? 2 : 4)));
-        }
+        string title = (cur.CameraInUse && cur.MicInUse) ? "Camera + Microphone"
+            : cur.CameraInUse ? "Camera" : cur.MicInUse ? "Microphone" : "Privacy";
+        string sub = cur.CameraInUse && cur.MicInUse
+            ? $"{cur.CameraApp} / {cur.MicApp}"
+            : cur.CameraInUse ? cur.CameraApp ?? "In use"
+            : cur.MicInUse ? cur.MicApp ?? "In use" : "Released";
+        bool off = !cur.CameraInUse && !cur.MicInUse;
+        return BarEvent.Create(BarEventKind.Privacy, title, sub,
+            payload: cur, priority: off ? 20 : 90,
+            displayDuration: TimeSpan.FromSeconds(off ? 2 : 4));
     }
 
     public void Dispose()
     {
-        try { _pollTimer?.Dispose(); } catch { }
+        System.Threading.Timer? timerToDispose;
+
+        lock (_sync)
+        {
+            if (_disposed) return;
+            _disposed = true;
+            _started = false;
+
+            timerToDispose = _pollTimer;
+            _pollTimer = null;
+        }
+
+        try { timerToDispose?.Dispose(); } catch { }
     }
 }
