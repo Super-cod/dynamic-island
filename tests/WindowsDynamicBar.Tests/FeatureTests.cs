@@ -7,6 +7,7 @@ using WindowsDynamicBar.Core.Net;
 using WindowsDynamicBar.Core.Settings;
 using WindowsDynamicBar.Core.Telemetry;
 using WindowsDynamicBar.Interop;
+using WindowsDynamicBar.Services.Audio;
 using WindowsDynamicBar.Services.Media;
 using WindowsDynamicBar.Services.Settings;
 using WindowsDynamicBar.Services.SystemInfo;
@@ -62,6 +63,14 @@ internal static partial class Program
         Run("MediaService: TryGetArtworkAsync bounds timeout, reads bytes, and disposes streams safely", TestMediaArtwork_BoundedTimeout_RecoversAndDisposesStream);
         Run("MediaService: Stop vs startup completion race keeps service stopped without attached handlers", TestMediaLifecycle_StopVsStartupCompletion_RaceCondition);
         Run("MediaService: pending artwork async operation bounds timeout and disposes resources safely", TestMediaArtwork_PendingAsyncOperation_SafeDisposal);
+        Run("VolumeService: initialization handles success and failure gracefully", TestVolumeService_Initialization_FailureAndSuccess);
+        Run("VolumeService: SetLevel and ToggleMute update state and controller", TestVolumeService_SetLevelAndToggleMute);
+        Run("VolumeService: notification deduplication suppresses duplicates within 500ms", TestVolumeService_NotificationDeduplication);
+        Run("VolumeService: event publishing formats metadata and respects FeatureVolume toggle", TestVolumeService_EventPublishing_MetadataAndFeatureToggle);
+        Run("VolumeService: default device change updates device name and publishes event", TestVolumeService_DefaultDeviceChanged);
+        Run("VolumeService: Dispose shuts down controller and suppresses late callbacks", TestVolumeService_Dispose_SuppressesLateCallbacks);
+        Run("VolumeService: concurrent access across threads is thread-safe", TestVolumeService_ConcurrentAccess);
+        Run("CoreAudio: Shutdown versus AttachDefaultEndpoint race terminates safely", TestCoreAudio_ShutdownVsReattachmentRace);
     }
 
     private static string ScratchDir()
@@ -1387,5 +1396,444 @@ internal static partial class Program
         {
             MediaService.LoadOperationProviderForTesting = null;
         }
+    }
+
+    private sealed class FakeCoreAudioController : ICoreAudioController
+    {
+        public bool ShouldFailInit { get; set; }
+        public string? InitError { get; set; }
+        public bool IsAvailable { get; set; } = true;
+        public float CurrentLevel { get; set; } = 0.5f;
+        public bool CurrentMuted { get; set; }
+        public string? DefaultDeviceName { get; set; } = "Headphones (Test Device)";
+
+        public Action<float, bool>? CapturedOnVolume { get; private set; }
+        public Action? CapturedOnDefaultDevice { get; private set; }
+
+        public int SetLevelCallCount { get; private set; }
+        public float LastSetLevel { get; private set; }
+
+        public int SetMuteCallCount { get; private set; }
+        public bool LastSetMute { get; private set; }
+
+        public int ShutdownCallCount { get; private set; }
+
+        public bool TryInitialize(Action<float, bool> onVolumeChanged, Action onDefaultDeviceChanged, out string? error)
+        {
+            if (ShouldFailInit)
+            {
+                error = InitError ?? "Audio initialization failed";
+                return false;
+            }
+            error = null;
+            CapturedOnVolume = onVolumeChanged;
+            CapturedOnDefaultDevice = onDefaultDeviceChanged;
+            return true;
+        }
+
+        public (float Level, bool Muted)? GetCurrent() => (CurrentLevel, CurrentMuted);
+        public string? GetDefaultDeviceName() => DefaultDeviceName;
+
+        public void SetLevel(float level01)
+        {
+            SetLevelCallCount++;
+            LastSetLevel = level01;
+            CurrentLevel = level01;
+        }
+
+        public void SetMute(bool mute)
+        {
+            SetMuteCallCount++;
+            LastSetMute = mute;
+            CurrentMuted = mute;
+        }
+
+        public void StepUp() { }
+        public void StepDown() { }
+
+        public void Shutdown()
+        {
+            ShutdownCallCount++;
+        }
+    }
+
+    private static void TestVolumeService_Initialization_FailureAndSuccess()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+
+        // 1. Failure case
+        var failCtrl = new FakeCoreAudioController { ShouldFailInit = true, InitError = "No audio endpoints" };
+        using (var failService = new VolumeService(bus, settings, failCtrl))
+        {
+            failService.Start();
+            Assert(!failService.IsAvailable, "Service is unavailable when controller fails init");
+            AssertEq(0f, failService.Level, "Default level is 0 when uninitialized");
+            Assert(!failService.Muted, "Default mute is false");
+            Assert(failService.DeviceName is null, "Device name is null");
+        }
+        AssertEq(1, failCtrl.ShutdownCallCount, "Disposal shuts down controller");
+
+        // 2. Success case
+        var okCtrl = new FakeCoreAudioController
+        {
+            CurrentLevel = 0.65f,
+            CurrentMuted = false,
+            DefaultDeviceName = "Speakers (Realtek)"
+        };
+        using (var okService = new VolumeService(bus, settings, okCtrl))
+        {
+            okService.Start();
+            Assert(okService.IsAvailable, "Service is available when controller succeeds init");
+            AssertEq(0.65f, okService.Level, "Initial level populated from controller");
+            Assert(!okService.Muted, "Initial mute populated from controller");
+            AssertEq("Speakers (Realtek)", okService.DeviceName, "Device name populated from controller");
+        }
+        AssertEq(1, okCtrl.ShutdownCallCount, "Disposal shuts down controller");
+    }
+
+    private static void TestVolumeService_SetLevelAndToggleMute()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+        var ctrl = new FakeCoreAudioController { CurrentLevel = 0.4f, CurrentMuted = false };
+        using var svc = new VolumeService(bus, settings, ctrl);
+        svc.Start();
+
+        (float Level, bool Muted)? lastChanged = null;
+        svc.VolumeChanged += (lvl, m) => lastChanged = (lvl, m);
+
+        // SetLevel normal
+        svc.SetLevel(0.8f);
+        AssertEq(0.8f, svc.Level, "Level updated to 0.8");
+        AssertEq(0.8f, ctrl.LastSetLevel, "Controller received 0.8");
+        AssertEq(1, ctrl.SetLevelCallCount, "SetLevel called once");
+        Assert(lastChanged.HasValue && Math.Abs(lastChanged.Value.Level - 0.8f) < 0.0001f, "VolumeChanged raised for SetLevel");
+
+        // SetLevel clamped high
+        svc.SetLevel(1.5f);
+        AssertEq(1.0f, svc.Level, "Level clamped to 1.0");
+        AssertEq(1.0f, ctrl.LastSetLevel, "Controller received 1.0");
+
+        // SetLevel clamped low
+        svc.SetLevel(-0.5f);
+        AssertEq(0.0f, svc.Level, "Level clamped to 0.0");
+        AssertEq(0.0f, ctrl.LastSetLevel, "Controller received 0.0");
+
+        // ToggleMute to true
+        lastChanged = null;
+        svc.ToggleMute();
+        Assert(svc.Muted, "Service is muted");
+        Assert(ctrl.LastSetMute, "Controller received mute=true");
+        AssertEq(1, ctrl.SetMuteCallCount, "SetMute called once");
+        Assert(lastChanged.HasValue && lastChanged.Value.Muted, "VolumeChanged raised for mute=true");
+
+        // ToggleMute back to false
+        lastChanged = null;
+        svc.ToggleMute();
+        Assert(!svc.Muted, "Service is unmuted");
+        Assert(!ctrl.LastSetMute, "Controller received mute=false");
+        AssertEq(2, ctrl.SetMuteCallCount, "SetMute called twice");
+        Assert(lastChanged.HasValue && !lastChanged.Value.Muted, "VolumeChanged raised for mute=false");
+    }
+
+    private static void TestVolumeService_NotificationDeduplication()
+    {
+        // Pure helper tests
+        var t0 = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+
+        // Initial notification (lastEvent is MinValue) -> NOT suppressed
+        Assert(!VolumeService.ShouldSuppressNotification(0.5f, false, -1f, false, DateTime.MinValue, t0),
+            "Initial notification is not suppressed");
+
+        // Exact same level and mute within 200ms -> SUPPRESSED
+        Assert(VolumeService.ShouldSuppressNotification(0.5f, false, 0.5f, false, t0, t0.AddMilliseconds(200)),
+            "Duplicate within 500ms is suppressed");
+
+        // Exact same level and mute after 600ms -> NOT suppressed
+        Assert(!VolumeService.ShouldSuppressNotification(0.5f, false, 0.5f, false, t0, t0.AddMilliseconds(600)),
+            "Duplicate after 500ms is not suppressed");
+
+        // Delta > 0.001 within 50ms -> NOT suppressed
+        Assert(!VolumeService.ShouldSuppressNotification(0.51f, false, 0.5f, false, t0, t0.AddMilliseconds(50)),
+            "Volume change > 0.001 is not suppressed");
+
+        // Mute change within 50ms -> NOT suppressed
+        Assert(!VolumeService.ShouldSuppressNotification(0.5f, true, 0.5f, false, t0, t0.AddMilliseconds(50)),
+            "Mute state change is not suppressed");
+
+        // End-to-end service test
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+        settings.Update(s => s.FeatureVolume = true);
+
+        var ctrl = new FakeCoreAudioController { CurrentLevel = 0.5f, CurrentMuted = false };
+        using var svc = new VolumeService(bus, settings, ctrl);
+        svc.Start();
+
+        int eventsRaised = 0;
+        BarEvent? lastEvent = null;
+        bus.EventRaised += e =>
+        {
+            if (e.Kind == BarEventKind.Volume)
+            {
+                eventsRaised++;
+                lastEvent = e;
+            }
+        };
+
+        // First notification -> raises event
+        ctrl.CapturedOnVolume?.Invoke(0.5f, false);
+        AssertEq(1, eventsRaised, "First notification raises event");
+        Assert(lastEvent is not null, "Event is non-null");
+
+        // Duplicate notification within 100ms -> suppressed!
+        ctrl.CapturedOnVolume?.Invoke(0.5f, false);
+        AssertEq(1, eventsRaised, "Duplicate notification within 500ms does not raise second event");
+
+        // Substantial change -> raises event
+        ctrl.CapturedOnVolume?.Invoke(0.7f, false);
+        AssertEq(2, eventsRaised, "Volume change raises event");
+        Assert(lastEvent is not null && lastEvent.Value.HasValue, "Event value is present");
+        Assert(Math.Abs(lastEvent!.Value!.Value - 0.7) < 0.01, "Event value matches updated volume");
+
+        // Mute flip -> raises event
+        ctrl.CapturedOnVolume?.Invoke(0.7f, true);
+        AssertEq(3, eventsRaised, "Mute toggle raises event");
+        Assert(lastEvent is not null && lastEvent.Value.HasValue, "Event value is present");
+        AssertEq(0.0, lastEvent!.Value!.Value, "Muted event value is 0");
+    }
+
+    private static void TestVolumeService_EventPublishing_MetadataAndFeatureToggle()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+        var ctrl = new FakeCoreAudioController { CurrentLevel = 0.2f, CurrentMuted = false, DefaultDeviceName = "Studio Monitors" };
+        using var svc = new VolumeService(bus, settings, ctrl);
+        svc.Start();
+
+        BarEvent? lastEvent = null;
+        bus.EventRaised += e => lastEvent = e;
+
+        // 1. FeatureVolume = false -> bus event is suppressed, VolumeChanged still fires
+        settings.Update(s => s.FeatureVolume = false);
+        bool volumeChangedFired = false;
+        svc.VolumeChanged += (_, _) => volumeChangedFired = true;
+
+        ctrl.CapturedOnVolume?.Invoke(0.9f, false);
+        Assert(volumeChangedFired, "VolumeChanged fires even when FeatureVolume is false");
+        Assert(lastEvent is null, "EventBus event suppressed when FeatureVolume is false");
+
+        // 2. FeatureVolume = true -> verify icons and metadata
+        settings.Update(s => s.FeatureVolume = true);
+
+        // Silent icon at 0.0
+        ctrl.CapturedOnVolume?.Invoke(0.0f, false);
+        Assert(lastEvent is not null, "Event raised for 0.0");
+        AssertEq("Silent", lastEvent!.Title, "Title is Silent for 0 level");
+        AssertEq(70, lastEvent.Priority, "Volume priority is 70");
+        AssertEq(TimeSpan.FromSeconds(2.5), lastEvent.DisplayDuration, "Display duration is 2.5s");
+
+        // Low icon at 0.3
+        ctrl.CapturedOnVolume?.Invoke(0.3f, false);
+        AssertEq("Low", lastEvent!.Title, "Title is Low for level < 0.5");
+
+        // High icon at 0.8
+        ctrl.CapturedOnVolume?.Invoke(0.8f, false);
+        AssertEq("High", lastEvent!.Title, "Title is High for level >= 0.5");
+
+        // Muted icon and text
+        ctrl.CapturedOnVolume?.Invoke(0.8f, true);
+        AssertEq("Muted", lastEvent!.Title, "Title is Muted when muted");
+        Assert(lastEvent.Value.HasValue && lastEvent.Value.Value == 0.0, "Value is 0 when muted");
+    }
+
+    private static void TestVolumeService_DefaultDeviceChanged()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+        settings.Update(s => s.FeatureVolume = true);
+
+        var ctrl = new FakeCoreAudioController
+        {
+            CurrentLevel = 0.5f,
+            CurrentMuted = false,
+            DefaultDeviceName = "Built-in Speakers"
+        };
+        using var svc = new VolumeService(bus, settings, ctrl);
+        svc.Start();
+
+        BarEvent? lastEvent = null;
+        bus.EventRaised += e => lastEvent = e;
+
+        // Change device in controller and fire notification
+        ctrl.DefaultDeviceName = "USB Audio Headset";
+        ctrl.CurrentLevel = 0.72f;
+        ctrl.CurrentMuted = false;
+
+        ctrl.CapturedOnDefaultDevice?.Invoke();
+
+        AssertEq("USB Audio Headset", svc.DeviceName, "Service updated device name");
+        AssertEq(0.72f, svc.Level, "Service updated level for new device");
+        Assert(lastEvent is not null, "Device change raised event on bus");
+        AssertEq("Output device", lastEvent!.Title, "Title is Output device");
+        AssertEq("USB Audio Headset", lastEvent.Subtitle, "Subtitle contains device name");
+        AssertEq(TimeSpan.FromSeconds(3), lastEvent.DisplayDuration, "Device change duration is 3s");
+        AssertEq(70, lastEvent.Priority, "Device change priority is 70");
+    }
+
+    private static void TestVolumeService_Dispose_SuppressesLateCallbacks()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+        var ctrl = new FakeCoreAudioController { CurrentLevel = 0.4f, CurrentMuted = false };
+        var svc = new VolumeService(bus, settings, ctrl);
+        svc.Start();
+
+        int busEvents = 0;
+        bus.EventRaised += _ => busEvents++;
+        int volumeChangedCalls = 0;
+        svc.VolumeChanged += (_, _) => volumeChangedCalls++;
+
+        // Dispose service
+        svc.Dispose();
+        Assert(!svc.IsAvailable, "Disposed service is unavailable");
+        AssertEq(1, ctrl.ShutdownCallCount, "Controller shutdown invoked on dispose");
+
+        // Redundant dispose is safe and idempotent
+        svc.Dispose();
+        AssertEq(1, ctrl.ShutdownCallCount, "Duplicate dispose is idempotent and does not re-invoke shutdown");
+
+        // Late callbacks arriving from COM or ThreadPool after disposal
+        ctrl.CapturedOnVolume?.Invoke(0.95f, false);
+        ctrl.CapturedOnDefaultDevice?.Invoke();
+
+        // Mutating methods after disposal
+        svc.SetLevel(0.5f);
+        svc.ToggleMute();
+
+        AssertEq(0, busEvents, "No bus events raised after disposal");
+        AssertEq(0, volumeChangedCalls, "No VolumeChanged callbacks invoked after disposal");
+        AssertEq(0.4f, svc.Level, "Level did not mutate after disposal");
+    }
+
+    private static void TestVolumeService_ConcurrentAccess()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+        var ctrl = new FakeCoreAudioController { CurrentLevel = 0.5f, CurrentMuted = false };
+        using var svc = new VolumeService(bus, settings, ctrl);
+        svc.Start();
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
+        var token = cts.Token;
+        int workerCount = 6;
+        var tasks = new Task[workerCount];
+        int exceptions = 0;
+
+        for (int i = 0; i < workerCount; i++)
+        {
+            int threadId = i;
+            tasks[i] = Task.Run(() =>
+            {
+                try
+                {
+                    float localLevel = 0f;
+                    while (!token.IsCancellationRequested)
+                    {
+                        switch (threadId % 3)
+                        {
+                            case 0:
+                                localLevel = (localLevel + 0.05f) % 1.0f;
+                                svc.SetLevel(localLevel);
+                                break;
+                            case 1:
+                                svc.ToggleMute();
+                                break;
+                            case 2:
+                                ctrl.CapturedOnVolume?.Invoke(0.6f, false);
+                                _ = svc.Level;
+                                _ = svc.Muted;
+                                _ = svc.DeviceName;
+                                break;
+                        }
+                        Thread.Sleep(1);
+                    }
+                }
+                catch
+                {
+                    Interlocked.Increment(ref exceptions);
+                }
+            });
+        }
+
+        var allTask = Task.WhenAll(tasks);
+        while (!allTask.IsCompleted)
+        {
+            Pump(10);
+        }
+        AssertEq(0, exceptions, "Concurrent access produced zero exceptions");
+        Assert(svc.Level >= 0f && svc.Level <= 1.0f, "Final volume level is safely clamped");
+    }
+
+    private static void TestCoreAudio_ShutdownVsReattachmentRace()
+    {
+        // 1. Verify CoreAudio.Shutdown resets IsAvailable and causes subsequent AttachDefaultEndpoint to safely abort
+        CoreAudio.Shutdown();
+        Assert(!CoreAudio.IsAvailable, "CoreAudio is not available after Shutdown()");
+
+        bool attachResult = CoreAudio.AttachDefaultEndpoint(out string? _);
+        Assert(!attachResult, "AttachDefaultEndpoint returns false after Shutdown()");
+        Assert(!CoreAudio.IsAvailable, "CoreAudio remains unavailable after aborted attach");
+
+        // 2. Multi-threaded race test between AttachDefaultEndpoint and Shutdown
+        int raceExceptions = 0;
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
+        var token = cts.Token;
+
+        var t1 = Task.Run(() =>
+        {
+            while (!token.IsCancellationRequested)
+            {
+                try
+                {
+                    CoreAudio.AttachDefaultEndpoint();
+                }
+                catch
+                {
+                    Interlocked.Increment(ref raceExceptions);
+                }
+                Thread.Sleep(1);
+            }
+        });
+
+        var t2 = Task.Run(() =>
+        {
+            while (!token.IsCancellationRequested)
+            {
+                try
+                {
+                    CoreAudio.Shutdown();
+                    _ = CoreAudio.GetCurrent();
+                    _ = CoreAudio.GetDefaultDeviceName();
+                    CoreAudio.SetLevel(0.5f);
+                    CoreAudio.SetMute(false);
+                }
+                catch
+                {
+                    Interlocked.Increment(ref raceExceptions);
+                }
+                Thread.Sleep(1);
+            }
+        });
+
+        var raceAll = Task.WhenAll(t1, t2);
+        while (!raceAll.IsCompleted)
+        {
+            Pump(10);
+        }
+        CoreAudio.Shutdown();
+
+        AssertEq(0, raceExceptions, "Shutdown versus attach race completed with zero exceptions");
     }
 }

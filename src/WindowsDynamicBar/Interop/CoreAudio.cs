@@ -157,59 +157,99 @@ internal static class CoreAudio
     }
 
     // ---- state ----
+    private static readonly object _sync = new();
     private static IMMDeviceEnumerator? _enumerator;
     private static IAudioEndpointVolume? _endpoint;
     private static VolumeChangeSink? _sink;
     private static IntPtr _volumeCallbackPtr = IntPtr.Zero;
     private static IntPtr _notificationClientPtr = IntPtr.Zero;
+    private static bool _isShutdown;
 
-    public static bool IsAvailable => _endpoint is not null;
+    public static bool IsAvailable
+    {
+        get
+        {
+            lock (_sync)
+            {
+                return !_isShutdown && _endpoint is not null;
+            }
+        }
+    }
 
     public static bool TryInitialize(Action<float, bool> onVolumeChanged, Action? onDefaultDeviceChanged, out string? error)
     {
         error = null;
-        try
+        lock (_sync)
         {
-            _enumerator = (IMMDeviceEnumerator)CreateEnumerator();
-            // Never call back into the enumerator inside its own notification callback: re-attach
-            // on the thread pool (same rule as the mic toggle's DefaultDeviceSink).
-            _sink = new VolumeChangeSink(onVolumeChanged, () => Task.Run(() =>
+            _isShutdown = false;
+            CleanupCoreAudioUnsafe();
+
+            try
             {
-                AttachDefaultEndpoint();
-                onDefaultDeviceChanged?.Invoke();
-            }));
+                _enumerator = (IMMDeviceEnumerator)CreateEnumerator();
+                // Never call back into the enumerator inside its own notification callback: re-attach
+                // on the thread pool (same rule as the mic toggle's DefaultDeviceSink).
+                _sink = new VolumeChangeSink(onVolumeChanged, () => Task.Run(() =>
+                {
+                    bool reattached = AttachDefaultEndpoint();
+                    if (reattached)
+                    {
+                        onDefaultDeviceChanged?.Invoke();
+                    }
+                }));
 
-            _notificationClientPtr = Marshal.GetComInterfaceForObject(_sink, typeof(IMMNotificationClient));
-            _enumerator.RegisterEndpointNotificationCallback(_notificationClientPtr);
+                _notificationClientPtr = Marshal.GetComInterfaceForObject(_sink, typeof(IMMNotificationClient));
+                int regHr = _enumerator.RegisterEndpointNotificationCallback(_notificationClientPtr);
+                if (regHr != 0)
+                {
+                    error = $"RegisterEndpointNotificationCallback failed 0x{regHr:X8}";
+                    CleanupCoreAudioUnsafe();
+                    return false;
+                }
 
-            _volumeCallbackPtr = Marshal.GetComInterfaceForObject(_sink, typeof(IAudioEndpointVolumeCallback));
+                _volumeCallbackPtr = Marshal.GetComInterfaceForObject(_sink, typeof(IAudioEndpointVolumeCallback));
 
-            return AttachDefaultEndpoint(out error);
-        }
-        catch (Exception ex)
-        {
-            error = ex.Message;
-            Log.Warning("Core Audio init failed", ("error", ex.Message));
-            return false;
+                return AttachDefaultEndpointUnsafe(out error);
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                CleanupCoreAudioUnsafe();
+                Log.Warning("Core Audio init failed", ("error", ex.Message));
+                return false;
+            }
         }
     }
 
     public static bool AttachDefaultEndpoint() => AttachDefaultEndpoint(out _);
 
-    private static bool AttachDefaultEndpoint(out string? error)
+    public static bool AttachDefaultEndpoint(out string? error)
+    {
+        lock (_sync)
+        {
+            return AttachDefaultEndpointUnsafe(out error);
+        }
+    }
+
+    private static bool AttachDefaultEndpointUnsafe(out string? error)
     {
         error = null;
-        if (_enumerator is null) return false;
+        if (_isShutdown || _enumerator is null) return false;
 
-        if (_endpoint is not null && _volumeCallbackPtr != IntPtr.Zero)
+        if (_endpoint is not null)
         {
-            try { _endpoint.UnregisterControlChangeNotify(_volumeCallbackPtr); } catch { }
+            if (_volumeCallbackPtr != IntPtr.Zero)
+            {
+                try { _endpoint.UnregisterControlChangeNotify(_volumeCallbackPtr); } catch { }
+            }
+            try { Marshal.ReleaseComObject(_endpoint); } catch { }
             _endpoint = null;
         }
 
+        IMMDevice? device = null;
         try
         {
-            int hr = _enumerator.GetDefaultAudioEndpoint(DEVICE_RENDER, ROLE_CONSOLE, out var device);
+            int hr = _enumerator.GetDefaultAudioEndpoint(DEVICE_RENDER, ROLE_CONSOLE, out device);
             if (hr != 0 || device is null)
                 hr = _enumerator.GetDefaultAudioEndpoint(DEVICE_RENDER, ROLE_MULTIMEDIA, out device);
 
@@ -221,19 +261,27 @@ internal static class CoreAudio
 
             Guid iid = typeof(IAudioEndpointVolume).GUID;
             hr = device.Activate(ref iid, 23 /*CLSCTX_ALL*/, IntPtr.Zero, out object obj);
-            if (hr != 0) { error = $"Activate failed 0x{hr:X8}"; return false; }
-            _endpoint = (IAudioEndpointVolume)obj;
+            if (hr != 0 || obj is null)
+            {
+                error = $"Activate failed 0x{hr:X8}";
+                return false;
+            }
+
+            var endpoint = (IAudioEndpointVolume)obj;
 
             if (_volumeCallbackPtr != IntPtr.Zero)
             {
-                hr = _endpoint.RegisterControlChangeNotify(_volumeCallbackPtr);
+                hr = endpoint.RegisterControlChangeNotify(_volumeCallbackPtr);
                 if (hr != 0)
                 {
                     error = $"RegisterControlChangeNotify 0x{hr:X8}";
                     Log.Warning("Volume callback registration failed", ("hr", hr));
+                    try { Marshal.ReleaseComObject(endpoint); } catch { }
                     return false;
                 }
             }
+
+            _endpoint = endpoint;
             return true;
         }
         catch (Exception ex)
@@ -241,18 +289,28 @@ internal static class CoreAudio
             error = ex.Message;
             return false;
         }
+        finally
+        {
+            if (device is not null)
+            {
+                try { Marshal.ReleaseComObject(device); } catch { }
+            }
+        }
     }
 
     public static (float Level, bool Muted)? GetCurrent()
     {
-        try
+        lock (_sync)
         {
-            if (_endpoint is null) return null;
-            _endpoint.GetMasterVolumeLevelScalar(out float level);
-            _endpoint.GetMute(out bool muted);
-            return (Math.Clamp(level, 0f, 1f), muted);
+            if (_isShutdown || _endpoint is null) return null;
+            try
+            {
+                _endpoint.GetMasterVolumeLevelScalar(out float level);
+                _endpoint.GetMute(out bool muted);
+                return (Math.Clamp(level, 0f, 1f), muted);
+            }
+            catch { return null; }
         }
-        catch { return null; }
     }
 
     // Proper IPropertyStore declaration (GetValue is slot 6 counting IUnknown's 3).
@@ -285,72 +343,156 @@ internal static class CoreAudio
     /// <summary>Friendly name of the current default render device (e.g. "Speakers (Realtek)").</summary>
     public static string? GetDefaultDeviceName()
     {
-        try
+        lock (_sync)
         {
-            if (_enumerator is null) return null;
-            int hr = _enumerator.GetDefaultAudioEndpoint(DEVICE_RENDER, ROLE_CONSOLE, out var dev);
-            if (hr != 0 || dev is null)
-                hr = _enumerator.GetDefaultAudioEndpoint(DEVICE_RENDER, ROLE_MULTIMEDIA, out dev);
-            if (hr != 0 || dev is null) return null;
+            if (_isShutdown || _enumerator is null) return null;
             try
             {
-                if (dev.OpenPropertyStore(STGM_READ, out IntPtr propsPtr) != 0 || propsPtr == IntPtr.Zero) return null;
-                var store = (IPropertyStore)Marshal.GetObjectForIUnknown(propsPtr);
-                Marshal.Release(propsPtr);
+                int hr = _enumerator.GetDefaultAudioEndpoint(DEVICE_RENDER, ROLE_CONSOLE, out var dev);
+                if (hr != 0 || dev is null)
+                    hr = _enumerator.GetDefaultAudioEndpoint(DEVICE_RENDER, ROLE_MULTIMEDIA, out dev);
+                if (hr != 0 || dev is null) return null;
                 try
                 {
-                    var key = new PROPERTYKEY
-                    {
-                        // PKEY_Device_FriendlyName = {a45c254e-df1c-4efd-8020-67d146a850e0}, pid 14
-                        fmtid = new Guid("A45C254E-DF1C-4EFD-8020-67D146A850E0"),
-                        pid = 14
-                    };
-                    if (store.GetValue(ref key, out var pv) != 0) return null;
+                    if (dev.OpenPropertyStore(STGM_READ, out IntPtr propsPtr) != 0 || propsPtr == IntPtr.Zero) return null;
+                    var store = (IPropertyStore)Marshal.GetObjectForIUnknown(propsPtr);
+                    Marshal.Release(propsPtr);
                     try
                     {
-                        if (pv.vt != VT_LPWSTR || pv.p == IntPtr.Zero) return null;
-                        return Marshal.PtrToStringUni(pv.p);
+                        var key = new PROPERTYKEY
+                        {
+                            // PKEY_Device_FriendlyName = {a45c254e-df1c-4efd-8020-67d146a850e0}, pid 14
+                            fmtid = new Guid("A45C254E-DF1C-4EFD-8020-67D146A850E0"),
+                            pid = 14
+                        };
+                        if (store.GetValue(ref key, out var pv) != 0) return null;
+                        try
+                        {
+                            if (pv.vt != VT_LPWSTR || pv.p == IntPtr.Zero) return null;
+                            return Marshal.PtrToStringUni(pv.p);
+                        }
+                        finally { PropVariantClear(ref pv); }
                     }
-                    finally { PropVariantClear(ref pv); }
+                    finally { Marshal.ReleaseComObject(store); }
                 }
-                finally { Marshal.ReleaseComObject(store); }
+                finally { Marshal.ReleaseComObject(dev); }
             }
-            finally { Marshal.ReleaseComObject(dev); }
+            catch { return null; }
         }
-        catch { return null; }
     }
 
     // ---- controls ----
 
     public static void SetLevel(float level01)
     {
-        try { _endpoint?.SetMasterVolumeLevelScalar(Math.Clamp(level01, 0f, 1f), IntPtr.Zero); }
-        catch (Exception ex) { Log.Debug("SetLevel failed", ("error", ex.Message)); }
+        lock (_sync)
+        {
+            if (_isShutdown || _endpoint is null) return;
+            try { _endpoint.SetMasterVolumeLevelScalar(Math.Clamp(level01, 0f, 1f), IntPtr.Zero); }
+            catch (Exception ex) { Log.Debug("SetLevel failed", ("error", ex.Message)); }
+        }
     }
 
     public static void SetMute(bool mute)
     {
-        try { _endpoint?.SetMute(mute, IntPtr.Zero); }
-        catch (Exception ex) { Log.Debug("SetMute failed", ("error", ex.Message)); }
+        lock (_sync)
+        {
+            if (_isShutdown || _endpoint is null) return;
+            try { _endpoint.SetMute(mute, IntPtr.Zero); }
+            catch (Exception ex) { Log.Debug("SetMute failed", ("error", ex.Message)); }
+        }
     }
 
-    public static void StepUp() { try { _endpoint?.VolumeStepUp(IntPtr.Zero); } catch { } }
-    public static void StepDown() { try { _endpoint?.VolumeStepDown(IntPtr.Zero); } catch { } }
+    public static void StepUp()
+    {
+        lock (_sync)
+        {
+            if (_isShutdown || _endpoint is null) return;
+            try { _endpoint.VolumeStepUp(IntPtr.Zero); } catch { }
+        }
+    }
+
+    public static void StepDown()
+    {
+        lock (_sync)
+        {
+            if (_isShutdown || _endpoint is null) return;
+            try { _endpoint.VolumeStepDown(IntPtr.Zero); } catch { }
+        }
+    }
 
     public static void Shutdown()
     {
-        try
+        lock (_sync)
         {
-            if (_endpoint is not null && _volumeCallbackPtr != IntPtr.Zero)
-                _endpoint.UnregisterControlChangeNotify(_volumeCallbackPtr);
-            if (_enumerator is not null && _notificationClientPtr != IntPtr.Zero)
-                _enumerator.UnregisterEndpointNotificationCallback(_notificationClientPtr);
+            _isShutdown = true;
+            CleanupCoreAudioUnsafe();
         }
-        catch { }
-        if (_volumeCallbackPtr != IntPtr.Zero) { Marshal.Release(_volumeCallbackPtr); _volumeCallbackPtr = IntPtr.Zero; }
-        if (_notificationClientPtr != IntPtr.Zero) { Marshal.Release(_notificationClientPtr); _notificationClientPtr = IntPtr.Zero; }
-        _endpoint = null;
-        _enumerator = null;
+    }
+
+    private static void CleanupCoreAudioUnsafe()
+    {
+        if (_endpoint is not null)
+        {
+            if (_volumeCallbackPtr != IntPtr.Zero)
+            {
+                try { _endpoint.UnregisterControlChangeNotify(_volumeCallbackPtr); } catch { }
+            }
+            try { Marshal.ReleaseComObject(_endpoint); } catch { }
+            _endpoint = null;
+        }
+
+        if (_enumerator is not null)
+        {
+            if (_notificationClientPtr != IntPtr.Zero)
+            {
+                try { _enumerator.UnregisterEndpointNotificationCallback(_notificationClientPtr); } catch { }
+            }
+            try { Marshal.ReleaseComObject(_enumerator); } catch { }
+            _enumerator = null;
+        }
+
+        if (_volumeCallbackPtr != IntPtr.Zero)
+        {
+            try { Marshal.Release(_volumeCallbackPtr); } catch { }
+            _volumeCallbackPtr = IntPtr.Zero;
+        }
+
+        if (_notificationClientPtr != IntPtr.Zero)
+        {
+            try { Marshal.Release(_notificationClientPtr); } catch { }
+            _notificationClientPtr = IntPtr.Zero;
+        }
+
         _sink = null;
     }
+}
+
+internal interface ICoreAudioController
+{
+    bool IsAvailable { get; }
+    bool TryInitialize(Action<float, bool> onVolumeChanged, Action onDefaultDeviceChanged, out string? error);
+    (float Level, bool Muted)? GetCurrent();
+    string? GetDefaultDeviceName();
+    void SetLevel(float level01);
+    void SetMute(bool mute);
+    void StepUp();
+    void StepDown();
+    void Shutdown();
+}
+
+internal sealed class CoreAudioController : ICoreAudioController
+{
+    public static readonly CoreAudioController Instance = new();
+
+    public bool IsAvailable => CoreAudio.IsAvailable;
+    public bool TryInitialize(Action<float, bool> onVolumeChanged, Action onDefaultDeviceChanged, out string? error) =>
+        CoreAudio.TryInitialize(onVolumeChanged, onDefaultDeviceChanged, out error);
+    public (float Level, bool Muted)? GetCurrent() => CoreAudio.GetCurrent();
+    public string? GetDefaultDeviceName() => CoreAudio.GetDefaultDeviceName();
+    public void SetLevel(float level01) => CoreAudio.SetLevel(level01);
+    public void SetMute(bool mute) => CoreAudio.SetMute(mute);
+    public void StepUp() => CoreAudio.StepUp();
+    public void StepDown() => CoreAudio.StepDown();
+    public void Shutdown() => CoreAudio.Shutdown();
 }
