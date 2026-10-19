@@ -7,103 +7,239 @@ namespace WindowsDynamicBar.Services.SystemInfo;
 
 public sealed record BluetoothDeviceInfo(string Name, string Kind, bool Connected, string Id);
 
+internal interface IBluetoothWatcher
+{
+    Windows.Devices.Enumeration.DeviceWatcherStatus Status { get; }
+    event Action<string, string?, bool>? DeviceAdded;
+    event Action<string>? DeviceRemoved;
+    event Action<string, bool?>? DeviceUpdated;
+    event Action? EnumerationCompleted;
+    void Start();
+    void Stop();
+}
+
+internal sealed class WinRtBluetoothWatcher : IBluetoothWatcher
+{
+    private const string IsConnectedKey = "System.Devices.Aep.IsConnected";
+    private readonly Windows.Devices.Enumeration.DeviceWatcher _watcher;
+
+    public Windows.Devices.Enumeration.DeviceWatcherStatus Status => _watcher.Status;
+
+    public event Action<string, string?, bool>? DeviceAdded;
+    public event Action<string>? DeviceRemoved;
+    public event Action<string, bool?>? DeviceUpdated;
+    public event Action? EnumerationCompleted;
+
+    public WinRtBluetoothWatcher()
+    {
+        string aqs = Windows.Devices.Bluetooth.BluetoothDevice.GetDeviceSelectorFromPairingState(true);
+        _watcher = Windows.Devices.Enumeration.DeviceInformation.CreateWatcher(aqs, new[] { IsConnectedKey },
+            Windows.Devices.Enumeration.DeviceInformationKind.AssociationEndpoint);
+
+        _watcher.Added += OnAdded;
+        _watcher.Removed += OnRemoved;
+        _watcher.Updated += OnUpdated;
+        _watcher.EnumerationCompleted += OnEnumerationCompleted;
+    }
+
+    private void OnAdded(Windows.Devices.Enumeration.DeviceWatcher s, Windows.Devices.Enumeration.DeviceInformation info) =>
+        DeviceAdded?.Invoke(info.Id, info.Name, IsConnected(info.Properties) ?? false);
+
+    private void OnRemoved(Windows.Devices.Enumeration.DeviceWatcher s, Windows.Devices.Enumeration.DeviceInformationUpdate info) =>
+        DeviceRemoved?.Invoke(info.Id);
+
+    private void OnUpdated(Windows.Devices.Enumeration.DeviceWatcher s, Windows.Devices.Enumeration.DeviceInformationUpdate info) =>
+        DeviceUpdated?.Invoke(info.Id, IsConnected(info.Properties));
+
+    private void OnEnumerationCompleted(Windows.Devices.Enumeration.DeviceWatcher s, object e) =>
+        EnumerationCompleted?.Invoke();
+
+    public void Start() => _watcher.Start();
+
+    public void Stop()
+    {
+        try
+        {
+            _watcher.Added -= OnAdded;
+            _watcher.Removed -= OnRemoved;
+            _watcher.Updated -= OnUpdated;
+            _watcher.EnumerationCompleted -= OnEnumerationCompleted;
+            _watcher.Stop();
+        }
+        catch { }
+    }
+
+    private static bool? IsConnected(IReadOnlyDictionary<string, object> props) =>
+        props.TryGetValue(IsConnectedKey, out var v) && v is bool b ? b : null;
+}
+
 public sealed class BluetoothService : IDisposable
 {
     private readonly EventBus _bus;
     private readonly SettingsService _settings;
-    private Windows.Devices.Enumeration.DeviceWatcher? _watcher;
+    private readonly Func<IBluetoothWatcher> _watcherFactory;
+    private readonly object _stateLock = new();
+
+    private IBluetoothWatcher? _watcher;
     private readonly Dictionary<string, BluetoothDeviceInfo> _devices = new();
     private bool _enumerated;
+    private bool _started;
+    private bool _disposed;
 
     public event Action<BluetoothDeviceInfo, bool>? DeviceChanged; // device, connected
-    public IReadOnlyCollection<BluetoothDeviceInfo> KnownDevices { get { lock (_devices) return _devices.Values.ToList(); } }
+    public IReadOnlyCollection<BluetoothDeviceInfo> KnownDevices
+    {
+        get
+        {
+            lock (_stateLock)
+            {
+                return _devices.Values.ToList();
+            }
+        }
+    }
 
     public BluetoothService(EventBus bus, SettingsService settings)
+        : this(bus, settings, () => new WinRtBluetoothWatcher())
+    {
+    }
+
+    internal BluetoothService(EventBus bus, SettingsService settings, Func<IBluetoothWatcher> watcherFactory)
     {
         _bus = bus;
         _settings = settings;
+        _watcherFactory = watcherFactory;
     }
-
-    private const string IsConnectedKey = "System.Devices.Aep.IsConnected";
 
     public void Start()
     {
+        lock (_stateLock)
+        {
+            if (_disposed || _started) return;
+            _started = true;
+        }
+
         try
         {
-            // The watcher lists PAIRED devices: Added/Removed mean paired/unpaired. Connecting or
-            // disconnecting a paired headset only changes System.Devices.Aep.IsConnected (Updated).
-            string aqs = Windows.Devices.Bluetooth.BluetoothDevice.GetDeviceSelectorFromPairingState(true);
-            _watcher = Windows.Devices.Enumeration.DeviceInformation.CreateWatcher(aqs, new[] { IsConnectedKey },
-                Windows.Devices.Enumeration.DeviceInformationKind.AssociationEndpoint);
-            _watcher.Added += OnDeviceAdded;
-            _watcher.Removed += OnDeviceRemoved;
-            _watcher.Updated += OnDeviceUpdated;
-            // The first Added sweep is just "these devices exist" — populate silently.
-            _watcher.EnumerationCompleted += (_, _) =>
+            var watcher = _watcherFactory();
+            lock (_stateLock)
             {
-                _enumerated = true;
-                lock (_devices)
-                    Log.Info("Bluetooth devices", ("paired", _devices.Count), ("connected", _devices.Values.Count(d => d.Connected)));
-            };
-            _watcher.Start();
+                if (_disposed)
+                {
+                    TryStopWatcher(watcher);
+                    return;
+                }
+                _watcher = watcher;
+                _watcher.DeviceAdded += OnDeviceAdded;
+                _watcher.DeviceRemoved += OnDeviceRemoved;
+                _watcher.DeviceUpdated += OnDeviceUpdated;
+                _watcher.EnumerationCompleted += OnEnumerationCompleted;
+            }
+
+            watcher.Start();
             Log.Info("Bluetooth watcher started");
         }
         catch (Exception ex)
         {
+            lock (_stateLock)
+            {
+                _started = false;
+                CleanupWatcherUnsafe();
+            }
             Log.Warning("Bluetooth unavailable", ("error", ex.Message));
         }
     }
 
-    private void OnDeviceAdded(Windows.Devices.Enumeration.DeviceWatcher sender,
-        Windows.Devices.Enumeration.DeviceInformation info)
+    private void OnDeviceAdded(string id, string? name, bool connected)
     {
-        var dev = ToInfo(info.Name, info.Id, IsConnected(info.Properties) ?? false);
-        if (dev is null) return;
-        lock (_devices) _devices[info.Id] = dev;
-        // A newly paired device usually connects at once; that is the moment worth showing.
-        if (_enumerated && dev.Connected) Announce(dev);
-    }
+        BluetoothDeviceInfo? dev = null;
+        bool shouldAnnounce = false;
 
-    private void OnDeviceRemoved(Windows.Devices.Enumeration.DeviceWatcher sender,
-        Windows.Devices.Enumeration.DeviceInformationUpdate info)
-    {
-        BluetoothDeviceInfo? dev;
-        lock (_devices) { if (!_devices.Remove(info.Id, out dev)) return; }
-        if (dev.Connected) Announce(dev with { Connected = false });
-    }
-
-    private void OnDeviceUpdated(Windows.Devices.Enumeration.DeviceWatcher sender,
-        Windows.Devices.Enumeration.DeviceInformationUpdate info)
-    {
-        if (IsConnected(info.Properties) is not bool connected) return;   // name/icon updates only
-        BluetoothDeviceInfo? next;
-        lock (_devices)
+        lock (_stateLock)
         {
-            if (!_devices.TryGetValue(info.Id, out var dev) || dev.Connected == connected) return;
-            next = dev with { Connected = connected };
-            _devices[info.Id] = next;
+            if (_disposed) return;
+            dev = ToInfo(name, id, connected);
+            if (dev is null) return;
+            _devices[id] = dev;
+            shouldAnnounce = _enumerated && dev.Connected;
         }
-        if (_enumerated) Announce(next);
+
+        if (shouldAnnounce && dev is not null)
+        {
+            Announce(dev);
+        }
+    }
+
+    private void OnDeviceRemoved(string id)
+    {
+        BluetoothDeviceInfo? dev = null;
+
+        lock (_stateLock)
+        {
+            if (_disposed) return;
+            if (!_devices.Remove(id, out dev)) return;
+        }
+
+        if (dev is not null && dev.Connected)
+        {
+            Announce(dev with { Connected = false });
+        }
+    }
+
+    private void OnDeviceUpdated(string id, bool? connected)
+    {
+        if (connected is not bool isConnected) return; // name/icon updates only
+
+        BluetoothDeviceInfo? next = null;
+        bool shouldAnnounce = false;
+
+        lock (_stateLock)
+        {
+            if (_disposed) return;
+            if (!_devices.TryGetValue(id, out var dev) || dev.Connected == isConnected) return;
+            next = dev with { Connected = isConnected };
+            _devices[id] = next;
+            shouldAnnounce = _enumerated;
+        }
+
+        if (shouldAnnounce && next is not null)
+        {
+            Announce(next);
+        }
+    }
+
+    private void OnEnumerationCompleted()
+    {
+        int pairedCount = 0;
+        int connectedCount = 0;
+
+        lock (_stateLock)
+        {
+            if (_disposed) return;
+            _enumerated = true;
+            pairedCount = _devices.Count;
+            connectedCount = _devices.Values.Count(d => d.Connected);
+        }
+
+        Log.Info("Bluetooth devices", ("paired", pairedCount), ("connected", connectedCount));
     }
 
     private void Announce(BluetoothDeviceInfo dev)
     {
         DeviceChanged?.Invoke(dev, dev.Connected);
         if (_settings.Current.FeatureBluetooth)
+        {
             _bus.Raise(BarEvent.Create(BarEventKind.Bluetooth, dev.Name, dev.Connected ? "Connected" : "Disconnected",
                 payload: dev, priority: 45, displayDuration: TimeSpan.FromSeconds(3)));
+        }
     }
 
-    private static bool? IsConnected(IReadOnlyDictionary<string, object> props) =>
-        props.TryGetValue(IsConnectedKey, out var v) && v is bool b ? b : null;
-
-    private static BluetoothDeviceInfo? ToInfo(string? rawName, string id, bool connected)
+    internal static BluetoothDeviceInfo? ToInfo(string? rawName, string id, bool connected)
     {
         string name = string.IsNullOrWhiteSpace(rawName) ? "Bluetooth device" : rawName;
         return new BluetoothDeviceInfo(name, Classify(name), connected, id);
     }
 
-    private static string Classify(string name)
+    internal static string Classify(string name)
     {
         string n = name.ToLowerInvariant();
         if (n.Contains("airpod") || n.Contains("headphone") || n.Contains("earphone") ||
@@ -117,15 +253,43 @@ public sealed class BluetoothService : IDisposable
 
     public void Dispose()
     {
+        IBluetoothWatcher? watcherToStop;
+        lock (_stateLock)
+        {
+            if (_disposed) return;
+            _disposed = true;
+            _started = false;
+            watcherToStop = CleanupWatcherUnsafe();
+        }
+
+        TryStopWatcher(watcherToStop);
+    }
+
+    private IBluetoothWatcher? CleanupWatcherUnsafe()
+    {
+        if (_watcher is null) return null;
+
+        var watcher = _watcher;
+        _watcher = null;
+
+        watcher.DeviceAdded -= OnDeviceAdded;
+        watcher.DeviceRemoved -= OnDeviceRemoved;
+        watcher.DeviceUpdated -= OnDeviceUpdated;
+        watcher.EnumerationCompleted -= OnEnumerationCompleted;
+
+        return watcher;
+    }
+
+    private static void TryStopWatcher(IBluetoothWatcher? watcher)
+    {
+        if (watcher is null) return;
         try
         {
-            if (_watcher is not null)
+            var status = watcher.Status;
+            if (status == Windows.Devices.Enumeration.DeviceWatcherStatus.Started ||
+                status == Windows.Devices.Enumeration.DeviceWatcherStatus.EnumerationCompleted)
             {
-                _watcher.Added -= OnDeviceAdded;
-                _watcher.Removed -= OnDeviceRemoved;
-                _watcher.Updated -= OnDeviceUpdated;
-                if (_watcher.Status == Windows.Devices.Enumeration.DeviceWatcherStatus.Started)
-                    _watcher.Stop();
+                watcher.Stop();
             }
         }
         catch { }

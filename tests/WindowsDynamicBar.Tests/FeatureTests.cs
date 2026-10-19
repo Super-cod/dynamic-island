@@ -11,6 +11,7 @@ using WindowsDynamicBar.Services.Audio;
 using WindowsDynamicBar.Services.Media;
 using WindowsDynamicBar.Services.Settings;
 using WindowsDynamicBar.Services.SystemInfo;
+using WindowsDynamicBar.Services.SystemMonitor;
 using WindowsDynamicBar.UI.Media;
 using Windows.Storage.Streams;
 
@@ -71,6 +72,13 @@ internal static partial class Program
         Run("VolumeService: Dispose shuts down controller and suppresses late callbacks", TestVolumeService_Dispose_SuppressesLateCallbacks);
         Run("VolumeService: concurrent access across threads is thread-safe", TestVolumeService_ConcurrentAccess);
         Run("CoreAudio: Shutdown versus AttachDefaultEndpoint race terminates safely", TestCoreAudio_ShutdownVsReattachmentRace);
+        Run("SystemMonitorService: repeated activation, deactivation, and disposal are idempotent", TestSystemMonitorService_LifecycleAndIdempotency);
+        Run("SystemMonitorService: Current returns consistent snapshot under concurrent reads", TestSystemMonitorService_CurrentConsistentSnapshot);
+        Run("SystemMonitorService: sample and dispose coordination prevents overlapping access and deadlock", TestSystemMonitorService_SampleAndDisposeCoordination);
+        Run("BluetoothService: Start is idempotent and handles watcher failure gracefully", TestBluetoothService_StartIdempotencyAndFailureHandling);
+        Run("BluetoothService: Dispose stops watcher when EnumerationCompleted and detaches all handlers", TestBluetoothService_Dispose_StopsWatcherWhenEnumerationCompleted);
+        Run("BluetoothService: device classification and metadata mapping", TestBluetoothService_DeviceEnumerationAndClassification);
+        Run("BluetoothService: event publishing, FeatureBluetooth toggle, and post-disposal suppression", TestBluetoothService_EventsAndPostDisposalSuppression);
     }
 
     private static string ScratchDir()
@@ -1835,5 +1843,456 @@ internal static partial class Program
         CoreAudio.Shutdown();
 
         AssertEq(0, raceExceptions, "Shutdown versus attach race completed with zero exceptions");
+    }
+
+    private static void TestSystemMonitorService_LifecycleAndIdempotency()
+    {
+        var settings = SettingsService.Instance;
+        using var svc = new SystemMonitorService(settings);
+
+        Assert(!svc.IsActive, "SystemMonitorService is inactive initially");
+
+        // Repeated Activate is idempotent
+        svc.Activate();
+        Assert(svc.IsActive, "Service is active after Activate()");
+        svc.Activate();
+        Assert(svc.IsActive, "Service remains active on redundant Activate()");
+
+        // Repeated Deactivate is idempotent
+        svc.Deactivate();
+        Assert(!svc.IsActive, "Service is inactive after Deactivate()");
+        svc.Deactivate();
+        Assert(!svc.IsActive, "Service remains inactive on redundant Deactivate()");
+
+        // Re-activation works
+        svc.Activate();
+        Assert(svc.IsActive, "Service can be reactivated");
+
+        // Dispose stops activity
+        svc.Dispose();
+        Assert(!svc.IsActive, "Service is inactive after Dispose()");
+
+        // Repeated Dispose is safe and idempotent
+        svc.Dispose();
+        Assert(!svc.IsActive, "Service remains inactive on redundant Dispose()");
+
+        // Activate after Dispose is safely ignored and does not reactivate
+        svc.Activate();
+        Assert(!svc.IsActive, "Activate after Dispose does not reactivate service");
+
+        // Deactivate after Dispose is safe
+        svc.Deactivate();
+        Assert(!svc.IsActive, "Deactivate after Dispose is safe");
+    }
+
+    private static void TestSystemMonitorService_CurrentConsistentSnapshot()
+    {
+        var settings = SettingsService.Instance;
+        using var svc = new SystemMonitorService(settings);
+
+        var snap = svc.Current;
+        Assert(snap is not null, "Current snapshot is non-null");
+        Assert(snap!.Cpu >= 0 && snap.Cpu <= 100, "CPU is within 0..100");
+        Assert(snap.Gpu >= 0 && snap.Gpu <= 100, "GPU is within 0..100");
+        Assert(snap.Ram >= 0 && snap.Ram <= 100, "RAM is within 0..100");
+        Assert(snap.AvailableBytes >= 0, "AvailableBytes is non-negative");
+
+        // Verify concurrent reads of Current under sample execution produce valid snapshots without throwing
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
+        var token = cts.Token;
+        int exceptions = 0;
+
+        var readers = new Task[4];
+        for (int i = 0; i < readers.Length; i++)
+        {
+            readers[i] = Task.Run(() =>
+            {
+                while (!token.IsCancellationRequested)
+                {
+                    try
+                    {
+                        var s = svc.Current;
+                        if (s.Cpu < 0 || s.Cpu > 100 || s.Ram < 0 || s.Ram > 100)
+                        {
+                            Interlocked.Increment(ref exceptions);
+                        }
+                        _ = svc.IsActive;
+                        _ = svc.CpuAvailable;
+                        _ = svc.GpuAvailable;
+                    }
+                    catch
+                    {
+                        Interlocked.Increment(ref exceptions);
+                    }
+                    Thread.Sleep(1);
+                }
+            });
+        }
+
+        var sampler = Task.Run(() =>
+        {
+            while (!token.IsCancellationRequested)
+            {
+                try
+                {
+                    svc.Sample();
+                }
+                catch
+                {
+                    Interlocked.Increment(ref exceptions);
+                }
+                Thread.Sleep(5);
+            }
+        });
+
+        var allTasks = new Task[readers.Length + 1];
+        Array.Copy(readers, allTasks, readers.Length);
+        allTasks[readers.Length] = sampler;
+        var all = Task.WhenAll(allTasks);
+
+        while (!all.IsCompleted)
+        {
+            Pump(10);
+        }
+
+        AssertEq(0, exceptions, "Concurrent Current reads and Sample() executed without exceptions or invalid state");
+    }
+
+    private static void TestSystemMonitorService_SampleAndDisposeCoordination()
+    {
+        var settings = SettingsService.Instance;
+        var svc = new SystemMonitorService(settings);
+        svc.Activate();
+
+        int statsChangedCount = 0;
+        bool reentrantReadSucceeded = false;
+        svc.StatsChanged += stats =>
+        {
+            Interlocked.Increment(ref statsChangedCount);
+            // Verify lock inversion prevention: calling Current or IsActive from within StatsChanged callback
+            // (which acquires _sync) does NOT deadlock or block because StatsChanged was invoked outside _sync.
+            try
+            {
+                _ = svc.Current;
+                _ = svc.IsActive;
+                reentrantReadSucceeded = true;
+            }
+            catch { }
+        };
+
+        // Calling Sample while active invokes StatsChanged (if values change or priming)
+        svc.Sample();
+
+        // Verify multi-threaded race between Sample, Activate/Deactivate, and Dispose
+        int raceExceptions = 0;
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(250));
+        var token = cts.Token;
+
+        var sampleWorkers = new Task[3];
+        for (int i = 0; i < sampleWorkers.Length; i++)
+        {
+            sampleWorkers[i] = Task.Run(() =>
+            {
+                while (!token.IsCancellationRequested)
+                {
+                    try
+                    {
+                        svc.Sample();
+                    }
+                    catch
+                    {
+                        Interlocked.Increment(ref raceExceptions);
+                    }
+                    Thread.Sleep(1);
+                }
+            });
+        }
+
+        var toggleWorker = Task.Run(() =>
+        {
+            while (!token.IsCancellationRequested)
+            {
+                try
+                {
+                    svc.Activate();
+                    Thread.Sleep(2);
+                    svc.Deactivate();
+                }
+                catch
+                {
+                    Interlocked.Increment(ref raceExceptions);
+                }
+                Thread.Sleep(1);
+            }
+        });
+
+        // Let the workers run for a bit, then dispose the service in the middle of sampling
+        Thread.Sleep(50);
+        svc.Dispose();
+
+        var allRaceTasks = new Task[sampleWorkers.Length + 1];
+        Array.Copy(sampleWorkers, allRaceTasks, sampleWorkers.Length);
+        allRaceTasks[sampleWorkers.Length] = toggleWorker;
+        var raceAll = Task.WhenAll(allRaceTasks);
+
+        while (!raceAll.IsCompleted)
+        {
+            Pump(10);
+        }
+
+        // After disposal, calling Sample is a safe no-op
+        svc.Sample();
+
+        if (statsChangedCount > 0)
+        {
+            Assert(reentrantReadSucceeded, "Re-entrant read of Current inside StatsChanged callback succeeded without deadlock");
+        }
+
+        AssertEq(0, raceExceptions, "Sample and Dispose coordination ran without exceptions");
+        Assert(!svc.IsActive, "Service remains inactive and disposed");
+    }
+
+    private sealed class FakeBluetoothWatcher : IBluetoothWatcher
+    {
+        public Windows.Devices.Enumeration.DeviceWatcherStatus Status { get; set; } = Windows.Devices.Enumeration.DeviceWatcherStatus.Created;
+        public int StartCallCount { get; private set; }
+        public int StopCallCount { get; private set; }
+
+        public event Action<string, string?, bool>? DeviceAdded;
+        public event Action<string>? DeviceRemoved;
+        public event Action<string, bool?>? DeviceUpdated;
+        public event Action? EnumerationCompleted;
+
+        public void Start()
+        {
+            StartCallCount++;
+            Status = Windows.Devices.Enumeration.DeviceWatcherStatus.Started;
+        }
+
+        public void Stop()
+        {
+            StopCallCount++;
+            Status = Windows.Devices.Enumeration.DeviceWatcherStatus.Stopped;
+        }
+
+        public void FireDeviceAdded(string id, string? name, bool connected) => DeviceAdded?.Invoke(id, name, connected);
+        public void FireDeviceRemoved(string id) => DeviceRemoved?.Invoke(id);
+        public void FireDeviceUpdated(string id, bool? connected) => DeviceUpdated?.Invoke(id, connected);
+        public void FireEnumerationCompleted()
+        {
+            Status = Windows.Devices.Enumeration.DeviceWatcherStatus.EnumerationCompleted;
+            EnumerationCompleted?.Invoke();
+        }
+
+        public bool HasSubscribers => DeviceAdded != null || DeviceRemoved != null || DeviceUpdated != null || EnumerationCompleted != null;
+    }
+
+    private static void TestBluetoothService_StartIdempotencyAndFailureHandling()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+
+        var fakeWatcher = new FakeBluetoothWatcher();
+        int factoryCalls = 0;
+        using (var svc = new BluetoothService(bus, settings, () =>
+        {
+            factoryCalls++;
+            return fakeWatcher;
+        }))
+        {
+            // First start creates watcher and starts it
+            svc.Start();
+            AssertEq(1, factoryCalls, "Watcher factory called on first Start");
+            AssertEq(1, fakeWatcher.StartCallCount, "Watcher Start called once");
+            AssertEq(Windows.Devices.Enumeration.DeviceWatcherStatus.Started, fakeWatcher.Status, "Watcher status is Started");
+
+            // Redundant start is idempotent
+            svc.Start();
+            AssertEq(1, factoryCalls, "Watcher factory not called again on second Start");
+            AssertEq(1, fakeWatcher.StartCallCount, "Watcher Start not called again on second Start");
+        }
+        AssertEq(1, fakeWatcher.StopCallCount, "Disposal stopped the watcher");
+
+        // Failure handling: factory throws exception
+        int failFactoryCalls = 0;
+        using (var failSvc = new BluetoothService(bus, settings, () =>
+        {
+            failFactoryCalls++;
+            throw new InvalidOperationException("Bluetooth radio is powered off or disabled");
+        }))
+        {
+            failSvc.Start();
+            AssertEq(1, failFactoryCalls, "Watcher factory called");
+            AssertEq(0, failSvc.KnownDevices.Count, "Known devices empty on failed start");
+
+            // Verify safe disposal after failed start
+            failSvc.Dispose();
+        }
+    }
+
+    private static void TestBluetoothService_Dispose_StopsWatcherWhenEnumerationCompleted()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+
+        // 1. Stopped when status is EnumerationCompleted
+        var watcher1 = new FakeBluetoothWatcher();
+        using (var svc1 = new BluetoothService(bus, settings, () => watcher1))
+        {
+            svc1.Start();
+            AssertEq(Windows.Devices.Enumeration.DeviceWatcherStatus.Started, watcher1.Status, "Status is Started");
+            Assert(watcher1.HasSubscribers, "Watcher has event subscribers");
+
+            // Simulate completed enumeration
+            watcher1.FireEnumerationCompleted();
+            AssertEq(Windows.Devices.Enumeration.DeviceWatcherStatus.EnumerationCompleted, watcher1.Status, "Status is EnumerationCompleted");
+
+            // Dispose must stop the watcher even when status is EnumerationCompleted!
+            svc1.Dispose();
+            AssertEq(1, watcher1.StopCallCount, "Stop called when status was EnumerationCompleted");
+            AssertEq(Windows.Devices.Enumeration.DeviceWatcherStatus.Stopped, watcher1.Status, "Status is Stopped");
+            Assert(!watcher1.HasSubscribers, "All event handlers detached on Dispose");
+        }
+
+        // 2. Stopped when status is Started
+        var watcher2 = new FakeBluetoothWatcher();
+        using (var svc2 = new BluetoothService(bus, settings, () => watcher2))
+        {
+            svc2.Start();
+            AssertEq(Windows.Devices.Enumeration.DeviceWatcherStatus.Started, watcher2.Status, "Status is Started");
+
+            svc2.Dispose();
+            AssertEq(1, watcher2.StopCallCount, "Stop called when status was Started");
+            AssertEq(Windows.Devices.Enumeration.DeviceWatcherStatus.Stopped, watcher2.Status, "Status is Stopped");
+            Assert(!watcher2.HasSubscribers, "All event handlers detached on Dispose");
+        }
+
+        // 3. Not stopped if status was Created (never started)
+        var watcher3 = new FakeBluetoothWatcher();
+        using (var svc3 = new BluetoothService(bus, settings, () => watcher3))
+        {
+            // Do not call Start()
+            svc3.Dispose();
+            AssertEq(0, watcher3.StopCallCount, "Stop not called when status was Created");
+            AssertEq(Windows.Devices.Enumeration.DeviceWatcherStatus.Created, watcher3.Status, "Status remained Created");
+        }
+    }
+
+    private static void TestBluetoothService_DeviceEnumerationAndClassification()
+    {
+        // 1. Classification tests
+        AssertEq("Audio", BluetoothService.Classify("Apple AirPods Pro"), "AirPods is Audio");
+        AssertEq("Audio", BluetoothService.Classify("Sony WH-1000XM5 Headphone"), "Headphone is Audio");
+        AssertEq("Audio", BluetoothService.Classify("Bose QuietComfort Earphones"), "Earphone is Audio");
+        AssertEq("Audio", BluetoothService.Classify("Galaxy Buds Live"), "Buds is Audio");
+        AssertEq("Audio", BluetoothService.Classify("Jabra Evolve Headset"), "Headset is Audio");
+        AssertEq("Audio", BluetoothService.Classify("JBL Flip 6 Bluetooth Speaker"), "Speaker is Audio");
+        AssertEq("Gamepad", BluetoothService.Classify("Xbox Wireless Controller"), "Xbox is Gamepad");
+        AssertEq("Gamepad", BluetoothService.Classify("DualSense Wireless Controller"), "Controller is Gamepad");
+        AssertEq("Gamepad", BluetoothService.Classify("Generic Bluetooth Gamepad"), "Gamepad is Gamepad");
+        AssertEq("Mouse", BluetoothService.Classify("Logitech MX Master 3S Mouse"), "Mouse is Mouse");
+        AssertEq("Keyboard", BluetoothService.Classify("Keychron K2 Bluetooth Keyboard"), "Keyboard is Keyboard");
+        AssertEq("Watch", BluetoothService.Classify("Galaxy Watch 5 Pro"), "Watch is Watch");
+        AssertEq("Device", BluetoothService.Classify("Unknown Peripheral 42"), "Generic device fallback is Device");
+
+        // 2. ToInfo mapping
+        var info1 = BluetoothService.ToInfo("Logitech Mouse", "dev-mouse-1", true);
+        Assert(info1 is not null, "ToInfo returned non-null");
+        AssertEq("Logitech Mouse", info1!.Name, "Name matches");
+        AssertEq("Mouse", info1.Kind, "Kind is Mouse");
+        AssertEq(true, info1.Connected, "Connected is true");
+        AssertEq("dev-mouse-1", info1.Id, "Id matches");
+
+        // 3. Fallback for null or whitespace name
+        var infoNull = BluetoothService.ToInfo(null, "dev-null-id", false);
+        AssertEq("Bluetooth device", infoNull!.Name, "Null name falls back to 'Bluetooth device'");
+        AssertEq("Device", infoNull.Kind, "Fallback name classified as Device");
+        AssertEq(false, infoNull.Connected, "Connected is false");
+
+        var infoEmpty = BluetoothService.ToInfo("   ", "dev-empty-id", true);
+        AssertEq("Bluetooth device", infoEmpty!.Name, "Whitespace name falls back to 'Bluetooth device'");
+    }
+
+    private static void TestBluetoothService_EventsAndPostDisposalSuppression()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+        settings.Update(s => s.FeatureBluetooth = true);
+
+        var watcher = new FakeBluetoothWatcher();
+        var svc = new BluetoothService(bus, settings, () => watcher);
+        svc.Start();
+
+        var deviceChangedEvents = new List<(BluetoothDeviceInfo Info, bool Connected)>();
+        svc.DeviceChanged += (dev, conn) => deviceChangedEvents.Add((dev, conn));
+
+        var barEvents = new List<BarEvent>();
+        bus.EventRaised += e =>
+        {
+            if (e.Kind == BarEventKind.Bluetooth)
+            {
+                barEvents.Add(e);
+            }
+        };
+
+        // 1. Before enumeration completed: devices added during initial scan populate KnownDevices
+        // but do not announce events (avoiding alert spam on app launch)
+        watcher.FireDeviceAdded("id-airpods", "AirPods", true);
+        AssertEq(1, svc.KnownDevices.Count, "Known devices count is 1");
+        AssertEq(0, deviceChangedEvents.Count, "No DeviceChanged during initial enumeration");
+        AssertEq(0, barEvents.Count, "No BarEvent during initial enumeration");
+
+        // 2. Fire enumeration completed
+        watcher.FireEnumerationCompleted();
+
+        // 3. Device added after enumeration completes: raises DeviceChanged and BarEvent
+        watcher.FireDeviceAdded("id-mouse", "Logitech Mouse", true);
+        AssertEq(2, svc.KnownDevices.Count, "Known devices count is 2");
+        AssertEq(1, deviceChangedEvents.Count, "DeviceChanged raised for new device");
+        AssertEq("Logitech Mouse", deviceChangedEvents[0].Info.Name, "Device name matches");
+        AssertEq(true, deviceChangedEvents[0].Connected, "Device connected is true");
+        AssertEq(1, barEvents.Count, "BarEvent raised on bus");
+        AssertEq("Logitech Mouse", barEvents[0].Title, "BarEvent title is device name");
+        AssertEq("Connected", barEvents[0].Subtitle, "BarEvent subtitle is Connected");
+        AssertEq(45, barEvents[0].Priority, "Bluetooth priority is 45");
+
+        // 4. Device updated: disconnect mouse
+        watcher.FireDeviceUpdated("id-mouse", false);
+        AssertEq(2, deviceChangedEvents.Count, "DeviceChanged raised for update");
+        AssertEq(false, deviceChangedEvents[1].Connected, "Updated connected is false");
+        AssertEq(2, barEvents.Count, "BarEvent raised for disconnect");
+        AssertEq("Disconnected", barEvents[1].Subtitle, "BarEvent subtitle is Disconnected");
+
+        // Redundant update with same connected state does NOT re-announce
+        watcher.FireDeviceUpdated("id-mouse", false);
+        AssertEq(2, deviceChangedEvents.Count, "Redundant update suppressed");
+        AssertEq(2, barEvents.Count, "Redundant BarEvent suppressed");
+
+        // 5. Device removed
+        watcher.FireDeviceAdded("id-kb", "Keychron Keyboard", true);
+        AssertEq(3, svc.KnownDevices.Count, "Known devices count is 3");
+        watcher.FireDeviceRemoved("id-kb");
+        AssertEq(2, svc.KnownDevices.Count, "Device removed from KnownDevices");
+
+        // 6. FeatureBluetooth = false: DeviceChanged still fires, but bus event is suppressed
+        settings.Update(s => s.FeatureBluetooth = false);
+        int busCountBefore = barEvents.Count;
+        int devCountBefore = deviceChangedEvents.Count;
+
+        watcher.FireDeviceUpdated("id-mouse", true);
+        AssertEq(devCountBefore + 1, deviceChangedEvents.Count, "DeviceChanged still fires when feature disabled");
+        AssertEq(busCountBefore, barEvents.Count, "BarEvent suppressed when FeatureBluetooth is false");
+
+        // 7. Post-disposal suppression: after Dispose, late callbacks must be completely suppressed
+        svc.Dispose();
+        int devCountAfterDispose = deviceChangedEvents.Count;
+        int knownCountAfterDispose = svc.KnownDevices.Count;
+
+        watcher.FireDeviceAdded("id-late", "Late Speaker", true);
+        watcher.FireDeviceUpdated("id-mouse", false);
+        watcher.FireDeviceRemoved("id-airpods");
+
+        AssertEq(devCountAfterDispose, deviceChangedEvents.Count, "No DeviceChanged callbacks invoked after disposal");
+        AssertEq(knownCountAfterDispose, svc.KnownDevices.Count, "Known devices not mutated after disposal");
     }
 }
