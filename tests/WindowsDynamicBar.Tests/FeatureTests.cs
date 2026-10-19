@@ -106,6 +106,16 @@ internal static partial class Program
         Run("NetworkService: post-disposal callbacks and BarEvents are suppressed", TestNetworkService_PostDisposalSuppression);
         Run("NetworkService: signal jitter vs meaningful transitions, BarEvent metadata, and feature toggle", TestNetworkService_SignalJitterVsMeaningfulTransitions);
         Run("NetworkService: concurrent Start vs Dispose race stops watcher and prevents leak", TestNetworkService_StartVsDisposeRace);
+        Run("BatteryService: Start and Dispose are idempotent, thread-safe, and reject calls after disposal", TestBatteryService_StartAndDisposeIdempotency);
+        Run("BatteryService: subscription ownership enforces exactly one subscription and detachment", TestBatteryService_SubscriptionOwnership);
+        Run("BatteryService: Current returns consistent thread-safe snapshots under concurrent updates", TestBatteryService_CurrentThreadSafeSnapshot);
+        Run("BatteryService: in-flight callback racing with Dispose suppresses state mutation and event dispatch", TestBatteryService_InFlightCallbackVsDisposeRace);
+        Run("BatteryService: post-disposal callbacks and BarEvents are suppressed", TestBatteryService_PostDisposalSuppression);
+        Run("BatteryService: alert transitions, routine drift suppression, and FeatureBattery setting", TestBatteryService_AlertTransitionsAndFeatureToggle);
+        Run("BatteryService: concurrent Start vs Dispose race stops watcher and prevents leak", TestBatteryService_StartVsDisposeRace);
+        Run("BatteryService: concurrent Start vs Dispose during timer creation prevents leak", TestBatteryService_StartVsDisposeDuringTimerCreation);
+        Run("BatteryService: startup failure safely resets state and allows clean retry", TestBatteryService_StartupFailureAndRetry);
+        Run("SystemEventsBatteryWatcher: partial subscription rollback and safe retry without leaks", TestSystemEventsBatteryWatcher_PartialSubscriptionRollbackAndRetry);
     }
 
     private static string ScratchDir()
@@ -3800,5 +3810,741 @@ internal static partial class Program
         svc.OnNetworkStatusChangedCore(new NetworkInfo("Cellular", "5G", 3, true, true));
         AssertEq(initialInfo, svc.Current, "Current not mutated after disposal");
         AssertEq(1, Volatile.Read(ref callbackCount), "Only initial start callback was invoked, zero post-disposal");
+    }
+
+    private sealed class FakeBatteryWatcher : IBatteryWatcher
+    {
+        private Action? _powerChanged;
+        private Action? _sessionUnlocked;
+        public int StartCount;
+        public int StopCount;
+        public int DisposeCount;
+        private int _isStarted;
+        private int _powerSubscribers;
+        private int _sessionSubscribers;
+        public Action? OnStart;
+
+        public bool IsStarted => Volatile.Read(ref _isStarted) == 1;
+        public int TotalSubscribers => Volatile.Read(ref _powerSubscribers) + Volatile.Read(ref _sessionSubscribers);
+
+        public event Action? PowerStatusChanged
+        {
+            add
+            {
+                lock (this)
+                {
+                    _powerChanged += value;
+                    Interlocked.Increment(ref _powerSubscribers);
+                }
+            }
+            remove
+            {
+                lock (this)
+                {
+                    _powerChanged -= value;
+                    Interlocked.Decrement(ref _powerSubscribers);
+                }
+            }
+        }
+
+        public event Action? SessionUnlocked
+        {
+            add
+            {
+                lock (this)
+                {
+                    _sessionUnlocked += value;
+                    Interlocked.Increment(ref _sessionSubscribers);
+                }
+            }
+            remove
+            {
+                lock (this)
+                {
+                    _sessionUnlocked -= value;
+                    Interlocked.Decrement(ref _sessionSubscribers);
+                }
+            }
+        }
+
+        public void Start()
+        {
+            OnStart?.Invoke();
+            Interlocked.Increment(ref StartCount);
+            Volatile.Write(ref _isStarted, 1);
+        }
+
+        public void Stop()
+        {
+            Interlocked.Increment(ref StopCount);
+            Volatile.Write(ref _isStarted, 0);
+        }
+
+        public void Dispose()
+        {
+            Interlocked.Increment(ref DisposeCount);
+            Stop();
+        }
+
+        public void TriggerPower()
+        {
+            Action? handler;
+            lock (this) { handler = _powerChanged; }
+            handler?.Invoke();
+        }
+
+        public void TriggerSessionUnlock()
+        {
+            Action? handler;
+            lock (this) { handler = _sessionUnlocked; }
+            handler?.Invoke();
+        }
+    }
+
+    private sealed class FakeBatteryTimer : IDisposable
+    {
+        public Action Callback { get; }
+        public TimeSpan Interval { get; }
+        public int DisposeCount;
+        private int _isDisposed;
+
+        public bool IsDisposed => Volatile.Read(ref _isDisposed) == 1;
+
+        public FakeBatteryTimer(Action callback, TimeSpan interval)
+        {
+            Callback = callback;
+            Interval = interval;
+        }
+
+        public void Tick()
+        {
+            if (!IsDisposed)
+            {
+                Callback();
+            }
+        }
+
+        public void Dispose()
+        {
+            Interlocked.Increment(ref DisposeCount);
+            Volatile.Write(ref _isDisposed, 1);
+        }
+    }
+
+    private static void TestBatteryService_StartAndDisposeIdempotency()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+
+        var initialInfo = new BatteryInfo(80, false, false, "3h left", true);
+        var fakeWatcher = new FakeBatteryWatcher();
+        FakeBatteryTimer? createdTimer = null;
+        var svc = new BatteryService(bus, settings,
+            queryBattery: () => initialInfo,
+            watcherFactory: () => fakeWatcher,
+            timerFactory: (cb, interval) => (createdTimer = new FakeBatteryTimer(cb, interval)));
+
+        Assert(!svc.IsStarted, "Not started initially");
+        Assert(!svc.IsDisposed, "Not disposed initially");
+        Assert(!svc.HasWatcher, "No watcher initially");
+        Assert(!svc.HasTimer, "No timer initially");
+        AssertEq(0.0, svc.Current.Percent, "Percent initially 0");
+        Assert(!svc.Current.HasBattery, "HasBattery initially false");
+
+        svc.Start();
+        Assert(svc.IsStarted, "Started after Start()");
+        Assert(!svc.IsDisposed, "Not disposed after Start()");
+        Assert(svc.HasWatcher, "Has watcher after Start()");
+        Assert(svc.HasTimer, "Has timer after Start()");
+        AssertEq(initialInfo, svc.Current, "Current initialized from query");
+        AssertEq(1, fakeWatcher.StartCount, "Watcher started once");
+        Assert(createdTimer is not null, "Timer was created");
+
+        svc.Start();
+        AssertEq(1, fakeWatcher.StartCount, "Sequential Start() is idempotent");
+
+        // Concurrent Start() on 10 threads
+        var fakeWatcherConcurrent = new FakeBatteryWatcher();
+        int watcherFactoryCalls = 0;
+        int timerFactoryCalls = 0;
+        FakeBatteryTimer? concurrentTimer = null;
+        var svcConcurrent = new BatteryService(bus, settings,
+            queryBattery: () => initialInfo,
+            watcherFactory: () =>
+            {
+                Interlocked.Increment(ref watcherFactoryCalls);
+                return fakeWatcherConcurrent;
+            },
+            timerFactory: (cb, interval) =>
+            {
+                Interlocked.Increment(ref timerFactoryCalls);
+                return (concurrentTimer = new FakeBatteryTimer(cb, interval));
+            });
+
+        int threadCount = 10;
+        using var barrier = new Barrier(threadCount);
+        var tasks = new Task[threadCount];
+        for (int i = 0; i < threadCount; i++)
+        {
+            tasks[i] = Task.Run(() =>
+            {
+                barrier.SignalAndWait();
+                svcConcurrent.Start();
+            });
+        }
+        Task.WaitAll(tasks);
+
+        AssertEq(1, watcherFactoryCalls, "Watcher factory called once under concurrent Start()");
+        AssertEq(1, timerFactoryCalls, "Timer factory called once under concurrent Start()");
+        AssertEq(1, fakeWatcherConcurrent.StartCount, "Watcher started once under concurrent Start()");
+        Assert(svcConcurrent.IsStarted, "Concurrent service is started");
+        Assert(svcConcurrent.HasWatcher, "Concurrent service has watcher");
+        Assert(svcConcurrent.HasTimer, "Concurrent service has timer");
+
+        // Repeated Dispose()
+        svcConcurrent.Dispose();
+        Assert(svcConcurrent.IsDisposed, "Disposed after Dispose()");
+        Assert(!svcConcurrent.IsStarted, "Not started after Dispose()");
+        Assert(!svcConcurrent.HasWatcher, "Watcher detached after Dispose()");
+        Assert(!svcConcurrent.HasTimer, "Timer detached after Dispose()");
+        AssertEq(1, fakeWatcherConcurrent.DisposeCount, "Watcher disposed once");
+        AssertEq(1, concurrentTimer!.DisposeCount, "Timer disposed once");
+
+        svcConcurrent.Dispose();
+        Assert(svcConcurrent.IsDisposed, "Remains disposed on second Dispose()");
+        AssertEq(1, fakeWatcherConcurrent.DisposeCount, "Watcher not double-disposed on second Dispose()");
+        AssertEq(1, concurrentTimer.DisposeCount, "Timer not double-disposed on second Dispose()");
+
+        // Start() after Dispose()
+        svcConcurrent.Start();
+        Assert(!svcConcurrent.IsStarted, "Start() after Dispose() is rejected");
+        AssertEq(1, watcherFactoryCalls, "No new watchers created on Start() after Dispose()");
+        AssertEq(1, timerFactoryCalls, "No new timers created on Start() after Dispose()");
+
+        svc.Dispose();
+    }
+
+    private static void TestBatteryService_SubscriptionOwnership()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+
+        var initialInfo = new BatteryInfo(80, false, false, "3h left", true);
+        var fakeWatcher = new FakeBatteryWatcher();
+        var svc = new BatteryService(bus, settings,
+            queryBattery: () => initialInfo,
+            watcherFactory: () => fakeWatcher,
+            timerFactory: (cb, interval) => new FakeBatteryTimer(cb, interval));
+
+        AssertEq(0, fakeWatcher.TotalSubscribers, "Zero subscribers before Start()");
+
+        svc.Start();
+        AssertEq(2, fakeWatcher.TotalSubscribers, "Exactly two subscribers after Start() (PowerStatusChanged and SessionUnlocked)");
+
+        int callbackCount = 0;
+        svc.BatteryChanged += _ => Interlocked.Increment(ref callbackCount);
+
+        // Triggering watcher with identical state does not fire redundant callback
+        fakeWatcher.TriggerPower();
+        AssertEq(0, callbackCount, "Same state does not trigger redundant callback");
+
+        svc.Dispose();
+        AssertEq(0, fakeWatcher.TotalSubscribers, "Zero subscribers after Dispose()");
+        Assert(fakeWatcher.StopCount >= 1, "Watcher stopped on dispose");
+        AssertEq(1, fakeWatcher.DisposeCount, "Watcher disposed on dispose");
+    }
+
+    private static void TestBatteryService_CurrentThreadSafeSnapshot()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+
+        var initialInfo = new BatteryInfo(80, false, false, "3h left", true);
+        var fakeWatcher = new FakeBatteryWatcher();
+        var svc = new BatteryService(bus, settings,
+            queryBattery: () => initialInfo,
+            watcherFactory: () => fakeWatcher,
+            timerFactory: (cb, interval) => new FakeBatteryTimer(cb, interval));
+        svc.Start();
+
+        var states = new[]
+        {
+            new BatteryInfo(80, false, false, "3h left", true),
+            new BatteryInfo(80, true, false, null, true),
+            new BatteryInfo(20, false, false, "30m left", true),
+            new BatteryInfo(0, false, false, null, false),
+            new BatteryInfo(50, false, true, "2h left", true),
+        };
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        int readerCount = 8;
+        var threads = new List<Thread>();
+        int anomalies = 0;
+
+        for (int i = 0; i < readerCount; i++)
+        {
+            var t = new Thread(() =>
+            {
+                while (!cts.IsCancellationRequested)
+                {
+                    var cur = svc.Current;
+                    if (cur == null || cur.Percent < 0 || cur.Percent > 100)
+                    {
+                        Interlocked.Increment(ref anomalies);
+                        break;
+                    }
+                }
+            });
+            threads.Add(t);
+            t.Start();
+        }
+
+        // Writer loop runs on main dispatcher thread
+        for (int i = 0; i < 200; i++)
+        {
+            var st = states[i % states.Length];
+            svc.OnPowerStatusChangedCore(st);
+        }
+
+        cts.Cancel();
+        foreach (var t in threads) t.Join();
+
+        AssertEq(0, anomalies, "Zero torn reads or anomalies observed across concurrent readers");
+        Assert(svc.Current != null, "Current is valid");
+        svc.Dispose();
+    }
+
+    private static void TestBatteryService_InFlightCallbackVsDisposeRace()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+
+        using var callbackStartedGate = new ManualResetEventSlim(false);
+        using var callbackHoldGate = new ManualResetEventSlim(false);
+
+        var initialInfo = new BatteryInfo(80, false, false, "3h left", true);
+        var updatedInfo = new BatteryInfo(20, false, false, "30m left", true);
+
+        int queryCalls = 0;
+        Func<BatteryInfo> queryBattery = () =>
+        {
+            int call = Interlocked.Increment(ref queryCalls);
+            if (call > 1)
+            {
+                callbackStartedGate.Set();
+                callbackHoldGate.Wait(TimeSpan.FromSeconds(5));
+                return updatedInfo;
+            }
+            return initialInfo;
+        };
+
+        var fakeWatcher = new FakeBatteryWatcher();
+        var svc = new BatteryService(bus, settings,
+            queryBattery: queryBattery,
+            watcherFactory: () => fakeWatcher,
+            timerFactory: (cb, interval) => new FakeBatteryTimer(cb, interval));
+
+        int callbackCount = 0;
+        svc.BatteryChanged += _ => Interlocked.Increment(ref callbackCount);
+
+        svc.Start();
+        AssertEq(1, callbackCount, "Initial callback fired on Start");
+        AssertEq(initialInfo, svc.Current, "Current is initialInfo");
+
+        var busEvents = new List<BarEvent>();
+        bus.EventRaised += e =>
+        {
+            if (e.Kind == BarEventKind.Battery) busEvents.Add(e);
+        };
+
+        // Trigger callback on background thread so it pauses at callbackStartedGate
+        var triggerTask = Task.Run(() => fakeWatcher.TriggerPower());
+        Assert(callbackStartedGate.Wait(TimeSpan.FromSeconds(2)), "Callback reached gate");
+
+        // Concurrently Dispose() on main thread
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        svc.Dispose();
+        sw.Stop();
+
+        Assert(sw.ElapsedMilliseconds < 500, "Dispose() returned without deadlock");
+        Assert(svc.IsDisposed, "Service is disposed");
+
+        // Release callback
+        callbackHoldGate.Set();
+        Assert(triggerTask.Wait(TimeSpan.FromSeconds(2)), "Trigger task completed");
+
+        // Assert post-disposal state mutation was suppressed
+        AssertEq(initialInfo, svc.Current, "Current was not mutated by in-flight callback after disposal");
+        AssertEq(1, Volatile.Read(ref callbackCount), "No callbacks invoked after disposal");
+        AssertEq(0, busEvents.Count, "No BarEvents raised after disposal");
+    }
+
+    private static void TestBatteryService_PostDisposalSuppression()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+
+        var initialInfo = new BatteryInfo(80, false, false, "3h left", true);
+        var fakeWatcher = new FakeBatteryWatcher();
+        FakeBatteryTimer? timer = null;
+        var svc = new BatteryService(bus, settings,
+            queryBattery: () => initialInfo,
+            watcherFactory: () => fakeWatcher,
+            timerFactory: (cb, interval) => (timer = new FakeBatteryTimer(cb, interval)));
+
+        int callbackCount = 0;
+        svc.BatteryChanged += _ => Interlocked.Increment(ref callbackCount);
+
+        var busEvents = new List<BarEvent>();
+        bus.EventRaised += e =>
+        {
+            if (e.Kind == BarEventKind.Battery) busEvents.Add(e);
+        };
+
+        svc.Start();
+        AssertEq(1, callbackCount, "Initial callback on Start");
+
+        svc.Dispose();
+
+        // Late callbacks after disposal
+        svc.OnPollTickCore(new BatteryInfo(20, false, false, "30m left", true));
+        svc.OnPowerStatusChangedCore(new BatteryInfo(20, false, false, "30m left", true));
+        svc.OnSessionUnlockedCore(new BatteryInfo(20, false, false, "30m left", true));
+        fakeWatcher.TriggerPower();
+        fakeWatcher.TriggerSessionUnlock();
+        timer?.Tick();
+
+        AssertEq(initialInfo, svc.Current, "Current not mutated after disposal");
+        AssertEq(1, Volatile.Read(ref callbackCount), "Zero callbacks invoked after disposal");
+        AssertEq(0, busEvents.Count, "Zero BarEvents published after disposal");
+    }
+
+    private static void TestBatteryService_AlertTransitionsAndFeatureToggle()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+        settings.Update(s => s.FeatureBattery = true);
+
+        var initialInfo = new BatteryInfo(80, false, false, "3h left", true);
+        var fakeWatcher = new FakeBatteryWatcher();
+        var svc = new BatteryService(bus, settings,
+            queryBattery: () => initialInfo,
+            watcherFactory: () => fakeWatcher,
+            timerFactory: (cb, interval) => new FakeBatteryTimer(cb, interval));
+
+        int callbackCount = 0;
+        svc.BatteryChanged += _ => Interlocked.Increment(ref callbackCount);
+
+        var busEvents = new List<BarEvent>();
+        bus.EventRaised += e =>
+        {
+            if (e.Kind == BarEventKind.Battery) busEvents.Add(e);
+        };
+
+        svc.Start();
+        AssertEq(1, callbackCount, "Initial callback on start");
+        AssertEq(0, busEvents.Count, "No initial BarEvent on start");
+
+        // 1. Routine poll drift (80% -> 79%): updates Current & fires callback, but NO BarEvent
+        svc.OnPollTickCore(new BatteryInfo(79, false, false, "2h 58m left", true));
+        AssertEq(2, callbackCount, "Callback fires on >=1% poll drift");
+        AssertEq(0, busEvents.Count, "Zero BarEvents for routine drift");
+        AssertEq(79.0, svc.Current.Percent, "Current updated to 79%");
+
+        // 2. Sub-1% poll drift (79% -> 78.6%): completely suppressed
+        svc.OnPollTickCore(new BatteryInfo(78.6, false, false, "2h 55m left", true));
+        AssertEq(2, callbackCount, "Callback suppressed on <1% poll drift");
+        AssertEq(0, busEvents.Count, "Zero BarEvents for sub-1% drift");
+        AssertEq(79.0, svc.Current.Percent, "Current remains 79%");
+
+        // 3. Charger connected (79% discharging -> 79% charging): raises alert
+        svc.OnPowerStatusChangedCore(new BatteryInfo(79, true, false, null, true));
+        AssertEq(3, callbackCount, "Callback fired on charger connect");
+        AssertEq(1, busEvents.Count, "One BarEvent raised for charger connect");
+        AssertEq("Charging", busEvents[0].Title, "Title is Charging");
+        AssertEq(40, busEvents[0].Priority, "Charging alert priority is 40");
+        AssertEq(TimeSpan.FromSeconds(3), busEvents[0].DisplayDuration, "Charging duration is 3s");
+        Assert(svc.Current.Charging, "Current is charging");
+
+        // 4. Charger disconnected (79% charging -> 79% discharging): raises alert
+        busEvents.Clear();
+        svc.OnPowerStatusChangedCore(new BatteryInfo(79, false, false, "2h 50m left", true));
+        AssertEq(4, callbackCount, "Callback fired on charger disconnect");
+        AssertEq(1, busEvents.Count, "One BarEvent raised for charger disconnect");
+        AssertEq("Battery", busEvents[0].Title, "Title is Battery on unplug");
+        AssertEq(40, busEvents[0].Priority, "Unplug priority is 40");
+        AssertEq(TimeSpan.FromSeconds(3), busEvents[0].DisplayDuration, "Unplug duration is 3s");
+
+        // 5. Battery saver toggled on: raises alert
+        busEvents.Clear();
+        svc.OnPowerStatusChangedCore(new BatteryInfo(79, false, true, "3h 10m left", true));
+        AssertEq(5, callbackCount, "Callback fired on battery saver on");
+        AssertEq(1, busEvents.Count, "One BarEvent raised for battery saver");
+        AssertEq("Battery saver", busEvents[0].Title, "Title is Battery saver");
+        AssertEq(40, busEvents[0].Priority, "Battery saver priority is 40");
+        AssertEq(TimeSpan.FromSeconds(3), busEvents[0].DisplayDuration, "Battery saver duration is 3s");
+
+        // 6. Low-battery crossing (21% -> 20% discharging): raises alert with priority 95, duration 6s
+        busEvents.Clear();
+        svc.OnPowerStatusChangedCore(new BatteryInfo(21, false, false, "35m left", true));
+        busEvents.Clear(); // clear the transition to 21%
+        svc.OnPowerStatusChangedCore(new BatteryInfo(20, false, false, "30m left", true));
+        AssertEq(1, busEvents.Count, "One BarEvent raised for low battery crossing");
+        AssertEq("Battery", busEvents[0].Title, "Title is Battery on low alert");
+        AssertEq(95, busEvents[0].Priority, "Low battery priority is 95");
+        AssertEq(TimeSpan.FromSeconds(6), busEvents[0].DisplayDuration, "Low battery duration is 6s");
+
+        // 7. Duplicate low-battery alert (20% -> 19% discharging): suppressed!
+        busEvents.Clear();
+        svc.OnPowerStatusChangedCore(new BatteryInfo(19, false, false, "28m left", true));
+        AssertEq(0, busEvents.Count, "Zero BarEvents for duplicate low battery alert");
+        AssertEq(19.0, svc.Current.Percent, "Current updated to 19%");
+
+        // 8. Session unlocked: updates Current & fires callback, but no BarEvent
+        busEvents.Clear();
+        svc.OnSessionUnlockedCore(new BatteryInfo(18, false, false, "25m left", true));
+        AssertEq(0, busEvents.Count, "Zero BarEvents on session unlock");
+        AssertEq(18.0, svc.Current.Percent, "Current updated on session unlock");
+
+        // 9. FeatureBattery toggle suppression
+        bus.Dismiss();
+        busEvents.Clear();
+        int cbBefore = callbackCount;
+        settings.Update(s => s.FeatureBattery = false);
+        svc.OnPowerStatusChangedCore(new BatteryInfo(18, true, false, null, true));
+        AssertEq(cbBefore + 1, callbackCount, "Callback fired even when FeatureBattery is false");
+        AssertEq(0, busEvents.Count, "Zero BarEvents when FeatureBattery is false");
+
+        settings.Update(s => s.FeatureBattery = true);
+        svc.Dispose();
+    }
+
+    private static void TestBatteryService_StartVsDisposeRace()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+
+        using var reachedStartGate = new ManualResetEventSlim(false);
+        using var releaseStartGate = new ManualResetEventSlim(false);
+
+        var fakeWatcher = new FakeBatteryWatcher();
+        fakeWatcher.OnStart = () =>
+        {
+            reachedStartGate.Set();
+            releaseStartGate.Wait(TimeSpan.FromSeconds(5));
+        };
+
+        var initialInfo = new BatteryInfo(80, false, false, "3h left", true);
+        var svc = new BatteryService(bus, settings,
+            queryBattery: () => initialInfo,
+            watcherFactory: () => fakeWatcher,
+            timerFactory: (cb, interval) => new FakeBatteryTimer(cb, interval));
+
+        int callbackCount = 0;
+        svc.BatteryChanged += _ => Interlocked.Increment(ref callbackCount);
+
+        // 1. Run Start() on a background task until it enters watcher.Start()
+        var startTask = Task.Run(() => svc.Start());
+        Assert(reachedStartGate.Wait(TimeSpan.FromSeconds(2)), "Start reached watcher startup gate");
+
+        // 2. Concurrently call Dispose() on the main thread while Start() is paused in watcher.Start()
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        svc.Dispose();
+        sw.Stop();
+
+        Assert(sw.ElapsedMilliseconds < 500, "Dispose() returned immediately without deadlock");
+        Assert(svc.IsDisposed, "Service is disposed");
+        Assert(!svc.IsStarted, "Service is not started");
+
+        // 3. Resume startup by releasing the gate
+        releaseStartGate.Set();
+        Assert(startTask.Wait(TimeSpan.FromSeconds(2)), "Start task completed cleanly");
+
+        // 4. Assert watcher was stopped and disposed, no active watcher or timer remains
+        Assert(!svc.HasWatcher, "No active watcher retained in service");
+        Assert(!svc.HasTimer, "No active timer retained in service");
+        AssertEq(1, fakeWatcher.StartCount, "Watcher Start() was called once");
+        Assert(fakeWatcher.StopCount >= 1, "Watcher was stopped when Start() detected disposal");
+        AssertEq(1, fakeWatcher.DisposeCount, "Watcher was disposed when Start() detected disposal");
+        Assert(!fakeWatcher.IsStarted, "Watcher is not started");
+
+        // 5. Assert post-disposal callbacks and state mutations are suppressed
+        svc.OnPowerStatusChangedCore(new BatteryInfo(50, true, false, null, true));
+        AssertEq(initialInfo, svc.Current, "Current not mutated after disposal");
+        AssertEq(1, Volatile.Read(ref callbackCount), "Only initial start callback was invoked, zero post-disposal");
+    }
+
+    private static void TestBatteryService_StartVsDisposeDuringTimerCreation()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+
+        using var reachedTimerGate = new ManualResetEventSlim(false);
+        using var releaseTimerGate = new ManualResetEventSlim(false);
+
+        var fakeWatcher = new FakeBatteryWatcher();
+        FakeBatteryTimer? createdTimer = null;
+
+        var initialInfo = new BatteryInfo(80, false, false, "3h left", true);
+        var svc = new BatteryService(bus, settings,
+            queryBattery: () => initialInfo,
+            watcherFactory: () => fakeWatcher,
+            timerFactory: (cb, interval) =>
+            {
+                reachedTimerGate.Set();
+                releaseTimerGate.Wait(TimeSpan.FromSeconds(5));
+                return (createdTimer = new FakeBatteryTimer(cb, interval));
+            });
+
+        // 1. Run Start() on background task until it reaches timerFactory
+        var startTask = Task.Run(() => svc.Start());
+        Assert(reachedTimerGate.Wait(TimeSpan.FromSeconds(2)), "Start reached timer factory gate");
+
+        // 2. Concurrently call Dispose()
+        svc.Dispose();
+        Assert(svc.IsDisposed, "Service is disposed");
+
+        // 3. Release timer creation
+        releaseTimerGate.Set();
+        Assert(startTask.Wait(TimeSpan.FromSeconds(2)), "Start task completed cleanly");
+
+        // 4. Verify neither watcher nor timer remained published in service, and both cleaned up
+        Assert(!svc.HasWatcher, "No watcher retained");
+        Assert(!svc.HasTimer, "No timer retained");
+        Assert(!svc.IsStarted, "Service is not started");
+        AssertEq(1, fakeWatcher.DisposeCount, "Watcher disposed");
+        Assert(createdTimer is not null, "Timer was created");
+        AssertEq(1, createdTimer!.DisposeCount, "Timer disposed immediately by deferred cleanup");
+    }
+
+    private static void TestBatteryService_StartupFailureAndRetry()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+
+        var initialInfo = new BatteryInfo(80, false, false, "3h left", true);
+        bool shouldThrow = true;
+        var fakeWatcher1 = new FakeBatteryWatcher();
+        fakeWatcher1.OnStart = () =>
+        {
+            if (shouldThrow) throw new InvalidOperationException("Simulated hardware failure");
+        };
+
+        var fakeWatcher2 = new FakeBatteryWatcher();
+        int watcherCount = 0;
+
+        var svc = new BatteryService(bus, settings,
+            queryBattery: () => initialInfo,
+            watcherFactory: () =>
+            {
+                int count = Interlocked.Increment(ref watcherCount);
+                return count == 1 ? fakeWatcher1 : fakeWatcher2;
+            },
+            timerFactory: (cb, interval) => new FakeBatteryTimer(cb, interval));
+
+        // 1. Initial Start() fails
+        svc.Start();
+        Assert(!svc.IsStarted, "Service not started after failure");
+        Assert(!svc.HasWatcher, "No watcher published on failure");
+        Assert(!svc.HasTimer, "No timer published on failure");
+        Assert(!svc.IsDisposed, "Service not disposed on recoverable failure");
+        AssertEq(1, fakeWatcher1.DisposeCount, "Failed watcher was cleaned up and disposed");
+
+        // 2. Retry Start() succeeds
+        shouldThrow = false;
+        svc.Start();
+        Assert(svc.IsStarted, "Service started successfully on retry");
+        Assert(svc.HasWatcher, "Watcher published on successful retry");
+        Assert(svc.HasTimer, "Timer published on successful retry");
+        AssertEq(1, fakeWatcher2.StartCount, "Second watcher started once");
+        AssertEq(2, fakeWatcher2.TotalSubscribers, "Second watcher has 2 event subscribers");
+
+        svc.Dispose();
+        Assert(svc.IsDisposed, "Service disposed cleanly");
+        AssertEq(1, fakeWatcher2.DisposeCount, "Second watcher disposed on service dispose");
+    }
+
+    private static void TestSystemEventsBatteryWatcher_PartialSubscriptionRollbackAndRetry()
+    {
+        var powerSubscriptions = new List<Microsoft.Win32.PowerModeChangedEventHandler>();
+        var powerUnsubscriptions = new List<Microsoft.Win32.PowerModeChangedEventHandler>();
+        var sessionSubscriptions = new List<Microsoft.Win32.SessionSwitchEventHandler>();
+        var sessionUnsubscriptions = new List<Microsoft.Win32.SessionSwitchEventHandler>();
+
+        bool throwOnSessionSubscribe = true;
+
+        var watcher = new SystemEventsBatteryWatcher(
+            addPower: h => powerSubscriptions.Add(h),
+            removePower: h => powerUnsubscriptions.Add(h),
+            addSession: h =>
+            {
+                if (throwOnSessionSubscribe)
+                {
+                    throw new InvalidOperationException("Simulated SessionSwitch registration failure");
+                }
+                sessionSubscriptions.Add(h);
+            },
+            removeSession: h => sessionUnsubscriptions.Add(h));
+
+        Assert(!watcher.IsHooked, "Watcher is initially not hooked");
+
+        // 1. Initial Start() fails on the second subscription (SessionSwitch).
+        // Rollback must immediately remove the first subscription (PowerModeChanged).
+        watcher.Start();
+
+        Assert(!watcher.IsHooked, "Watcher is not hooked after partial registration failure");
+        AssertEq(1, powerSubscriptions.Count, "PowerModeChanged was subscribed once");
+        AssertEq(1, powerUnsubscriptions.Count, "PowerModeChanged was rolled back immediately");
+        Assert(ReferenceEquals(powerSubscriptions[0], powerUnsubscriptions[0]), "The exact registered PowerModeChanged handler was unhooked");
+        AssertEq(0, sessionSubscriptions.Count, "SessionSwitch was never successfully registered");
+        AssertEq(0, sessionUnsubscriptions.Count, "SessionSwitch unsubscription was not invoked");
+
+        // Calling Stop() or Dispose() while in failed state is a safe no-op
+        watcher.Stop();
+        AssertEq(1, powerUnsubscriptions.Count, "Stop() after failure does not duplicate unsubscriptions");
+
+        // 2. Retry Start() after resolving the issue.
+        throwOnSessionSubscribe = false;
+        watcher.Start();
+
+        Assert(watcher.IsHooked, "Watcher is hooked after successful retry");
+        AssertEq(2, powerSubscriptions.Count, "PowerModeChanged was subscribed again on retry");
+        AssertEq(1, powerUnsubscriptions.Count, "PowerModeChanged unsubscriptions unchanged on successful start");
+        AssertEq(1, sessionSubscriptions.Count, "SessionSwitch was subscribed on retry");
+        AssertEq(0, sessionUnsubscriptions.Count, "SessionSwitch unsubscriptions unchanged");
+
+        // Repeated Start() while hooked is idempotent
+        watcher.Start();
+        AssertEq(2, powerSubscriptions.Count, "Repeated Start() does not duplicate PowerModeChanged subscriptions");
+        AssertEq(1, sessionSubscriptions.Count, "Repeated Start() does not duplicate SessionSwitch subscriptions");
+
+        // 3. Stop() detaches both active handlers cleanly
+        watcher.Stop();
+
+        Assert(!watcher.IsHooked, "Watcher is not hooked after Stop()");
+        AssertEq(2, powerUnsubscriptions.Count, "PowerModeChanged was unsubscribed on Stop()");
+        Assert(ReferenceEquals(powerSubscriptions[1], powerUnsubscriptions[1]), "The active PowerModeChanged handler was unhooked");
+        AssertEq(1, sessionUnsubscriptions.Count, "SessionSwitch was unsubscribed on Stop()");
+        Assert(ReferenceEquals(sessionSubscriptions[0], sessionUnsubscriptions[0]), "The active SessionSwitch handler was unhooked");
+
+        // 4. Repeated Stop() and Dispose() are idempotent
+        watcher.Stop();
+        watcher.Dispose();
+        AssertEq(2, powerUnsubscriptions.Count, "Subsequent Stop()/Dispose() do not call removePower again");
+        AssertEq(1, sessionUnsubscriptions.Count, "Subsequent Stop()/Dispose() do not call removeSession again");
+
+        // 5. Verify exception resilience during unsubscription
+        bool powerRemovalThrew = false;
+        var throwingWatcher = new SystemEventsBatteryWatcher(
+            addPower: h => { },
+            removePower: h => { powerRemovalThrew = true; throw new InvalidOperationException("Simulated unhook error"); },
+            addSession: h => { },
+            removeSession: h => { });
+
+        throwingWatcher.Start();
+        Assert(throwingWatcher.IsHooked, "Throwing watcher is hooked");
+        throwingWatcher.Stop();
+        Assert(powerRemovalThrew, "removePower threw as expected");
+        Assert(!throwingWatcher.IsHooked, "Throwing watcher is unhooked even when removePower threw");
     }
 }
