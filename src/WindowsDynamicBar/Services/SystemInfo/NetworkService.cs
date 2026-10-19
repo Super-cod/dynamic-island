@@ -9,70 +9,285 @@ namespace WindowsDynamicBar.Services.SystemInfo;
 /// <summary>SignalBars: 0–4 from real RSSI, or -1 = signal unknown (no bars shown).</summary>
 public sealed record NetworkInfo(string Kind, string? Name, int SignalBars, bool Connected, bool Internet);
 
+internal interface INetworkWatcher : IDisposable
+{
+    event Action? StatusChanged;
+    void Start();
+    void Stop();
+}
+
+internal sealed class WinRtNetworkWatcher : INetworkWatcher
+{
+    private Windows.Networking.Connectivity.NetworkStatusChangedEventHandler? _handler;
+    private readonly object _gate = new();
+    private bool _hooked;
+    public event Action? StatusChanged;
+
+    public void Start()
+    {
+        lock (_gate)
+        {
+            if (_hooked) return;
+            Windows.Networking.Connectivity.NetworkStatusChangedEventHandler handler = _ => StatusChanged?.Invoke();
+            try
+            {
+                Windows.Networking.Connectivity.NetworkInformation.NetworkStatusChanged += handler;
+                _handler = handler;
+                _hooked = true;
+            }
+            catch (Exception ex)
+            {
+                Log.Warning("WinRT NetworkStatusChanged failed", ("error", ex.Message));
+            }
+        }
+    }
+
+    public void Stop()
+    {
+        lock (_gate)
+        {
+            if (!_hooked || _handler is null) return;
+            try
+            {
+                Windows.Networking.Connectivity.NetworkInformation.NetworkStatusChanged -= _handler;
+            }
+            catch (Exception ex)
+            {
+                Log.Debug("Error unhooking NetworkStatusChanged", ("error", ex.Message));
+            }
+            finally
+            {
+                _handler = null;
+                _hooked = false;
+            }
+        }
+    }
+
+    public void Dispose()
+    {
+        Stop();
+    }
+}
+
 public sealed class NetworkService : IDisposable
 {
     private readonly EventBus _bus;
     private readonly SettingsService _settings;
+    private readonly Func<NetworkInfo> _queryNetwork;
+    private readonly Func<INetworkWatcher> _watcherFactory;
+    private readonly object _sync = new();
+
+    private INetworkWatcher? _watcher;
     private NetworkInfo _last = new("None", null, 0, false, false);
-    private bool _eventHooked;
+    private bool _started;
+    private bool _disposed;
 
     public event Action<NetworkInfo>? NetworkChanged;
 
+    public NetworkInfo Current
+    {
+        get { lock (_sync) return _last; }
+    }
+
+    public bool IsStarted
+    {
+        get { lock (_sync) return _started; }
+    }
+
+    public bool IsDisposed
+    {
+        get { lock (_sync) return _disposed; }
+    }
+
+    internal bool HasWatcher
+    {
+        get { lock (_sync) return _watcher is not null; }
+    }
+
     public NetworkService(EventBus bus, SettingsService settings)
+        : this(bus, settings, queryNetwork: null, watcherFactory: null)
+    {
+    }
+
+    internal NetworkService(
+        EventBus bus,
+        SettingsService settings,
+        Func<NetworkInfo>? queryNetwork,
+        Func<INetworkWatcher>? watcherFactory)
     {
         _bus = bus;
         _settings = settings;
+        _queryNetwork = queryNetwork ?? Query;
+        _watcherFactory = watcherFactory ?? (() => new WinRtNetworkWatcher());
     }
 
     public void Start()
     {
+        lock (_sync)
+        {
+            if (_disposed || _started) return;
+            _started = true;
+        }
+
+        INetworkWatcher? watcher = null;
         try
         {
-            // WinRT event-driven network status change — no polling.
-            Windows.Networking.Connectivity.NetworkInformation.NetworkStatusChanged += OnNetworkStatusChanged;
-            _eventHooked = true;
-        }
-        catch (Exception ex) { Log.Warning("WinRT NetworkStatusChanged failed", ("error", ex.Message)); }
+            var cur = _queryNetwork();
 
-        var cur = Query();
-        _last = cur;
-        NetworkChanged?.Invoke(cur);
-    }
-
-    private void OnNetworkStatusChanged(object sender)
-    {
-        var cur = Query();
-        bool meaningful = cur.Kind != _last.Kind || cur.Name != _last.Name ||
-            cur.Connected != _last.Connected || cur.Internet != _last.Internet;
-
-        if (!meaningful)
-        {
-            // Signal-strength jitter only: refresh state quietly, never pop the bar.
-            if (cur.SignalBars != _last.SignalBars)
+            Action<NetworkInfo>? initialNotify = null;
+            lock (_sync)
             {
+                if (_disposed) return;
                 _last = cur;
-                NetworkChanged?.Invoke(cur);
+                initialNotify = NetworkChanged;
             }
-            return;
-        }
 
-        _last = cur;
-        NetworkChanged?.Invoke(cur);
-        RaiseEvent(cur, changed: true);
+            // Gated dispatch outside locks
+            lock (_sync)
+            {
+                if (_disposed) return;
+            }
+            initialNotify?.Invoke(cur);
+
+            watcher = _watcherFactory();
+            watcher.StatusChanged += OnNetworkStatusChanged;
+
+            lock (_sync)
+            {
+                if (_disposed)
+                {
+                    CleanupWatcher(watcher);
+                    return;
+                }
+            }
+
+            watcher.Start();
+
+            // Deferred publication pattern: assign _watcher only after watcher.Start()
+            // succeeds and verify that disposal did not race with startup.
+            lock (_sync)
+            {
+                if (_disposed)
+                {
+                    CleanupWatcher(watcher);
+                    return;
+                }
+                _watcher = watcher;
+            }
+
+            Log.Info("Network service started", ("kind", cur.Kind), ("connected", cur.Connected));
+        }
+        catch (Exception ex)
+        {
+            lock (_sync)
+            {
+                _started = false;
+                _watcher = null;
+            }
+            CleanupWatcher(watcher);
+            Log.Warning("Network service failed to start", ("error", ex.Message));
+        }
     }
 
-    private void RaiseEvent(NetworkInfo info, bool changed)
-    {
-        if (!_settings.Current.FeatureNetwork || !changed) return;
-        string title;
-        string text = info.Name ?? (info.Connected ? "Connected" : "Disconnected");
-        int priority = 30;
-        if (!info.Connected) { title = "Network"; text = "Disconnected"; priority = 85; }
-        else title = info.Kind;
+    private void OnNetworkStatusChanged() => OnNetworkStatusChangedCore(null);
 
-        _bus.Raise(BarEvent.Create(BarEventKind.Network, title, text,
+    internal void OnNetworkStatusChangedCore(NetworkInfo? manualSnapshot = null)
+    {
+        try
+        {
+            lock (_sync)
+            {
+                if (_disposed) return;
+            }
+
+            var cur = manualSnapshot ?? _queryNetwork();
+
+            Action<NetworkInfo>? notify = null;
+            BarEvent? eventToRaise = null;
+            NetworkInfo? stateToNotify = null;
+
+            lock (_sync)
+            {
+                if (_disposed) return;
+
+                bool meaningful = cur.Kind != _last.Kind || cur.Name != _last.Name ||
+                    cur.Connected != _last.Connected || cur.Internet != _last.Internet;
+
+                if (!meaningful)
+                {
+                    // Signal-strength jitter only: refresh state quietly, never pop the bar.
+                    if (cur.SignalBars != _last.SignalBars)
+                    {
+                        _last = cur;
+                        stateToNotify = cur;
+                        notify = NetworkChanged;
+                    }
+                    else
+                    {
+                        return;
+                    }
+                }
+                else
+                {
+                    _last = cur;
+                    stateToNotify = cur;
+                    notify = NetworkChanged;
+
+                    if (_settings.Current.FeatureNetwork)
+                    {
+                        eventToRaise = CreateBarEvent(cur);
+                    }
+                }
+            }
+
+            // Gated dispatch outside locks.
+            // Publication guarantee: A check immediately before an external invocation
+            // does not eliminate the race between that check and the invocation (if Dispose()
+            // is called concurrently on another thread after the check passes). However,
+            // this check guarantees that any callback reaching this point after Dispose() has
+            // acquired the lock and set _disposed = true is suppressed from notifying or raising events.
+            lock (_sync)
+            {
+                if (_disposed) return;
+            }
+            notify?.Invoke(stateToNotify!);
+
+            if (eventToRaise is not null)
+            {
+                lock (_sync)
+                {
+                    if (_disposed) return;
+                }
+                _bus.Raise(eventToRaise);
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Debug("Network status change error", ("error", ex.Message));
+        }
+    }
+
+    internal static BarEvent CreateBarEvent(NetworkInfo info)
+    {
+        string title;
+        string text = string.IsNullOrEmpty(info.Name)
+            ? (info.Connected ? "Connected" : "Disconnected")
+            : info.Name;
+        int priority = 30;
+        if (!info.Connected)
+        {
+            title = "Network";
+            text = "Disconnected";
+            priority = 85;
+        }
+        else
+        {
+            title = info.Kind;
+        }
+
+        return BarEvent.Create(BarEventKind.Network, title, text,
             value: info.SignalBars / 4.0, valueText: info.Kind, payload: info,
-            priority: priority, displayDuration: TimeSpan.FromSeconds(3)));
+            priority: priority, displayDuration: TimeSpan.FromSeconds(3));
     }
 
     public static NetworkInfo Query()
@@ -153,9 +368,33 @@ public sealed class NetworkService : IDisposable
 
     public void Dispose()
     {
-        if (_eventHooked)
+        INetworkWatcher? watcherToDispose;
+
+        lock (_sync)
         {
-            try { Windows.Networking.Connectivity.NetworkInformation.NetworkStatusChanged -= OnNetworkStatusChanged; } catch { }
+            if (_disposed) return;
+            _disposed = true;
+            _started = false;
+
+            watcherToDispose = _watcher;
+            _watcher = null;
+        }
+
+        CleanupWatcher(watcherToDispose);
+    }
+
+    private void CleanupWatcher(INetworkWatcher? watcher)
+    {
+        if (watcher is null) return;
+        try
+        {
+            watcher.StatusChanged -= OnNetworkStatusChanged;
+            watcher.Stop();
+            watcher.Dispose();
+        }
+        catch (Exception ex)
+        {
+            Log.Debug("Error disposing network watcher", ("error", ex.Message));
         }
     }
 }

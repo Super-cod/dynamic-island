@@ -99,6 +99,13 @@ internal static partial class Program
         Run("BrightnessService: deduplication window, delta thresholds, and property extraction", TestBrightnessService_DeduplicationAndThresholds);
         Run("BrightnessService: SetLevel clamping, BarEvent metadata, and FeatureBrightness toggle", TestBrightnessService_SetLevelAndBarEvents);
         Run("BrightnessService: concurrent Start vs Dispose race stops watcher and prevents leak", TestBrightnessService_StartVsDisposeRace);
+        Run("NetworkService: Start and Dispose are idempotent, thread-safe, and reject calls after disposal", TestNetworkService_StartAndDisposeIdempotency);
+        Run("NetworkService: subscription ownership enforces exactly one subscription and detachment", TestNetworkService_SubscriptionOwnership);
+        Run("NetworkService: Current returns consistent thread-safe snapshots under concurrent updates", TestNetworkService_CurrentThreadSafeSnapshot);
+        Run("NetworkService: in-flight callback racing with Dispose suppresses state mutation and event dispatch", TestNetworkService_InFlightCallbackVsDisposeRace);
+        Run("NetworkService: post-disposal callbacks and BarEvents are suppressed", TestNetworkService_PostDisposalSuppression);
+        Run("NetworkService: signal jitter vs meaningful transitions, BarEvent metadata, and feature toggle", TestNetworkService_SignalJitterVsMeaningfulTransitions);
+        Run("NetworkService: concurrent Start vs Dispose race stops watcher and prevents leak", TestNetworkService_StartVsDisposeRace);
     }
 
     private static string ScratchDir()
@@ -3344,5 +3351,454 @@ internal static partial class Program
         svc.OnBrightnessArrivedCore(90f);
         AssertEq(0.5f, svc.Level, "Level not mutated after disposal");
         AssertEq(0, Volatile.Read(ref callbackCount), "Zero callbacks invoked after disposal");
+    }
+
+    private sealed class FakeNetworkWatcher : INetworkWatcher
+    {
+        private Action? _statusChanged;
+        public int StartCount;
+        public int StopCount;
+        public int DisposeCount;
+        private int _isStarted;
+        private int _subscriberCount;
+        public Action? OnStart;
+
+        public bool IsStarted => Volatile.Read(ref _isStarted) == 1;
+        public int SubscriberCount => Volatile.Read(ref _subscriberCount);
+
+        public event Action? StatusChanged
+        {
+            add
+            {
+                lock (this)
+                {
+                    _statusChanged += value;
+                    Interlocked.Increment(ref _subscriberCount);
+                }
+            }
+            remove
+            {
+                lock (this)
+                {
+                    _statusChanged -= value;
+                    Interlocked.Decrement(ref _subscriberCount);
+                }
+            }
+        }
+
+        public void Start()
+        {
+            OnStart?.Invoke();
+            Interlocked.Increment(ref StartCount);
+            Volatile.Write(ref _isStarted, 1);
+        }
+
+        public void Stop()
+        {
+            Interlocked.Increment(ref StopCount);
+            Volatile.Write(ref _isStarted, 0);
+        }
+
+        public void Dispose()
+        {
+            Interlocked.Increment(ref DisposeCount);
+            Stop();
+        }
+
+        public void Trigger()
+        {
+            Action? handler;
+            lock (this) { handler = _statusChanged; }
+            handler?.Invoke();
+        }
+    }
+
+    private static void TestNetworkService_StartAndDisposeIdempotency()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+
+        var initialInfo = new NetworkInfo("Wi-Fi", "Home", 4, true, true);
+        var fakeWatcher = new FakeNetworkWatcher();
+        var svc = new NetworkService(bus, settings,
+            queryNetwork: () => initialInfo,
+            watcherFactory: () => fakeWatcher);
+
+        Assert(!svc.IsStarted, "Not started initially");
+        Assert(!svc.IsDisposed, "Not disposed initially");
+        Assert(!svc.HasWatcher, "No watcher initially");
+        AssertEq("None", svc.Current.Kind, "Kind initially None");
+        Assert(!svc.Current.Connected, "Initially not connected");
+
+        svc.Start();
+        Assert(svc.IsStarted, "Started after Start()");
+        Assert(!svc.IsDisposed, "Not disposed after Start()");
+        Assert(svc.HasWatcher, "Has watcher after Start()");
+        AssertEq(initialInfo, svc.Current, "Current initialized from query");
+        AssertEq(1, fakeWatcher.StartCount, "Watcher started once");
+
+        svc.Start();
+        AssertEq(1, fakeWatcher.StartCount, "Sequential Start() is idempotent");
+
+        // Concurrent Start() on 10 threads
+        var fakeWatcherConcurrent = new FakeNetworkWatcher();
+        int watcherFactoryCalls = 0;
+        var svcConcurrent = new NetworkService(bus, settings,
+            queryNetwork: () => initialInfo,
+            watcherFactory: () =>
+            {
+                Interlocked.Increment(ref watcherFactoryCalls);
+                return fakeWatcherConcurrent;
+            });
+
+        int threadCount = 10;
+        using var barrier = new Barrier(threadCount);
+        var tasks = new Task[threadCount];
+        for (int i = 0; i < threadCount; i++)
+        {
+            tasks[i] = Task.Run(() =>
+            {
+                barrier.SignalAndWait();
+                svcConcurrent.Start();
+            });
+        }
+        Task.WaitAll(tasks);
+
+        AssertEq(1, watcherFactoryCalls, "Watcher factory called once under concurrent Start()");
+        AssertEq(1, fakeWatcherConcurrent.StartCount, "Watcher started once under concurrent Start()");
+        Assert(svcConcurrent.IsStarted, "Concurrent service is started");
+        Assert(svcConcurrent.HasWatcher, "Concurrent service has watcher");
+
+        // Repeated Dispose()
+        svcConcurrent.Dispose();
+        Assert(svcConcurrent.IsDisposed, "Disposed after Dispose()");
+        Assert(!svcConcurrent.IsStarted, "Not started after Dispose()");
+        Assert(!svcConcurrent.HasWatcher, "Watcher detached after Dispose()");
+        AssertEq(1, fakeWatcherConcurrent.DisposeCount, "Watcher disposed once");
+
+        svcConcurrent.Dispose();
+        Assert(svcConcurrent.IsDisposed, "Remains disposed on second Dispose()");
+        AssertEq(1, fakeWatcherConcurrent.DisposeCount, "Watcher not double-disposed on second Dispose()");
+
+        // Start() after Dispose()
+        svcConcurrent.Start();
+        Assert(!svcConcurrent.IsStarted, "Start() after Dispose() is rejected");
+        AssertEq(1, watcherFactoryCalls, "No new watchers created on Start() after Dispose()");
+
+        svc.Dispose();
+    }
+
+    private static void TestNetworkService_SubscriptionOwnership()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+
+        var initialInfo = new NetworkInfo("Wi-Fi", "Home", 4, true, true);
+        var fakeWatcher = new FakeNetworkWatcher();
+        var svc = new NetworkService(bus, settings,
+            queryNetwork: () => initialInfo,
+            watcherFactory: () => fakeWatcher);
+
+        AssertEq(0, fakeWatcher.SubscriberCount, "Zero subscribers before Start()");
+
+        svc.Start();
+        AssertEq(1, fakeWatcher.SubscriberCount, "Exactly one subscriber after Start()");
+
+        int callbackCount = 0;
+        svc.NetworkChanged += _ => Interlocked.Increment(ref callbackCount);
+
+        // Triggering watcher invokes callback
+        fakeWatcher.Trigger();
+        AssertEq(0, callbackCount, "Same state does not trigger redundant callback");
+
+        svc.Dispose();
+        AssertEq(0, fakeWatcher.SubscriberCount, "Zero subscribers after Dispose()");
+
+        // Triggering after disposal does nothing
+        fakeWatcher.Trigger();
+        AssertEq(0, callbackCount, "Trigger after Dispose does not invoke callback");
+    }
+
+    private static void TestNetworkService_CurrentThreadSafeSnapshot()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+
+        var initialInfo = new NetworkInfo("Wi-Fi", "Home", 4, true, true);
+        var fakeWatcher = new FakeNetworkWatcher();
+        var svc = new NetworkService(bus, settings,
+            queryNetwork: () => initialInfo,
+            watcherFactory: () => fakeWatcher);
+        svc.Start();
+
+        var states = new[]
+        {
+            new NetworkInfo("Wi-Fi", "Home", 4, true, true),
+            new NetworkInfo("Ethernet", "vEthernet", -1, true, true),
+            new NetworkInfo("Cellular", "LTE", 2, true, true),
+            new NetworkInfo("Network", null, 0, false, false),
+        };
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        int readerCount = 8;
+        var threads = new List<Thread>();
+        int anomalies = 0;
+
+        for (int i = 0; i < readerCount; i++)
+        {
+            var t = new Thread(() =>
+            {
+                while (!cts.IsCancellationRequested)
+                {
+                    var cur = svc.Current;
+                    if (cur == null || string.IsNullOrEmpty(cur.Kind))
+                    {
+                        Interlocked.Increment(ref anomalies);
+                        break;
+                    }
+                }
+            });
+            threads.Add(t);
+            t.Start();
+        }
+
+        // Writer loop runs on main dispatcher thread
+        for (int i = 0; i < 200; i++)
+        {
+            var st = states[i % states.Length];
+            svc.OnNetworkStatusChangedCore(st);
+        }
+
+        cts.Cancel();
+        foreach (var t in threads) t.Join();
+
+        AssertEq(0, anomalies, "Zero torn reads or anomalies observed across concurrent readers");
+        Assert(svc.Current != null && !string.IsNullOrEmpty(svc.Current.Kind), "Current is valid");
+        svc.Dispose();
+    }
+
+    private static void TestNetworkService_InFlightCallbackVsDisposeRace()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+
+        using var callbackStartedGate = new ManualResetEventSlim(false);
+        using var callbackHoldGate = new ManualResetEventSlim(false);
+
+        var initialInfo = new NetworkInfo("Wi-Fi", "Office", 4, true, true);
+        var updatedInfo = new NetworkInfo("Ethernet", "vEthernet", -1, true, true);
+
+        int queryCalls = 0;
+        Func<NetworkInfo> queryNetwork = () =>
+        {
+            int call = Interlocked.Increment(ref queryCalls);
+            if (call > 1)
+            {
+                callbackStartedGate.Set();
+                callbackHoldGate.Wait(TimeSpan.FromSeconds(5));
+                return updatedInfo;
+            }
+            return initialInfo;
+        };
+
+        var fakeWatcher = new FakeNetworkWatcher();
+        var svc = new NetworkService(bus, settings,
+            queryNetwork: queryNetwork,
+            watcherFactory: () => fakeWatcher);
+
+        int callbackCount = 0;
+        svc.NetworkChanged += _ => Interlocked.Increment(ref callbackCount);
+
+        svc.Start();
+        AssertEq(1, callbackCount, "Initial callback fired on Start");
+        AssertEq(initialInfo, svc.Current, "Current is initialInfo");
+
+        var busEvents = new List<BarEvent>();
+        bus.EventRaised += e =>
+        {
+            if (e.Kind == BarEventKind.Network) busEvents.Add(e);
+        };
+
+        // Trigger callback on background thread so it pauses at callbackStartedGate
+        var triggerTask = Task.Run(() => fakeWatcher.Trigger());
+        Assert(callbackStartedGate.Wait(TimeSpan.FromSeconds(2)), "Callback reached gate");
+
+        // Concurrently Dispose() on main thread
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        svc.Dispose();
+        sw.Stop();
+
+        Assert(sw.ElapsedMilliseconds < 500, "Dispose() returned without deadlock");
+        Assert(svc.IsDisposed, "Service is disposed");
+
+        // Release callback
+        callbackHoldGate.Set();
+        Assert(triggerTask.Wait(TimeSpan.FromSeconds(2)), "Trigger task completed");
+
+        // Assert post-disposal state mutation was suppressed
+        AssertEq(initialInfo, svc.Current, "Current was not mutated by in-flight callback after disposal");
+        AssertEq(1, Volatile.Read(ref callbackCount), "No callbacks invoked after disposal");
+        AssertEq(0, busEvents.Count, "No BarEvents raised after disposal");
+    }
+
+    private static void TestNetworkService_PostDisposalSuppression()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+
+        var initialInfo = new NetworkInfo("Wi-Fi", "Home", 4, true, true);
+        var fakeWatcher = new FakeNetworkWatcher();
+        var svc = new NetworkService(bus, settings,
+            queryNetwork: () => initialInfo,
+            watcherFactory: () => fakeWatcher);
+
+        int callbackCount = 0;
+        svc.NetworkChanged += _ => Interlocked.Increment(ref callbackCount);
+
+        var busEvents = new List<BarEvent>();
+        bus.EventRaised += e =>
+        {
+            if (e.Kind == BarEventKind.Network) busEvents.Add(e);
+        };
+
+        svc.Start();
+        AssertEq(1, callbackCount, "Initial callback on Start");
+
+        svc.Dispose();
+
+        // Late callbacks after disposal
+        svc.OnNetworkStatusChangedCore(new NetworkInfo("Network", null, 0, false, false));
+        fakeWatcher.Trigger();
+
+        AssertEq(initialInfo, svc.Current, "Current not mutated after disposal");
+        AssertEq(1, Volatile.Read(ref callbackCount), "Zero callbacks invoked after disposal");
+        AssertEq(0, busEvents.Count, "Zero BarEvents published after disposal");
+    }
+
+    private static void TestNetworkService_SignalJitterVsMeaningfulTransitions()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+        settings.Update(s => s.FeatureNetwork = true);
+
+        var initialInfo = new NetworkInfo("Wi-Fi", "Office", 4, true, true);
+        var fakeWatcher = new FakeNetworkWatcher();
+        var svc = new NetworkService(bus, settings,
+            queryNetwork: () => initialInfo,
+            watcherFactory: () => fakeWatcher);
+
+        int callbackCount = 0;
+        svc.NetworkChanged += _ => Interlocked.Increment(ref callbackCount);
+
+        var busEvents = new List<BarEvent>();
+        bus.EventRaised += e =>
+        {
+            if (e.Kind == BarEventKind.Network) busEvents.Add(e);
+        };
+
+        svc.Start();
+        AssertEq(1, callbackCount, "Initial callback fired on Start");
+        AssertEq(0, busEvents.Count, "Zero BarEvents on initial Start");
+
+        // 1. Signal jitter only (4 bars -> 3 bars)
+        bus.Dismiss();
+        busEvents.Clear();
+        svc.OnNetworkStatusChangedCore(new NetworkInfo("Wi-Fi", "Office", 3, true, true));
+        AssertEq(2, callbackCount, "Callback fired on signal jitter");
+        AssertEq(3, svc.Current.SignalBars, "SignalBars updated to 3");
+        AssertEq(0, busEvents.Count, "Signal jitter does not raise BarEvent (no pop)");
+
+        // 2. Meaningful transition: Disconnect
+        bus.Dismiss();
+        busEvents.Clear();
+        svc.OnNetworkStatusChangedCore(new NetworkInfo("Network", null, 0, false, false));
+        AssertEq(3, callbackCount, "Callback fired on disconnect");
+        Assert(!svc.Current.Connected, "Connected is false");
+        AssertEq(1, busEvents.Count, "BarEvent raised on disconnect");
+
+        var disconnEvt = busEvents[0];
+        AssertEq(BarEventKind.Network, disconnEvt.Kind, "Kind is Network");
+        AssertEq("Network", disconnEvt.Title, "Title is Network");
+        AssertEq("Disconnected", disconnEvt.Subtitle, "Subtitle is Disconnected");
+        AssertEq(85, disconnEvt.Priority, "Priority is 85 on disconnect");
+        AssertEq(TimeSpan.FromSeconds(3), disconnEvt.DisplayDuration, "Duration is 3s");
+
+        // 3. Meaningful transition: Reconnect
+        bus.Dismiss();
+        busEvents.Clear();
+        svc.OnNetworkStatusChangedCore(new NetworkInfo("Wi-Fi", "Office", 4, true, true));
+        AssertEq(4, callbackCount, "Callback fired on reconnect");
+        Assert(svc.Current.Connected, "Connected is true");
+        AssertEq(1, busEvents.Count, "BarEvent raised on reconnect");
+
+        var connEvt = busEvents[0];
+        AssertEq(BarEventKind.Network, connEvt.Kind, "Kind is Network");
+        AssertEq("Wi-Fi", connEvt.Title, "Title is Wi-Fi");
+        AssertEq("Office", connEvt.Subtitle, "Subtitle is Office");
+        AssertEq(30, connEvt.Priority, "Priority is 30 on reconnect");
+
+        // 4. Feature toggle suppression
+        bus.Dismiss();
+        busEvents.Clear();
+        settings.Update(s => s.FeatureNetwork = false);
+        svc.OnNetworkStatusChangedCore(new NetworkInfo("Network", null, 0, false, false));
+        AssertEq(5, callbackCount, "Callback fired even when FeatureNetwork is false");
+        AssertEq(0, busEvents.Count, "Zero BarEvents when FeatureNetwork is false");
+
+        settings.Update(s => s.FeatureNetwork = true);
+        svc.Dispose();
+    }
+
+    private static void TestNetworkService_StartVsDisposeRace()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+
+        using var reachedStartGate = new ManualResetEventSlim(false);
+        using var releaseStartGate = new ManualResetEventSlim(false);
+
+        var fakeWatcher = new FakeNetworkWatcher();
+        fakeWatcher.OnStart = () =>
+        {
+            reachedStartGate.Set();
+            releaseStartGate.Wait(TimeSpan.FromSeconds(5));
+        };
+
+        var initialInfo = new NetworkInfo("Wi-Fi", "Home", 4, true, true);
+        var svc = new NetworkService(bus, settings,
+            queryNetwork: () => initialInfo,
+            watcherFactory: () => fakeWatcher);
+
+        int callbackCount = 0;
+        svc.NetworkChanged += _ => Interlocked.Increment(ref callbackCount);
+
+        // 1. Run Start() on a background task until it enters watcher.Start()
+        var startTask = Task.Run(() => svc.Start());
+        Assert(reachedStartGate.Wait(TimeSpan.FromSeconds(2)), "Start reached watcher startup gate");
+
+        // 2. Concurrently call Dispose() on the main thread while Start() is paused in watcher.Start()
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        svc.Dispose();
+        sw.Stop();
+
+        Assert(sw.ElapsedMilliseconds < 500, "Dispose() returned immediately without deadlock");
+        Assert(svc.IsDisposed, "Service is disposed");
+        Assert(!svc.IsStarted, "Service is not started");
+
+        // 3. Resume startup by releasing the gate
+        releaseStartGate.Set();
+        Assert(startTask.Wait(TimeSpan.FromSeconds(2)), "Start task completed cleanly");
+
+        // 4. Assert watcher was stopped and disposed, no active watcher remains, and is not running
+        Assert(!svc.HasWatcher, "No active watcher retained in service");
+        AssertEq(1, fakeWatcher.StartCount, "Watcher Start() was called once");
+        Assert(fakeWatcher.StopCount >= 1, "Watcher was stopped when Start() detected disposal");
+        AssertEq(1, fakeWatcher.DisposeCount, "Watcher was disposed when Start() detected disposal");
+        Assert(!fakeWatcher.IsStarted, "Watcher is not started");
+
+        // 5. Assert post-disposal callbacks and state mutations are suppressed
+        svc.OnNetworkStatusChangedCore(new NetworkInfo("Cellular", "5G", 3, true, true));
+        AssertEq(initialInfo, svc.Current, "Current not mutated after disposal");
+        AssertEq(1, Volatile.Read(ref callbackCount), "Only initial start callback was invoked, zero post-disposal");
     }
 }
