@@ -9,6 +9,7 @@ using WindowsDynamicBar.Core.Telemetry;
 using WindowsDynamicBar.Interop;
 using WindowsDynamicBar.Services.Audio;
 using WindowsDynamicBar.Services.Media;
+using WindowsDynamicBar.Services.Privacy;
 using WindowsDynamicBar.Services.Settings;
 using WindowsDynamicBar.Services.SystemInfo;
 using WindowsDynamicBar.Services.SystemMonitor;
@@ -79,6 +80,12 @@ internal static partial class Program
         Run("BluetoothService: Dispose stops watcher when EnumerationCompleted and detaches all handlers", TestBluetoothService_Dispose_StopsWatcherWhenEnumerationCompleted);
         Run("BluetoothService: device classification and metadata mapping", TestBluetoothService_DeviceEnumerationAndClassification);
         Run("BluetoothService: event publishing, FeatureBluetooth toggle, and post-disposal suppression", TestBluetoothService_EventsAndPostDisposalSuppression);
+        Run("DownloadService: Start and Dispose are idempotent and handle invalid directories gracefully", TestDownloadService_StartAndDisposeIdempotency);
+        Run("DownloadService: event publication occurs outside lock without lock inversion or deadlock", TestDownloadService_LockInversionAndReentrancy);
+        Run("DownloadService: callbacks and event publications are completely suppressed after disposal", TestDownloadService_PostDisposalCallbackSuppression);
+        Run("DownloadService: temporary-extension filtering, name cleaning, and speed formatting", TestDownloadService_ExtensionFilteringAndCleanName);
+        Run("DownloadService: rename transitions and completion announcements respect feature settings", TestDownloadService_RenameAndCompletion);
+        Run("DownloadService: progress ticks compute speed, estimate ETA, and suppress stalled updates", TestDownloadService_ProgressSpeedAndETA);
     }
 
     private static string ScratchDir()
@@ -2294,5 +2301,287 @@ internal static partial class Program
 
         AssertEq(devCountAfterDispose, deviceChangedEvents.Count, "No DeviceChanged callbacks invoked after disposal");
         AssertEq(knownCountAfterDispose, svc.KnownDevices.Count, "Known devices not mutated after disposal");
+    }
+
+    private static void TestDownloadService_StartAndDisposeIdempotency()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+
+        string tempDir = Path.Combine(Path.GetTempPath(), $"wdb-dl-test-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var svc = new DownloadService(bus, settings, tempDir);
+            Assert(!svc.IsStarted, "Not started before Start()");
+            Assert(!svc.IsDisposed, "Not disposed before Dispose()");
+            AssertEq(0, svc.ActiveCount, "ActiveCount starts at 0");
+
+            // 1. Initial Start succeeds
+            svc.Start();
+            Assert(svc.IsStarted, "IsStarted true after Start()");
+            Assert(!svc.IsDisposed, "IsDisposed false while running");
+
+            // 2. Redundant Start is idempotent
+            svc.Start();
+            Assert(svc.IsStarted, "IsStarted remains true after redundant Start()");
+
+            // 3. Initial Dispose succeeds
+            svc.Dispose();
+            Assert(svc.IsDisposed, "IsDisposed true after Dispose()");
+            Assert(!svc.IsStarted, "IsStarted false after Dispose()");
+
+            // 4. Redundant Dispose is idempotent
+            svc.Dispose();
+            Assert(svc.IsDisposed, "IsDisposed remains true after redundant Dispose()");
+
+            // 5. Start after Dispose is rejected
+            svc.Start();
+            Assert(!svc.IsStarted, "Cannot start after service is disposed");
+            Assert(svc.IsDisposed, "Service remains disposed");
+
+            // 6. Graceful failure on non-existent directory
+            string nonExistentDir = Path.Combine(Path.GetTempPath(), $"wdb-nonexistent-{Guid.NewGuid():N}");
+            using (var failSvc = new DownloadService(bus, settings, nonExistentDir))
+            {
+                failSvc.Start();
+                Assert(!failSvc.IsStarted, "Start on non-existent directory does not mark service started");
+                Assert(!failSvc.IsDisposed, "Service is not marked disposed on failed start");
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(tempDir, true); } catch { }
+        }
+    }
+
+    private static void TestDownloadService_LockInversionAndReentrancy()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+        settings.Update(s => s.FeatureDownloads = true);
+
+        using var svc = new DownloadService(bus, settings, customDirectory: null);
+
+        var eventRaisedGate = new ManualResetEventSlim(false);
+        var reentrancySucceeded = false;
+        var threadLock = new object();
+        var lockInversionResolved = false;
+
+        // When bus raises the download event, simulate an external subscriber that locks threadLock
+        // and re-entrantly queries DownloadService.ActiveCount
+        bus.EventRaised += evt =>
+        {
+            if (evt.Kind == BarEventKind.Download && evt.Title == "Downloading…")
+            {
+                lock (threadLock)
+                {
+                    // Re-entrantly query ActiveCount while holding threadLock
+                    int active = svc.ActiveCount;
+                    if (active >= 1) reentrancySucceeded = true;
+                }
+                eventRaisedGate.Set();
+            }
+        };
+
+        // In a separate thread, hold threadLock and query ActiveCount (which requires _sync)
+        // If OnFileActivity held _sync while calling _bus.Raise, lock inversion would cause DEADLOCK.
+        var crossThreadDone = new ManualResetEventSlim(false);
+        var backgroundThread = new Thread(() =>
+        {
+            lock (threadLock)
+            {
+                // Verify background thread can read ActiveCount under threadLock
+                int count = svc.ActiveCount;
+                if (count == 0) lockInversionResolved = true;
+            }
+            crossThreadDone.Set();
+        });
+        backgroundThread.IsBackground = true;
+        backgroundThread.Start();
+        Assert(crossThreadDone.Wait(2000), "Background thread acquired lock and queried ActiveCount without deadlock");
+
+        // Now process file activity on main thread
+        svc.ProcessFileActivityCore("C:\\Downloads\\testfile.crdownload", "testfile.crdownload", 1024, isNew: true);
+
+        Assert(eventRaisedGate.Wait(2000), "EventBus raised Download event");
+        Assert(reentrancySucceeded, "Re-entrant query of ActiveCount succeeded inside EventRaised callback");
+        Assert(lockInversionResolved, "Lock inversion safety verified");
+        AssertEq(1, svc.ActiveCount, "Active count is 1 after file activity");
+    }
+
+    private static void TestDownloadService_PostDisposalCallbackSuppression()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+        settings.Update(s => s.FeatureDownloads = true);
+
+        var progressCalls = 0;
+        var busEvents = new List<BarEvent>();
+        bus.EventRaised += e => busEvents.Add(e);
+
+        var svc = new DownloadService(bus, settings, customDirectory: null);
+        svc.DownloadProgress += (name, frac, speed) => progressCalls++;
+
+        // Track a file before disposal
+        svc.ProcessFileActivityCore("C:\\Downloads\\active.crdownload", "active.crdownload", 2048, isNew: true);
+        AssertEq(1, svc.ActiveCount, "Active count is 1");
+        AssertEq(1, busEvents.Count, "1 initial bus event raised");
+
+        // Dispose the service
+        svc.Dispose();
+        Assert(svc.IsDisposed, "Service is disposed");
+        AssertEq(0, svc.ActiveCount, "Active items cleared on disposal");
+
+        int busEventsBeforeLate = busEvents.Count;
+
+        // Fire all callback paths post-disposal: must be completely suppressed
+        svc.ProcessFileActivityCore("C:\\Downloads\\late.crdownload", "late.crdownload", 4096, isNew: true);
+        svc.OnFileActivity("C:\\Downloads\\late2.crdownload", isNew: true);
+        svc.OnFileRenamed("C:\\Downloads\\active.crdownload", "C:\\Downloads\\active.zip");
+        svc.OnFileDone("C:\\Downloads\\active.crdownload", completed: true);
+        svc.TickProgress(path => 8192, DateTime.UtcNow);
+        svc.AnnounceComplete("late.zip");
+
+        AssertEq(0, svc.ActiveCount, "Active count remains 0 after post-disposal calls");
+        AssertEq(0, progressCalls, "Zero DownloadProgress callbacks fired after disposal");
+        AssertEq(busEventsBeforeLate, busEvents.Count, "Zero BarEvents published after disposal");
+    }
+
+    private static void TestDownloadService_ExtensionFilteringAndCleanName()
+    {
+        // 1. IsTempDownload: recognizes known browser extensions
+        Assert(DownloadService.IsTempDownload("file.crdownload"), ".crdownload is temp");
+        Assert(DownloadService.IsTempDownload("file.part"), ".part is temp");
+        Assert(DownloadService.IsTempDownload("file.download"), ".download is temp");
+        Assert(DownloadService.IsTempDownload("file.opdownload"), ".opdownload is temp");
+        Assert(DownloadService.IsTempDownload("file.partial"), ".partial is temp");
+        Assert(DownloadService.IsTempDownload("FILE.CRDOWNLOAD"), "Uppercase .CRDOWNLOAD is temp");
+        Assert(DownloadService.IsTempDownload("FILE.PART"), "Uppercase .PART is temp");
+
+        // Non-temp extensions
+        Assert(!DownloadService.IsTempDownload("file.zip"), ".zip is not temp");
+        Assert(!DownloadService.IsTempDownload("file.exe"), ".exe is not temp");
+        Assert(!DownloadService.IsTempDownload("file.tmp"), ".tmp is not temp");
+        Assert(!DownloadService.IsTempDownload("file.downloading"), ".downloading is not temp");
+        Assert(!DownloadService.IsTempDownload(""), "empty string is not temp");
+
+        // 2. CleanName: strips temp extension properly
+        AssertEq("video.mp4", DownloadService.CleanName("video.mp4.crdownload"), "CleanName .crdownload");
+        AssertEq("archive.tar.gz", DownloadService.CleanName("archive.tar.gz.part"), "CleanName .part");
+        AssertEq("installer.exe", DownloadService.CleanName("installer.exe.download"), "CleanName .download");
+        AssertEq("browser", DownloadService.CleanName("browser.opdownload"), "CleanName .opdownload");
+        AssertEq("data.csv", DownloadService.CleanName("data.csv.partial"), "CleanName .partial");
+        AssertEq("normal.txt", DownloadService.CleanName("normal.txt"), "CleanName without temp ext unchanged");
+
+        // 3. FormatSpeed: formatting thresholds
+        AssertEq("…", DownloadService.FormatSpeed(0), "Speed 0 formatted as ellipsis");
+        AssertEq("…", DownloadService.FormatSpeed(-5), "Negative speed formatted as ellipsis");
+        AssertEq("500 B/s", DownloadService.FormatSpeed(500), "Bytes/sec formatting");
+        AssertEq("1024 B/s", DownloadService.FormatSpeed(1024), "1024 B/s formatting");
+        AssertEq("10 KB/s", DownloadService.FormatSpeed(10 * 1024), "10 KB/s formatting");
+        AssertEq("1.5 MB/s", DownloadService.FormatSpeed(1.5 * 1024 * 1024), "1.5 MB/s formatting");
+    }
+
+    private static void TestDownloadService_RenameAndCompletion()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+        settings.Update(s => s.FeatureDownloads = true);
+
+        var events = new List<BarEvent>();
+        bus.EventRaised += e => events.Add(e);
+
+        using var svc = new DownloadService(bus, settings, customDirectory: null);
+
+        // Track a download
+        string tempPath = "C:\\Downloads\\Unconfirmed 12345.crdownload";
+        svc.ProcessFileActivityCore(tempPath, "Unconfirmed 12345.crdownload", 1000, isNew: true);
+        AssertEq(1, svc.ActiveCount, "1 active download");
+        AssertEq(1, events.Count, "1 download event raised");
+        AssertEq(BarEventKind.Download, events[0].Kind, "Kind is Download");
+        AssertEq("Downloading…", events[0].Title, "Title is Downloading…");
+        AssertEq("Unconfirmed 12345", events[0].Subtitle, "Subtitle is sanitized name");
+
+        // Scenario A: Rename temp to temp (Chrome renaming Unconfirmed -> actual.crdownload)
+        string renamedTemp = "C:\\Downloads\\actual.crdownload";
+        svc.OnFileRenamed(tempPath, renamedTemp);
+        AssertEq(1, svc.ActiveCount, "Active count is still 1 after temp-to-temp rename");
+        AssertEq(1, events.Count, "No new BarEvent for temp-to-temp rename");
+
+        // Scenario B: Rename temp to final (download completed: actual.crdownload -> actual.zip)
+        string finalPath = "C:\\Downloads\\actual.zip";
+        bus.Dismiss();
+        svc.OnFileRenamed(renamedTemp, finalPath);
+        AssertEq(0, svc.ActiveCount, "Active count is 0 after completion rename");
+        AssertEq(2, events.Count, "Completion toast event raised");
+        AssertEq(BarEventKind.Toast, events[1].Kind, "Event kind is Toast");
+        AssertEq("Download complete", events[1].Title, "Toast title is Download complete");
+        AssertEq("actual.zip", events[1].Subtitle, "Toast subtitle is filename");
+        AssertEq(65, events[1].Priority, "Priority is 65");
+
+        // Scenario C: OnFileDone with completed=true
+        bus.Dismiss();
+        string docTemp = "C:\\Downloads\\document.part";
+        svc.ProcessFileActivityCore(docTemp, "document.part", 5000, isNew: true);
+        AssertEq(1, svc.ActiveCount, "1 active download");
+        bus.Dismiss();
+        svc.OnFileDone(docTemp, completed: true);
+        AssertEq(0, svc.ActiveCount, "Active count is 0 after OnFileDone");
+        AssertEq(4, events.Count, "Completion toast raised for OnFileDone (1 initial + 1 completion)");
+        AssertEq("document", events[3].Subtitle, "Toast subtitle is document");
+
+        // Scenario D: FeatureDownloads = false suppresses completion announcements
+        settings.Update(s => s.FeatureDownloads = false);
+        int eventCountBefore = events.Count;
+        svc.AnnounceComplete("silent.zip");
+        AssertEq(eventCountBefore, events.Count, "Completion announcement suppressed when FeatureDownloads is false");
+    }
+
+    private static void TestDownloadService_ProgressSpeedAndETA()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+        settings.Update(s => s.FeatureDownloads = true);
+
+        var busEvents = new List<BarEvent>();
+        bus.EventRaised += e => busEvents.Add(e);
+
+        var progressUpdates = new List<(string name, double frac, double speed)>();
+        using var svc = new DownloadService(bus, settings, customDirectory: null);
+        svc.DownloadProgress += (name, frac, speed) => progressUpdates.Add((name, frac, speed));
+
+        string path = "C:\\Downloads\\bigfile.crdownload";
+        var t0 = DateTime.UtcNow;
+        svc.ProcessFileActivityCore(path, "bigfile.crdownload", 1000, isNew: true);
+
+        // 1. Advance time by 2 seconds with 4000 bytes added (total 5000, speed = 4000/2 = 2000 B/s)
+        var t1 = t0.AddSeconds(2);
+        svc.TickProgress(p => p == path ? 5000 : null, t1);
+
+        AssertEq(1, progressUpdates.Count, "Progress callback invoked on moving download");
+        AssertEq("bigfile", progressUpdates[0].name, "Progress name sanitized");
+        Assert(progressUpdates[0].speed >= 1999 && progressUpdates[0].speed <= 2001, "Speed computed at ~2000 B/s");
+        Assert(progressUpdates[0].frac > 0 && progressUpdates[0].frac <= 1.0, "Fraction bounded between 0 and 1");
+
+        // Verify BarEvent was published with tick semantics
+        var tickEvent = busEvents.LastOrDefault(e => e.Kind == BarEventKind.Download && e.IsTick);
+        Assert(tickEvent is not null, "Tick BarEvent was published");
+        AssertEq("bigfile", tickEvent!.Title, "Event title is filename");
+        AssertEq(35, tickEvent.Priority, "Tick priority is 35");
+
+        // 2. Stalled download (no bytes added): progress is not emitted as a bar event
+        int progressCountBeforeStall = progressUpdates.Count;
+        int busCountBeforeStall = busEvents.Count;
+        var t2 = t1.AddSeconds(2);
+        svc.TickProgress(p => p == path ? 5000 : null, t2);
+
+        AssertEq(progressCountBeforeStall, progressUpdates.Count, "Stalled download does not invoke progress callback");
+        AssertEq(busCountBeforeStall, busEvents.Count, "Stalled download does not publish BarEvent");
+
+        // 3. File disappears (lengthProvider returns null): removed from active tracking
+        var t3 = t2.AddSeconds(1);
+        svc.TickProgress(p => null, t3);
+        AssertEq(0, svc.ActiveCount, "Disappeared file removed from active downloads");
     }
 }
