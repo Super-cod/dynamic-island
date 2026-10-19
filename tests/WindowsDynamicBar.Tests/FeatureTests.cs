@@ -116,6 +116,14 @@ internal static partial class Program
         Run("BatteryService: concurrent Start vs Dispose during timer creation prevents leak", TestBatteryService_StartVsDisposeDuringTimerCreation);
         Run("BatteryService: startup failure safely resets state and allows clean retry", TestBatteryService_StartupFailureAndRetry);
         Run("SystemEventsBatteryWatcher: partial subscription rollback and safe retry without leaks", TestSystemEventsBatteryWatcher_PartialSubscriptionRollbackAndRetry);
+        Run("ScreenshotService: sequential and concurrent Start are idempotent without duplicate watchers", TestScreenshotService_StartIdempotency);
+        Run("ScreenshotService: repeated Dispose is idempotent and Start after Dispose is rejected", TestScreenshotService_DisposeIdempotencyAndRejection);
+        Run("ScreenshotService: watcher ownership enforces exactly one subscription, stop, and disposal", TestScreenshotService_WatcherOwnershipAndCleanup);
+        Run("ScreenshotService: in-flight callback racing with Dispose suppresses event dispatch", TestScreenshotService_InFlightCallbackVsDisposeRace);
+        Run("ScreenshotService: late callbacks after disposal are completely suppressed", TestScreenshotService_LateCallbacksAfterDisposal);
+        Run("ScreenshotService: extension filtering and FeatureScreenshots toggle behavior", TestScreenshotService_ExtensionFilteringAndFeatureToggle);
+        Run("ScreenshotService: missing screenshot directory and watcher startup failure safely reset state", TestScreenshotService_MissingDirectoryAndStartupFailure);
+        Run("ScreenshotService: concurrent Start vs Dispose race stops watcher and prevents leak", TestScreenshotService_StartVsDisposeRace);
     }
 
     private static string ScratchDir()
@@ -4546,5 +4554,450 @@ internal static partial class Program
         throwingWatcher.Stop();
         Assert(powerRemovalThrew, "removePower threw as expected");
         Assert(!throwingWatcher.IsHooked, "Throwing watcher is unhooked even when removePower threw");
+    }
+
+    private sealed class FakeScreenshotWatcher : IScreenshotWatcher
+    {
+        private Action<string, string>? _created;
+        public int StartCount;
+        public int StopCount;
+        public int DisposeCount;
+        private int _isStarted;
+        private int _subscriberCount;
+        public Action? OnStart;
+        public Action? OnStop;
+        public Action? OnDispose;
+
+        public bool IsStarted => Volatile.Read(ref _isStarted) == 1;
+        public int SubscriberCount => Volatile.Read(ref _subscriberCount);
+
+        public event Action<string, string>? Created
+        {
+            add
+            {
+                lock (this)
+                {
+                    _created += value;
+                    Interlocked.Increment(ref _subscriberCount);
+                }
+            }
+            remove
+            {
+                lock (this)
+                {
+                    _created -= value;
+                    Interlocked.Decrement(ref _subscriberCount);
+                }
+            }
+        }
+
+        public void Start()
+        {
+            OnStart?.Invoke();
+            Interlocked.Increment(ref StartCount);
+            Volatile.Write(ref _isStarted, 1);
+        }
+
+        public void Stop()
+        {
+            OnStop?.Invoke();
+            Interlocked.Increment(ref StopCount);
+            Volatile.Write(ref _isStarted, 0);
+        }
+
+        public void Dispose()
+        {
+            OnDispose?.Invoke();
+            Interlocked.Increment(ref DisposeCount);
+            Stop();
+        }
+
+        public void Trigger(string name, string fullPath)
+        {
+            Action<string, string>? handler;
+            lock (this) { handler = _created; }
+            handler?.Invoke(name, fullPath);
+        }
+    }
+
+    private static void TestScreenshotService_StartIdempotency()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+
+        var fakeWatcher = new FakeScreenshotWatcher();
+        int factoryCalls = 0;
+        var svc = new ScreenshotService(bus, settings,
+            watcherFactory: dir =>
+            {
+                Interlocked.Increment(ref factoryCalls);
+                return fakeWatcher;
+            },
+            directoryResolver: () => @"C:\Users\Fake\Pictures\Screenshots");
+
+        Assert(!svc.IsStarted, "Not started initially");
+        Assert(!svc.IsDisposed, "Not disposed initially");
+        Assert(!svc.HasWatcher, "No watcher initially");
+
+        // Sequential Start()
+        svc.Start();
+        Assert(svc.IsStarted, "Started after Start()");
+        Assert(!svc.IsDisposed, "Not disposed after Start()");
+        Assert(svc.HasWatcher, "Has watcher after Start()");
+        AssertEq(1, fakeWatcher.StartCount, "Watcher started once");
+        AssertEq(1, factoryCalls, "Factory called once");
+
+        svc.Start();
+        AssertEq(1, fakeWatcher.StartCount, "Sequential Start() is idempotent");
+        AssertEq(1, factoryCalls, "Factory not called again on sequential Start()");
+
+        svc.Dispose();
+
+        // Concurrent Start() on 10 threads
+        var fakeWatcherConcurrent = new FakeScreenshotWatcher();
+        int concurrentFactoryCalls = 0;
+        var svcConcurrent = new ScreenshotService(bus, settings,
+            watcherFactory: dir =>
+            {
+                Interlocked.Increment(ref concurrentFactoryCalls);
+                return fakeWatcherConcurrent;
+            },
+            directoryResolver: () => @"C:\Users\Fake\Pictures\Screenshots");
+
+        int threadCount = 10;
+        using var barrier = new Barrier(threadCount);
+        var tasks = new Task[threadCount];
+        for (int i = 0; i < threadCount; i++)
+        {
+            tasks[i] = Task.Run(() =>
+            {
+                barrier.SignalAndWait();
+                svcConcurrent.Start();
+            });
+        }
+        Task.WaitAll(tasks);
+
+        AssertEq(1, concurrentFactoryCalls, "Watcher factory called once under concurrent Start()");
+        AssertEq(1, fakeWatcherConcurrent.StartCount, "Watcher started once under concurrent Start()");
+        Assert(svcConcurrent.IsStarted, "Concurrent service is started");
+        Assert(svcConcurrent.HasWatcher, "Concurrent service has watcher");
+
+        svcConcurrent.Dispose();
+    }
+
+    private static void TestScreenshotService_DisposeIdempotencyAndRejection()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+
+        var fakeWatcher = new FakeScreenshotWatcher();
+        int factoryCalls = 0;
+        var svc = new ScreenshotService(bus, settings,
+            watcherFactory: dir =>
+            {
+                Interlocked.Increment(ref factoryCalls);
+                return fakeWatcher;
+            },
+            directoryResolver: () => @"C:\Users\Fake\Pictures\Screenshots");
+
+        svc.Start();
+        Assert(svc.IsStarted, "Service is started");
+        Assert(svc.HasWatcher, "Service has watcher");
+
+        // First Dispose()
+        svc.Dispose();
+        Assert(svc.IsDisposed, "Disposed after Dispose()");
+        Assert(!svc.IsStarted, "Not started after Dispose()");
+        Assert(!svc.HasWatcher, "Watcher detached after Dispose()");
+        AssertEq(1, fakeWatcher.DisposeCount, "Watcher disposed once");
+
+        // Repeated Dispose()
+        svc.Dispose();
+        Assert(svc.IsDisposed, "Remains disposed on second Dispose()");
+        AssertEq(1, fakeWatcher.DisposeCount, "Watcher not double-disposed on second Dispose()");
+
+        // Start() after Dispose() must be rejected
+        svc.Start();
+        Assert(!svc.IsStarted, "Start() after Dispose() is rejected");
+        Assert(!svc.HasWatcher, "No watcher attached after rejected Start()");
+        AssertEq(1, factoryCalls, "No new watcher created on rejected Start()");
+    }
+
+    private static void TestScreenshotService_WatcherOwnershipAndCleanup()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+
+        var fakeWatcher = new FakeScreenshotWatcher();
+        var svc = new ScreenshotService(bus, settings,
+            watcherFactory: _ => fakeWatcher,
+            directoryResolver: () => @"C:\Users\Fake\Pictures\Screenshots");
+
+        AssertEq(0, fakeWatcher.SubscriberCount, "Zero subscribers initially");
+
+        svc.Start();
+        AssertEq(1, fakeWatcher.SubscriberCount, "Exactly one subscriber after Start()");
+        Assert(fakeWatcher.IsStarted, "Watcher is started");
+
+        svc.Dispose();
+        AssertEq(0, fakeWatcher.SubscriberCount, "Subscriber detached on Dispose()");
+        Assert(!fakeWatcher.IsStarted, "Watcher stopped on Dispose()");
+        Assert(fakeWatcher.StopCount >= 1, "Watcher was stopped on Dispose()");
+        AssertEq(1, fakeWatcher.DisposeCount, "Watcher Dispose called once");
+
+        // Exception resilience in CleanupWatcher
+        var throwingWatcher = new FakeScreenshotWatcher
+        {
+            OnStop = () => throw new InvalidOperationException("Simulated stop failure"),
+            OnDispose = () => throw new InvalidOperationException("Simulated dispose failure")
+        };
+        var throwingSvc = new ScreenshotService(bus, settings,
+            watcherFactory: _ => throwingWatcher,
+            directoryResolver: () => @"C:\Users\Fake\Pictures\Screenshots");
+
+        throwingSvc.Start();
+        // Should not throw or crash
+        throwingSvc.Dispose();
+        Assert(throwingSvc.IsDisposed, "Service disposed cleanly despite watcher exceptions");
+        AssertEq(0, throwingWatcher.SubscriberCount, "Subscriber detached despite stop/dispose exceptions");
+    }
+
+    private static void TestScreenshotService_InFlightCallbackVsDisposeRace()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+        settings.Update(s => s.FeatureScreenshots = true);
+
+        using var callbackStartedGate = new ManualResetEventSlim(false);
+        using var callbackHoldGate = new ManualResetEventSlim(false);
+
+        var fakeWatcher = new FakeScreenshotWatcher();
+        var svc = new ScreenshotService(bus, settings,
+            watcherFactory: _ => fakeWatcher,
+            directoryResolver: () => @"C:\Users\Fake\Pictures\Screenshots",
+            eventFactory: (name, path) =>
+            {
+                callbackStartedGate.Set();
+                callbackHoldGate.Wait(TimeSpan.FromSeconds(5));
+                return ScreenshotService.CreateBarEvent(name, path);
+            });
+
+        var busEvents = new List<BarEvent>();
+        bus.EventRaised += e =>
+        {
+            if (e.Kind == BarEventKind.Screenshot) busEvents.Add(e);
+        };
+
+        svc.Start();
+
+        // 1. Trigger screenshot callback on a background thread so it pauses in eventFactory
+        var triggerTask = Task.Run(() => fakeWatcher.Trigger("screenshot.png", @"C:\Users\Fake\Pictures\Screenshots\screenshot.png"));
+        Assert(callbackStartedGate.Wait(TimeSpan.FromSeconds(2)), "Callback reached gate inside eventFactory");
+
+        // 2. Concurrently call Dispose() on the main thread
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        svc.Dispose();
+        sw.Stop();
+
+        Assert(sw.ElapsedMilliseconds < 500, "Dispose() returned immediately without deadlock");
+        Assert(svc.IsDisposed, "Service is disposed");
+        Assert(!svc.IsStarted, "Service is not started");
+
+        // 3. Release in-flight callback
+        callbackHoldGate.Set();
+        Assert(triggerTask.Wait(TimeSpan.FromSeconds(2)), "Trigger task completed");
+
+        // 4. Assert that the pre-dispatch check suppressed _bus.Raise because service was disposed
+        AssertEq(0, busEvents.Count, "No BarEvents raised by in-flight callback racing with Dispose");
+    }
+
+    private static void TestScreenshotService_LateCallbacksAfterDisposal()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+        settings.Update(s => s.FeatureScreenshots = true);
+
+        var fakeWatcher = new FakeScreenshotWatcher();
+        var svc = new ScreenshotService(bus, settings,
+            watcherFactory: _ => fakeWatcher,
+            directoryResolver: () => @"C:\Users\Fake\Pictures\Screenshots");
+
+        var busEvents = new List<BarEvent>();
+        bus.EventRaised += e =>
+        {
+            if (e.Kind == BarEventKind.Screenshot) busEvents.Add(e);
+        };
+
+        svc.Start();
+        svc.Dispose();
+
+        Assert(svc.IsDisposed, "Service is disposed");
+
+        // Late callbacks via watcher and via direct core call
+        fakeWatcher.Trigger("late.png", @"C:\Users\Fake\Pictures\Screenshots\late.png");
+        svc.OnScreenshotCreatedCore("late_core.png", @"C:\Users\Fake\Pictures\Screenshots\late_core.png");
+
+        AssertEq(0, busEvents.Count, "Zero BarEvents published after disposal");
+    }
+
+    private static void TestScreenshotService_ExtensionFilteringAndFeatureToggle()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+
+        // 1. Pure extension helper verification
+        Assert(ScreenshotService.IsScreenshotFile("screen.png"), ".png supported");
+        Assert(ScreenshotService.IsScreenshotFile("screen.jpg"), ".jpg supported");
+        Assert(ScreenshotService.IsScreenshotFile("screen.jpeg"), ".jpeg supported");
+        Assert(ScreenshotService.IsScreenshotFile("screen.bmp"), ".bmp supported");
+        Assert(ScreenshotService.IsScreenshotFile("SCREEN.PNG"), "uppercase .PNG supported");
+        Assert(ScreenshotService.IsScreenshotFile("capture.JpEg"), "mixed case .JpEg supported");
+
+        Assert(!ScreenshotService.IsScreenshotFile("image.gif"), ".gif not supported");
+        Assert(!ScreenshotService.IsScreenshotFile("image.webp"), ".webp not supported");
+        Assert(!ScreenshotService.IsScreenshotFile("notes.txt"), ".txt not supported");
+        Assert(!ScreenshotService.IsScreenshotFile("app.exe"), ".exe not supported");
+        Assert(!ScreenshotService.IsScreenshotFile("noext"), "no extension not supported");
+        Assert(!ScreenshotService.IsScreenshotFile(""), "empty filename not supported");
+        Assert(!ScreenshotService.IsScreenshotFile("   "), "whitespace filename not supported");
+        Assert(!ScreenshotService.IsScreenshotFile(null), "null filename not supported");
+
+        // 2. BarEvent factory verification
+        var barEvent = ScreenshotService.CreateBarEvent("capture.png", @"C:\Screenshots\capture.png");
+        AssertEq(BarEventKind.Screenshot, barEvent.Kind, "Kind is Screenshot");
+        AssertEq("Screenshot saved", barEvent.Title, "Title is 'Screenshot saved'");
+        AssertEq("capture.png", barEvent.Subtitle, "Subtitle is filename");
+        AssertEq(@"C:\Screenshots\capture.png", barEvent.Payload as string, "Payload is fullPath");
+        AssertEq(60, barEvent.Priority, "Priority is 60");
+        AssertEq(TimeSpan.FromSeconds(3), barEvent.DisplayDuration, "Duration is 3s");
+
+        // 3. FeatureScreenshots toggle and extension filtering in service
+        var fakeWatcher = new FakeScreenshotWatcher();
+        var svc = new ScreenshotService(bus, settings,
+            watcherFactory: _ => fakeWatcher,
+            directoryResolver: () => @"C:\Screenshots");
+
+        var busEvents = new List<BarEvent>();
+        bus.EventRaised += e =>
+        {
+            if (e.Kind == BarEventKind.Screenshot) busEvents.Add(e);
+        };
+
+        svc.Start();
+
+        // When toggle is disabled
+        settings.Update(s => s.FeatureScreenshots = false);
+        fakeWatcher.Trigger("snap1.png", @"C:\Screenshots\snap1.png");
+        AssertEq(0, busEvents.Count, "No event raised when FeatureScreenshots is disabled");
+
+        // When toggle is enabled
+        settings.Update(s => s.FeatureScreenshots = true);
+        fakeWatcher.Trigger("snap2.txt", @"C:\Screenshots\snap2.txt");
+        AssertEq(0, busEvents.Count, "No event raised for unsupported extension (.txt)");
+
+        fakeWatcher.Trigger("snap3.png", @"C:\Screenshots\snap3.png");
+        AssertEq(1, busEvents.Count, "Event raised for valid screenshot when enabled");
+        AssertEq("snap3.png", busEvents[0].Subtitle, "Event subtitle matches filename");
+        AssertEq(@"C:\Screenshots\snap3.png", busEvents[0].Payload as string, "Event payload matches fullPath");
+
+        svc.Dispose();
+    }
+
+    private static void TestScreenshotService_MissingDirectoryAndStartupFailure()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+
+        // 1. Missing screenshot directory (resolver returns null or whitespace)
+        bool resolverCalled = false;
+        var svcMissing = new ScreenshotService(bus, settings,
+            watcherFactory: _ => new FakeScreenshotWatcher(),
+            directoryResolver: () =>
+            {
+                resolverCalled = true;
+                return null;
+            });
+
+        svcMissing.Start();
+        Assert(resolverCalled, "Directory resolver was called");
+        Assert(!svcMissing.IsStarted, "Service is not started when directory is missing");
+        Assert(!svcMissing.HasWatcher, "No watcher when directory is missing");
+        Assert(!svcMissing.IsDisposed, "Service is not disposed when directory is missing");
+
+        svcMissing.Dispose();
+
+        // 2. Watcher factory failure
+        bool shouldThrow = true;
+        var fakeWatcher2 = new FakeScreenshotWatcher();
+
+        var svcFailing = new ScreenshotService(bus, settings,
+            watcherFactory: _ =>
+            {
+                if (shouldThrow) throw new UnauthorizedAccessException("Simulated directory access failure");
+                return fakeWatcher2;
+            },
+            directoryResolver: () => @"C:\Screenshots");
+
+        svcFailing.Start();
+        Assert(!svcFailing.IsStarted, "Service is not started when watcher creation throws");
+        Assert(!svcFailing.HasWatcher, "No watcher retained after creation throws");
+        Assert(!svcFailing.IsDisposed, "Service remains undisposed and recoverable");
+
+        // Retry Start() after condition clears
+        shouldThrow = false;
+        svcFailing.Start();
+        Assert(svcFailing.IsStarted, "Service started on retry");
+        Assert(svcFailing.HasWatcher, "Watcher published on successful retry");
+        AssertEq(1, fakeWatcher2.StartCount, "Watcher started on retry");
+
+        svcFailing.Dispose();
+        AssertEq(1, fakeWatcher2.DisposeCount, "Watcher disposed on service disposal");
+    }
+
+    private static void TestScreenshotService_StartVsDisposeRace()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+
+        using var reachedStartGate = new ManualResetEventSlim(false);
+        using var releaseStartGate = new ManualResetEventSlim(false);
+
+        var fakeWatcher = new FakeScreenshotWatcher();
+        fakeWatcher.OnStart = () =>
+        {
+            reachedStartGate.Set();
+            releaseStartGate.Wait(TimeSpan.FromSeconds(5));
+        };
+
+        var svc = new ScreenshotService(bus, settings,
+            watcherFactory: _ => fakeWatcher,
+            directoryResolver: () => @"C:\Screenshots");
+
+        // 1. Run Start() on background task until it enters watcher.Start()
+        var startTask = Task.Run(() => svc.Start());
+        Assert(reachedStartGate.Wait(TimeSpan.FromSeconds(2)), "Start reached watcher startup gate");
+
+        // 2. Concurrently call Dispose() on main thread while Start() is paused in watcher.Start()
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        svc.Dispose();
+        sw.Stop();
+
+        Assert(sw.ElapsedMilliseconds < 500, "Dispose() returned immediately without deadlock");
+        Assert(svc.IsDisposed, "Service is disposed");
+        Assert(!svc.IsStarted, "Service is not started");
+
+        // 3. Resume startup by releasing the gate
+        releaseStartGate.Set();
+        Assert(startTask.Wait(TimeSpan.FromSeconds(2)), "Start task completed cleanly");
+
+        // 4. Deferred publication guarantee:
+        // Watcher was stopped and disposed when Start() detected disposal.
+        // No watcher is retained in the service.
+        Assert(!svc.HasWatcher, "No active watcher retained in service");
+        AssertEq(1, fakeWatcher.StartCount, "Watcher Start() was called once");
+        Assert(fakeWatcher.StopCount >= 1, "Watcher was stopped when Start() detected disposal");
+        AssertEq(1, fakeWatcher.DisposeCount, "Watcher was disposed when Start() detected disposal");
+        Assert(!fakeWatcher.IsStarted, "Watcher is not started");
+        AssertEq(0, fakeWatcher.SubscriberCount, "Created subscriber was detached during cleanup");
     }
 }
