@@ -92,6 +92,13 @@ internal static partial class Program
         Run("PrivacyService: post-disposal callbacks and BarEvents are suppressed", TestPrivacyService_PostDisposalSuppression);
         Run("PrivacyService: consent-store subkey parsing, path decoding, and active calculation", TestPrivacyService_ParsingAndDecoding);
         Run("PrivacyService: state transitions and BarEvent publishing respect feature settings", TestPrivacyService_StateTransitionsAndBarEvents);
+        Run("BrightnessService: Start and Dispose are idempotent, thread-safe, and reject calls after disposal", TestBrightnessService_StartAndDisposeIdempotency);
+        Run("BrightnessService: Level returns consistent thread-safe snapshots under concurrent reads and writes", TestBrightnessService_LevelThreadSafeSnapshot);
+        Run("BrightnessService: in-flight callback racing with Dispose suppresses state mutation and deadlock", TestBrightnessService_InFlightCallbackVsDisposeRace);
+        Run("BrightnessService: post-disposal callbacks, SetLevel, and BarEvents are suppressed", TestBrightnessService_PostDisposalSuppression);
+        Run("BrightnessService: deduplication window, delta thresholds, and property extraction", TestBrightnessService_DeduplicationAndThresholds);
+        Run("BrightnessService: SetLevel clamping, BarEvent metadata, and FeatureBrightness toggle", TestBrightnessService_SetLevelAndBarEvents);
+        Run("BrightnessService: concurrent Start vs Dispose race stops watcher and prevents leak", TestBrightnessService_StartVsDisposeRace);
     }
 
     private static string ScratchDir()
@@ -2907,5 +2914,435 @@ internal static partial class Program
 
         settings.Update(s => s.FeaturePrivacyIndicators = true);
         svc.Dispose();
+    }
+
+    private sealed class FakeBrightnessWatcher : IBrightnessWatcher
+    {
+        public event Action<float>? BrightnessArrived;
+        public int StartCount;
+        public int StopCount;
+        public int DisposeCount;
+        private int _isStarted;
+        public Action? OnStart;
+
+        public bool IsStarted => Volatile.Read(ref _isStarted) == 1;
+
+        public void Start()
+        {
+            OnStart?.Invoke();
+            Interlocked.Increment(ref StartCount);
+            Volatile.Write(ref _isStarted, 1);
+        }
+
+        public void Stop()
+        {
+            Interlocked.Increment(ref StopCount);
+            Volatile.Write(ref _isStarted, 0);
+        }
+
+        public void Dispose()
+        {
+            Interlocked.Increment(ref DisposeCount);
+            Stop();
+        }
+
+        public void Emit(float value) => BrightnessArrived?.Invoke(value);
+    }
+
+    private static void TestBrightnessService_StartAndDisposeIdempotency()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+
+        // 1. Repeated sequential Start()
+        var fakeWatcher = new FakeBrightnessWatcher();
+        var svc = new BrightnessService(bus, settings,
+            queryBrightness: () => 0.5f,
+            setBrightness: _ => true,
+            watcherFactory: () => fakeWatcher);
+
+        Assert(!svc.IsStarted, "Not started initially");
+        Assert(!svc.IsDisposed, "Not disposed initially");
+        Assert(!svc.HasWatcher, "No watcher initially");
+        AssertEq(0.0f, svc.Level, "Level initially 0");
+
+        svc.Start();
+        Assert(svc.IsStarted, "Started after Start()");
+        Assert(svc.IsAvailable, "Available after Start()");
+        AssertEq(0.5f, svc.Level, "Level initialized from query");
+        Assert(svc.HasWatcher, "Watcher attached");
+        AssertEq(1, fakeWatcher.StartCount, "Watcher started once");
+
+        svc.Start();
+        AssertEq(1, fakeWatcher.StartCount, "Sequential Start() is idempotent; watcher not restarted");
+
+        // 2. Concurrent Start() on 10 threads
+        var fakeWatcherConcurrent = new FakeBrightnessWatcher();
+        int watcherFactoryCalls = 0;
+        var svcConcurrent = new BrightnessService(bus, settings,
+            queryBrightness: () => 0.7f,
+            setBrightness: _ => true,
+            watcherFactory: () =>
+            {
+                Interlocked.Increment(ref watcherFactoryCalls);
+                return fakeWatcherConcurrent;
+            });
+
+        int threadCount = 10;
+        using var barrier = new Barrier(threadCount);
+        var tasks = new Task[threadCount];
+        for (int i = 0; i < threadCount; i++)
+        {
+            tasks[i] = Task.Run(() =>
+            {
+                barrier.SignalAndWait();
+                svcConcurrent.Start();
+            });
+        }
+        Task.WaitAll(tasks);
+
+        AssertEq(1, watcherFactoryCalls, "Watcher factory called exactly once under concurrent Start()");
+        AssertEq(1, fakeWatcherConcurrent.StartCount, "Watcher started exactly once under concurrent Start()");
+        Assert(svcConcurrent.IsStarted, "Concurrent service is started");
+        Assert(svcConcurrent.HasWatcher, "Concurrent service has watcher");
+        AssertEq(0.7f, svcConcurrent.Level, "Level is 0.7");
+
+        // 3. Repeated Dispose()
+        svcConcurrent.Dispose();
+        Assert(svcConcurrent.IsDisposed, "Disposed after Dispose()");
+        Assert(!svcConcurrent.IsStarted, "Not started after Dispose()");
+        Assert(!svcConcurrent.HasWatcher, "Watcher detached after Dispose()");
+        AssertEq(1, fakeWatcherConcurrent.DisposeCount, "Watcher disposed");
+
+        svcConcurrent.Dispose();
+        Assert(svcConcurrent.IsDisposed, "Remains disposed on second Dispose()");
+        AssertEq(1, fakeWatcherConcurrent.DisposeCount, "Watcher not double-disposed on second Dispose()");
+
+        // 4. Start() after Dispose()
+        svcConcurrent.Start();
+        Assert(!svcConcurrent.IsStarted, "Start() after Dispose() is rejected");
+        AssertEq(1, watcherFactoryCalls, "Zero new watchers created on Start() after Dispose()");
+
+        svc.Dispose();
+    }
+
+    private static void TestBrightnessService_LevelThreadSafeSnapshot()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+        var fakeWatcher = new FakeBrightnessWatcher();
+        var svc = new BrightnessService(bus, settings,
+            queryBrightness: () => 0.0f,
+            setBrightness: _ => true,
+            watcherFactory: () => fakeWatcher);
+        svc.Start();
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        int readerCount = 8;
+        var threads = new List<Thread>();
+        int anomalies = 0;
+
+        for (int i = 0; i < readerCount; i++)
+        {
+            var t = new Thread(() =>
+            {
+                while (!cts.IsCancellationRequested)
+                {
+                    float lvl = svc.Level;
+                    if (float.IsNaN(lvl) || float.IsInfinity(lvl) || lvl < 0.0f || lvl > 1.0f)
+                    {
+                        Interlocked.Increment(ref anomalies);
+                        break;
+                    }
+                }
+            });
+            threads.Add(t);
+            t.Start();
+        }
+
+        var baseTime = DateTime.UtcNow;
+        for (int w = 0; w < 100; w++)
+        {
+            float val = (w % 100);
+            svc.OnBrightnessArrivedCore(val, baseTime.AddMilliseconds(w * 50));
+        }
+
+        cts.Cancel();
+        foreach (var t in threads) t.Join();
+
+        AssertEq(0, anomalies, "Zero torn, NaN, or out-of-range snapshots observed across concurrent readers");
+        Assert(svc.Level >= 0.0f && svc.Level <= 1.0f, "Final Level is valid");
+        svc.Dispose();
+    }
+
+    private static void TestBrightnessService_InFlightCallbackVsDisposeRace()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+        settings.Update(s => s.FeatureBrightness = true);
+
+        using var enteredCallback = new ManualResetEventSlim(false);
+        using var releaseCallback = new ManualResetEventSlim(false);
+
+        int callbackCount = 0;
+        var fakeWatcher = new FakeBrightnessWatcher();
+        var svc = new BrightnessService(bus, settings,
+            queryBrightness: () => 0.5f,
+            setBrightness: _ => true,
+            watcherFactory: () => fakeWatcher);
+
+        svc.BrightnessChanged += level =>
+        {
+            Interlocked.Increment(ref callbackCount);
+            enteredCallback.Set();
+            releaseCallback.Wait();
+        };
+
+        svc.Start();
+
+        // 1. Fire an event on a background thread that will pause inside BrightnessChanged
+        var inFlightTask = Task.Run(() => svc.OnBrightnessArrivedCore(80f));
+
+        // 2. Wait until the in-flight event enters BrightnessChanged
+        Assert(enteredCallback.Wait(TimeSpan.FromSeconds(2)), "In-flight callback entered subscriber");
+
+        // 3. Concurrently invoke Dispose() on the main thread
+        // Dispose() must return without blocking on releaseCallback
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        svc.Dispose();
+        sw.Stop();
+
+        Assert(sw.ElapsedMilliseconds < 500, "Dispose() returned immediately without waiting for in-flight subscriber");
+        Assert(svc.IsDisposed, "Service is disposed");
+        Assert(!svc.IsStarted, "Service is not started");
+
+        // 4. Release the in-flight callback
+        releaseCallback.Set();
+        Assert(inFlightTask.Wait(TimeSpan.FromSeconds(2)), "In-flight task completed");
+
+        // 5. Subsequent events must be dropped: zero state mutation, zero callbacks
+        svc.OnBrightnessArrivedCore(95f);
+        AssertEq(1, Volatile.Read(ref callbackCount), "Zero additional callbacks invoked after Dispose()");
+        AssertEq(0.8f, svc.Level, "Level was not mutated by post-disposal call");
+    }
+
+    private static void TestBrightnessService_PostDisposalSuppression()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+        settings.Update(s => s.FeatureBrightness = true);
+
+        var busEvents = new List<BarEvent>();
+        bus.EventRaised += e =>
+        {
+            if (e.Kind == BarEventKind.Brightness) busEvents.Add(e);
+        };
+
+        int callbacks = 0;
+        var fakeWatcher = new FakeBrightnessWatcher();
+        var svc = new BrightnessService(bus, settings,
+            queryBrightness: () => 0.4f,
+            setBrightness: _ => true,
+            watcherFactory: () => fakeWatcher);
+
+        svc.BrightnessChanged += lvl => callbacks++;
+        svc.Start();
+
+        // Initial event before disposal
+        fakeWatcher.Emit(75f);
+        AssertEq(1, callbacks, "Initial callback fired");
+        AssertEq(1, busEvents.Count, "Initial BarEvent published");
+        AssertEq(0.75f, svc.Level, "Level updated to 0.75");
+
+        svc.Dispose();
+
+        // 1. Event from watcher after disposal
+        fakeWatcher.Emit(90f);
+        AssertEq(1, callbacks, "Zero callbacks after Dispose()");
+        AssertEq(1, busEvents.Count, "Zero BarEvents after Dispose()");
+        AssertEq(0.75f, svc.Level, "Level not mutated after Dispose()");
+
+        // 2. Direct OnBrightnessArrivedCore after disposal
+        svc.OnBrightnessArrivedCore(95f);
+        AssertEq(1, callbacks, "Zero callbacks after direct OnBrightnessArrivedCore post-dispose");
+        AssertEq(1, busEvents.Count, "Zero BarEvents after direct OnBrightnessArrivedCore post-dispose");
+        AssertEq(0.75f, svc.Level, "Level not mutated by OnBrightnessArrivedCore");
+
+        // 3. SetLevel after disposal
+        bool setRes = svc.SetLevel(0.99f);
+        Assert(!setRes, "SetLevel returns false after Dispose()");
+        AssertEq(1, callbacks, "Zero callbacks from SetLevel after Dispose()");
+        AssertEq(0.75f, svc.Level, "Level not mutated from SetLevel");
+    }
+
+    private static void TestBrightnessService_DeduplicationAndThresholds()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+        int callbacks = 0;
+        var svc = new BrightnessService(bus, settings,
+            queryBrightness: () => 0.5f,
+            setBrightness: _ => true,
+            watcherFactory: () => new FakeBrightnessWatcher());
+
+        svc.BrightnessChanged += lvl => callbacks++;
+        svc.Start();
+
+        var t0 = new DateTime(2026, 10, 19, 12, 0, 0, DateTimeKind.Utc);
+
+        // 1. First event succeeds
+        svc.OnBrightnessArrivedCore(60f, t0);
+        AssertEq(1, callbacks, "First event fired");
+        AssertEq(0.6f, svc.Level, "Level 0.6");
+
+        // 2. Event within 40ms debounce window is dropped even with large delta
+        svc.OnBrightnessArrivedCore(80f, t0.AddMilliseconds(20));
+        AssertEq(1, callbacks, "Suppressed by 40ms debounce window");
+        AssertEq(0.6f, svc.Level, "Level unchanged");
+
+        // 3. Event outside 40ms window but with delta < 0.5% is dropped (60.3% vs 60.0% -> delta = 0.3%)
+        svc.OnBrightnessArrivedCore(60.3f, t0.AddMilliseconds(50));
+        AssertEq(1, callbacks, "Suppressed by < 0.5% delta threshold");
+        AssertEq(0.6f, svc.Level, "Level unchanged");
+
+        // 4. Event outside 40ms window with delta >= 0.5% succeeds (62.0% vs 60.0% -> delta = 2.0%)
+        svc.OnBrightnessArrivedCore(62.0f, t0.AddMilliseconds(100));
+        AssertEq(2, callbacks, "Fired after 100ms with >= 0.5% delta");
+        AssertEq(0.62f, svc.Level, "Level updated to 0.62");
+
+        // 5. Negative raw value is dropped
+        svc.OnBrightnessArrivedCore(-5f, t0.AddMilliseconds(200));
+        AssertEq(2, callbacks, "Negative value dropped");
+        svc.Dispose();
+
+        // 6. ExtractBrightnessCore tests
+        AssertEq(85f, BrightnessService.ExtractBrightnessCore(85, null), "Extrinsic property extracted");
+        AssertEq(42f, BrightnessService.ExtractBrightnessCore(null, 42), "Intrinsic TargetInstance property extracted");
+        AssertEq(90f, BrightnessService.ExtractBrightnessCore(90, 30), "Extrinsic takes precedence over intrinsic");
+        AssertEq(-1f, BrightnessService.ExtractBrightnessCore(null, null), "Null properties return -1");
+        AssertEq(-1f, BrightnessService.ExtractBrightnessCore("bad", null), "Unconvertible property returns -1");
+    }
+
+    private static void TestBrightnessService_SetLevelAndBarEvents()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+        settings.Update(s => s.FeatureBrightness = true);
+
+        var busEvents = new List<BarEvent>();
+        bus.EventRaised += e =>
+        {
+            if (e.Kind == BarEventKind.Brightness) busEvents.Add(e);
+        };
+
+        float lastSet = -1;
+        bool shouldSucceed = true;
+        var svc = new BrightnessService(bus, settings,
+            queryBrightness: () => 0.5f,
+            setBrightness: val => { lastSet = val; return shouldSucceed; },
+            watcherFactory: () => new FakeBrightnessWatcher());
+
+        svc.Start();
+
+        // 1. SetLevel within valid range
+        bool ok = svc.SetLevel(0.85f);
+        Assert(ok, "SetLevel succeeds");
+        AssertEq(0.85f, lastSet, "Injected setter received clamped 0.85f");
+        AssertEq(0.85f, svc.Level, "Level updated to 0.85f");
+
+        // 2. SetLevel clamps out of range values
+        svc.SetLevel(1.5f);
+        AssertEq(1.0f, lastSet, "Clamped 1.5 to 1.0f");
+        AssertEq(1.0f, svc.Level, "Level is 1.0f");
+
+        svc.SetLevel(-0.2f);
+        AssertEq(0.0f, lastSet, "Clamped -0.2 to 0.0f");
+        AssertEq(0.0f, svc.Level, "Level is 0.0f");
+
+        // 3. SetLevel failure handling
+        shouldSucceed = false;
+        bool failRes = svc.SetLevel(0.5f);
+        Assert(!failRes, "SetLevel returns false when setter fails");
+        AssertEq(0.0f, svc.Level, "Level not mutated when setter fails");
+        shouldSucceed = true;
+
+        // 4. BarEvent publishing & metadata
+        bus.Dismiss();
+        svc.OnBrightnessArrivedCore(75f, DateTime.UtcNow.AddMilliseconds(50));
+        AssertEq(1, busEvents.Count, "1 BarEvent published");
+        var evt = busEvents[0];
+        AssertEq(BarEventKind.Brightness, evt.Kind, "Kind is Brightness");
+        AssertEq("Brightness", evt.Title, "Title is Brightness");
+        AssertEq("75%", evt.Subtitle, "Subtitle is 75%");
+        AssertEq("75%", evt.ValueText, "ValueText is 75%");
+        AssertEq(0.75f, Convert.ToSingle(evt.Value), "Value is 0.75f");
+        AssertEq(70, evt.Priority, "Priority is 70");
+        AssertEq(TimeSpan.FromSeconds(2.5), evt.DisplayDuration, "Duration is 2.5s");
+        Assert(evt.Preempt, "Preempt is true");
+
+        // 5. Feature toggle suppression
+        bus.Dismiss();
+        settings.Update(s => s.FeatureBrightness = false);
+        svc.OnBrightnessArrivedCore(90f, DateTime.UtcNow.AddSeconds(1));
+        AssertEq(1, busEvents.Count, "Zero new BarEvents when FeatureBrightness is false");
+        AssertEq(0.9f, svc.Level, "Level was still updated when FeatureBrightness is false");
+
+        settings.Update(s => s.FeatureBrightness = true);
+        svc.Dispose();
+    }
+
+    private static void TestBrightnessService_StartVsDisposeRace()
+    {
+        var bus = new EventBus(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+        var settings = SettingsService.Instance;
+        settings.Update(s => s.FeatureBrightness = true);
+
+        using var reachedStartGate = new ManualResetEventSlim(false);
+        using var releaseStartGate = new ManualResetEventSlim(false);
+
+        var fakeWatcher = new FakeBrightnessWatcher();
+        fakeWatcher.OnStart = () =>
+        {
+            reachedStartGate.Set();
+            releaseStartGate.Wait();
+        };
+
+        int callbackCount = 0;
+        var svc = new BrightnessService(bus, settings,
+            queryBrightness: () => 0.5f,
+            setBrightness: _ => true,
+            watcherFactory: () => fakeWatcher);
+
+        svc.BrightnessChanged += lvl => Interlocked.Increment(ref callbackCount);
+
+        // 1. Run Start() on a background task until it enters watcher.Start()
+        var startTask = Task.Run(() => svc.Start());
+        Assert(reachedStartGate.Wait(TimeSpan.FromSeconds(2)), "Start reached watcher startup gate");
+
+        // 2. Concurrently call Dispose() on the main thread while Start() is paused in watcher.Start()
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        svc.Dispose();
+        sw.Stop();
+
+        Assert(sw.ElapsedMilliseconds < 500, "Dispose() returned immediately without deadlock");
+        Assert(svc.IsDisposed, "Service is disposed");
+        Assert(!svc.IsStarted, "Service is not started");
+
+        // 3. Resume startup by releasing the gate
+        releaseStartGate.Set();
+        Assert(startTask.Wait(TimeSpan.FromSeconds(2)), "Start task completed cleanly");
+
+        // 4. Assert watcher was stopped and disposed, no active watcher remains, and is not running
+        Assert(!svc.HasWatcher, "No active watcher retained in service");
+        AssertEq(1, fakeWatcher.StartCount, "Watcher Start() was called once");
+        Assert(fakeWatcher.StopCount >= 1, "Watcher was stopped when Start() detected disposal");
+        AssertEq(1, fakeWatcher.DisposeCount, "Watcher was disposed when Start() detected disposal");
+        Assert(!fakeWatcher.IsStarted, "Watcher is not started");
+
+        // 5. Assert post-disposal callbacks and state mutations are suppressed
+        fakeWatcher.Emit(90f);
+        svc.OnBrightnessArrivedCore(90f);
+        AssertEq(0.5f, svc.Level, "Level not mutated after disposal");
+        AssertEq(0, Volatile.Read(ref callbackCount), "Zero callbacks invoked after disposal");
     }
 }

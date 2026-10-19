@@ -6,6 +6,91 @@ using WindowsDynamicBar.Services.Settings;
 
 namespace WindowsDynamicBar.Services.Audio;
 
+internal interface IBrightnessWatcher : IDisposable
+{
+    event Action<float>? BrightnessArrived;
+    void Start();
+    void Stop();
+}
+
+internal sealed class WmiBrightnessWatcher : IBrightnessWatcher
+{
+    private ManagementEventWatcher? _watcher;
+    public event Action<float>? BrightnessArrived;
+
+    public void Start()
+    {
+        var scope = new ManagementScope(@"\\.\root\wmi");
+        scope.Connect();
+
+        try
+        {
+            var query = new WqlEventQuery("SELECT * FROM WmiMonitorBrightnessEvent");
+            var w = new ManagementEventWatcher(scope, query);
+            try
+            {
+                w.EventArrived += OnEventArrived;
+                w.Start();
+                _watcher = w;
+                Log.Info("Brightness service started (instant ACPI events)");
+                return;
+            }
+            catch
+            {
+                try { w.EventArrived -= OnEventArrived; w.Dispose(); } catch { }
+                throw;
+            }
+        }
+        catch
+        {
+            var query = new WqlEventQuery(
+                "SELECT * FROM __InstanceModificationEvent WITHIN 1 WHERE TargetInstance ISA 'WmiMonitorBrightness'");
+            var w = new ManagementEventWatcher(scope, query);
+            try
+            {
+                w.EventArrived += OnEventArrived;
+                w.Start();
+                _watcher = w;
+                Log.Info("Brightness service started (polling fallback)");
+            }
+            catch
+            {
+                try { w.EventArrived -= OnEventArrived; w.Dispose(); } catch { }
+                throw;
+            }
+        }
+    }
+
+    private void OnEventArrived(object sender, EventArrivedEventArgs e)
+    {
+        float val = BrightnessService.ExtractBrightnessValue(e.NewEvent);
+        if (val >= 0)
+        {
+            BrightnessArrived?.Invoke(val);
+        }
+    }
+
+    public void Stop()
+    {
+        if (_watcher is not null)
+        {
+            try
+            {
+                _watcher.EventArrived -= OnEventArrived;
+                _watcher.Stop();
+            }
+            catch { }
+        }
+    }
+
+    public void Dispose()
+    {
+        Stop();
+        try { _watcher?.Dispose(); } catch { }
+        _watcher = null;
+    }
+}
+
 /// <summary>
 /// Brightness via WMI (WmiMonitorBrightnessEvent / WmiMonitorBrightnessMethods).
 /// LIMITATION (documented): this API only controls internal laptop panels / monitors
@@ -16,96 +101,193 @@ public sealed class BrightnessService : IDisposable
 {
     private readonly EventBus _bus;
     private readonly SettingsService _settings;
-    private ManagementEventWatcher? _watcher;
+    private readonly Func<float> _queryBrightness;
+    private readonly Func<float, bool> _setBrightness;
+    private readonly Func<IBrightnessWatcher> _watcherFactory;
+    private readonly object _sync = new();
+
+    private IBrightnessWatcher? _watcher;
     private float _lastValue = -1;
     private DateTime _lastEvent = DateTime.MinValue;
-
-    public bool IsAvailable { get; private set; }
-    public float Level { get; private set; }
+    private float _level;
+    private bool _isAvailable;
+    private bool _started;
+    private bool _disposed;
 
     public event Action<float>? BrightnessChanged;
 
+    public bool IsAvailable
+    {
+        get { lock (_sync) return _isAvailable; }
+    }
+
+    public float Level
+    {
+        get { lock (_sync) return _level; }
+    }
+
+    public bool IsStarted
+    {
+        get { lock (_sync) return _started; }
+    }
+
+    public bool IsDisposed
+    {
+        get { lock (_sync) return _disposed; }
+    }
+
+    internal bool HasWatcher
+    {
+        get { lock (_sync) return _watcher is not null; }
+    }
+
     public BrightnessService(EventBus bus, SettingsService settings)
+        : this(bus, settings, queryBrightness: null, setBrightness: null, watcherFactory: null)
+    {
+    }
+
+    internal BrightnessService(
+        EventBus bus,
+        SettingsService settings,
+        Func<float>? queryBrightness,
+        Func<float, bool>? setBrightness,
+        Func<IBrightnessWatcher>? watcherFactory)
     {
         _bus = bus;
         _settings = settings;
+        _queryBrightness = queryBrightness ?? QueryBrightness;
+        _setBrightness = setBrightness ?? SetLevelWmi;
+        _watcherFactory = watcherFactory ?? (() => new WmiBrightnessWatcher());
     }
 
     public void Start()
     {
+        lock (_sync)
+        {
+            if (_disposed || _started) return;
+            _started = true;
+        }
+
+        IBrightnessWatcher? watcher = null;
         try
         {
-            Level = QueryBrightness();
-            IsAvailable = Level >= 0;
-            if (!IsAvailable)
+            float initial = _queryBrightness();
+            bool available = initial >= 0;
+
+            lock (_sync)
             {
-                Log.Info("Brightness API not available on this display");
-                return;
+                if (_disposed) return;
+                _level = initial >= 0 ? initial : 0;
+                _lastValue = initial >= 0 ? initial * 100f : -1;
+                _isAvailable = available;
+                if (!_isAvailable)
+                {
+                    _started = false;
+                    Log.Info("Brightness API not available on this display");
+                    return;
+                }
             }
 
-            var scope = new ManagementScope(@"\\.\root\wmi");
-            scope.Connect();
+            watcher = _watcherFactory();
+            watcher.BrightnessArrived += OnBrightnessArrived;
 
-            // Try the native WmiMonitorBrightnessEvent first: fired directly by the ACPI display driver
-            // with 0 delay (no polling loop).
-            try
+            lock (_sync)
             {
-                var query = new WqlEventQuery("SELECT * FROM WmiMonitorBrightnessEvent");
-                _watcher = new ManagementEventWatcher(scope, query);
-                _watcher.EventArrived += OnBrightnessEvent;
-                _watcher.Start();
-                Log.Info("Brightness service started (instant ACPI events)", ("level", Level));
+                if (_disposed)
+                {
+                    CleanupWatcher(watcher);
+                    return;
+                }
             }
-            catch
+
+            watcher.Start();
+
+            lock (_sync)
             {
-                // Fallback to intrinsic modification polling if driver does not support extrinsic event
-                var query = new WqlEventQuery(
-                    "SELECT * FROM __InstanceModificationEvent WITHIN 1 WHERE TargetInstance ISA 'WmiMonitorBrightness'");
-                _watcher = new ManagementEventWatcher(scope, query);
-                _watcher.EventArrived += OnBrightnessEvent;
-                _watcher.Start();
-                Log.Info("Brightness service started (polling fallback)", ("level", Level));
+                if (_disposed)
+                {
+                    CleanupWatcher(watcher);
+                    return;
+                }
+                _watcher = watcher;
             }
+
+            Log.Info("Brightness service started", ("level", Level));
         }
         catch (Exception ex)
         {
-            IsAvailable = false;
+            lock (_sync)
+            {
+                _started = false;
+                _isAvailable = false;
+                _watcher = null;
+            }
+            CleanupWatcher(watcher);
             Log.Info("Brightness unavailable", ("reason", ex.Message));
         }
     }
 
-    private void OnBrightnessEvent(object sender, EventArrivedEventArgs e)
+    private void OnBrightnessArrived(float value) => OnBrightnessArrivedCore(value, null);
+
+    internal void OnBrightnessArrivedCore(float value, DateTime? nowUtc = null)
     {
         try
         {
-            float value = -1;
-            // Native WmiMonitorBrightnessEvent carries Brightness directly
-            if (e.NewEvent.Properties["Brightness"]?.Value is not null)
-            {
-                value = Convert.ToSingle(e.NewEvent["Brightness"]);
-            }
-            // Fallback modification event carries TargetInstance["CurrentBrightness"]
-            else if (e.NewEvent["TargetInstance"] is ManagementBaseObject target)
-            {
-                value = Convert.ToSingle(target["CurrentBrightness"] ?? -1);
-            }
-
             if (value < 0) return;
 
-            var now = DateTime.UtcNow;
-            if (now - _lastEvent < TimeSpan.FromMilliseconds(40) || Math.Abs(value - _lastValue) < 0.5f) return;
-            _lastEvent = now;
-            _lastValue = value;
-            Level = value / 100f;
-            BrightnessChanged?.Invoke(Level);
+            Action<float>? notify = null;
+            BarEvent? eventToRaise = null;
+            float levelToNotify = 0;
 
-            if (!_settings.Current.FeatureBrightness) return;
-            string text = $"{Math.Round(value)}%";
-            _bus.Raise(BarEvent.Create(BarEventKind.Brightness, "Brightness", text,
-                value: Level, valueText: text, priority: 70,
-                displayDuration: TimeSpan.FromSeconds(2.5), preempt: true));
+            lock (_sync)
+            {
+                if (_disposed) return;
+
+                var now = nowUtc ?? DateTime.UtcNow;
+                if (now - _lastEvent < TimeSpan.FromMilliseconds(40) || Math.Abs(value - _lastValue) < 0.5f)
+                    return;
+
+                _lastEvent = now;
+                _lastValue = value;
+                _level = Math.Clamp(value / 100f, 0f, 1f);
+                _isAvailable = true;
+                levelToNotify = _level;
+                notify = BrightnessChanged;
+
+                if (_settings.Current.FeatureBrightness)
+                {
+                    eventToRaise = CreateBarEvent(_level, value);
+                }
+            }
+
+            // Gated dispatch outside locks
+            lock (_sync)
+            {
+                if (_disposed) return;
+            }
+            notify?.Invoke(levelToNotify);
+
+            if (eventToRaise is not null)
+            {
+                lock (_sync)
+                {
+                    if (_disposed) return;
+                }
+                _bus.Raise(eventToRaise);
+            }
         }
-        catch (Exception ex) { Log.Debug("Brightness event error", ("error", ex.Message)); }
+        catch (Exception ex)
+        {
+            Log.Debug("Brightness event error", ("error", ex.Message));
+        }
+    }
+
+    internal static BarEvent CreateBarEvent(float level, float rawValue)
+    {
+        string text = $"{Math.Round(rawValue)}%";
+        return BarEvent.Create(BarEventKind.Brightness, "Brightness", text,
+            value: level, valueText: text, priority: 70,
+            displayDuration: TimeSpan.FromSeconds(2.5), preempt: true);
     }
 
     public static float QueryBrightness()
@@ -124,7 +306,7 @@ public sealed class BrightnessService : IDisposable
         return -1;
     }
 
-    public bool SetLevel(float level01)
+    internal static bool SetLevelWmi(float level01)
     {
         try
         {
@@ -141,7 +323,6 @@ public sealed class BrightnessService : IDisposable
                     ok = true;
                 }
             }
-            if (ok) { Level = level01; BrightnessChanged?.Invoke(Level); }
             return ok;
         }
         catch (Exception ex)
@@ -151,8 +332,113 @@ public sealed class BrightnessService : IDisposable
         }
     }
 
+    public bool SetLevel(float level01)
+    {
+        lock (_sync)
+        {
+            if (_disposed) return false;
+        }
+
+        float clamped = Math.Clamp(level01, 0f, 1f);
+        bool ok = _setBrightness(clamped);
+        if (!ok) return false;
+
+        Action<float>? notify = null;
+        lock (_sync)
+        {
+            if (_disposed) return false;
+            _level = clamped;
+            _lastValue = clamped * 100f;
+            _lastEvent = DateTime.UtcNow;
+            _isAvailable = true;
+            notify = BrightnessChanged;
+        }
+
+        lock (_sync)
+        {
+            if (_disposed) return ok;
+        }
+        notify?.Invoke(clamped);
+        return ok;
+    }
+
+    internal static float ExtractBrightnessCore(object? brightnessProp, object? targetCurrentBrightnessProp)
+    {
+        try
+        {
+            if (brightnessProp is not null)
+            {
+                return Convert.ToSingle(brightnessProp);
+            }
+            if (targetCurrentBrightnessProp is not null)
+            {
+                return Convert.ToSingle(targetCurrentBrightnessProp);
+            }
+        }
+        catch { }
+        return -1;
+    }
+
+    internal static float ExtractBrightnessValue(ManagementBaseObject? newEvent)
+    {
+        if (newEvent is null) return -1;
+        try
+        {
+            object? brightness = null;
+            try
+            {
+                if (newEvent.Properties["Brightness"]?.Value is not null)
+                {
+                    brightness = newEvent["Brightness"];
+                }
+            }
+            catch { }
+
+            object? targetProp = null;
+            try
+            {
+                if (newEvent["TargetInstance"] is ManagementBaseObject target)
+                {
+                    targetProp = target["CurrentBrightness"];
+                }
+            }
+            catch { }
+
+            return ExtractBrightnessCore(brightness, targetProp);
+        }
+        catch { }
+        return -1;
+    }
+
     public void Dispose()
     {
-        try { _watcher?.Stop(); _watcher?.Dispose(); } catch { }
+        IBrightnessWatcher? watcherToDispose;
+
+        lock (_sync)
+        {
+            if (_disposed) return;
+            _disposed = true;
+            _started = false;
+
+            watcherToDispose = _watcher;
+            _watcher = null;
+        }
+
+        CleanupWatcher(watcherToDispose);
+    }
+
+    private void CleanupWatcher(IBrightnessWatcher? watcher)
+    {
+        if (watcher is null) return;
+        try
+        {
+            watcher.BrightnessArrived -= OnBrightnessArrived;
+            watcher.Stop();
+            watcher.Dispose();
+        }
+        catch (Exception ex)
+        {
+            Log.Debug("Error disposing brightness watcher", ("error", ex.Message));
+        }
     }
 }
