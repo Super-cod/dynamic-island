@@ -2,7 +2,7 @@
 
 **A modern, lightweight Dynamic-Island-style overlay for Windows 10 and Windows 11 with a living desktop companion.**
 
-[![Version](https://img.shields.io/badge/version-1.1.0-0A84FF.svg)](https://github.com/Super-cod/dynamic-island/releases)
+[![Version](https://img.shields.io/badge/version-1.1.0-0A84FF.svg)](CHANGELOG.md)
 [![Runtime](https://img.shields.io/badge/.NET-8.0-512BD4.svg)](https://dotnet.microsoft.com/)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011%20x64-0078D4.svg)](https://microsoft.com/windows)
 [![Licence](https://img.shields.io/badge/licence-Source--Available%20Non--Commercial-orange.svg)](LICENSE.md)
@@ -124,24 +124,24 @@ Press <kbd>Ctrl</kbd> + <kbd>Space</kbd> to open the search bar, then type any o
 
 ---
 
-## Download & Installation
+## Install & Run
 
-Windows Dynamic Bar is distributed for **64-bit Windows** and does not require administrative privileges.
+Windows Dynamic Bar targets **64-bit Windows 10/11** and does not require administrative privileges.
 
-### Option 1: Installer (Recommended for Most Users)
+> **Status:** no prebuilt installer is published on the Releases page yet. Build it from source (Option 1) or use the `island` command (Option 2). `build-release.ps1` can produce a per-user installer and a portable zip locally, as described below.
 
-1. Download **`WindowsDynamicBar-Setup.exe`** from the [Releases page](https://github.com/Super-cod/dynamic-island/releases).
-2. Run the installer. It installs per-user into your local app directory (no admin prompt required).
-3. Choose whether to start Windows Dynamic Bar with Windows and create a desktop shortcut.
-4. Click **Finish** to launch the app.
+### Option 1: Build and run from source
 
-### Option 2: Portable Zip (No Installation Required)
+```powershell
+git clone https://github.com/Super-cod/dynamic-island.git
+cd dynamic-island
+dotnet build src/WindowsDynamicBar/WindowsDynamicBar.csproj -c Release
+dotnet run --project src/WindowsDynamicBar/WindowsDynamicBar.csproj -c Release
+```
 
-1. Download **`WindowsDynamicBar-Portable-win-x64.zip`** from [Releases](https://github.com/Super-cod/dynamic-island/releases).
-2. Extract the archive into a folder of your choice (e.g. `C:\Tools\WindowsDynamicBar`).
-3. Run **`WindowsDynamicBar.exe`**.
+Requires the .NET 8 SDK (see Developer Setup below).
 
-### Option 3: Terminal Command (`island`) (For Developers & Power Users)
+### Option 2: Terminal command (`island`)
 
 You can manage, rebuild, and run Windows Dynamic Bar directly from your terminal using the built-in PowerShell CLI command named **`island`**.
 
@@ -219,14 +219,14 @@ cd dynamic-island
 # Build project in Release configuration
 dotnet build src/WindowsDynamicBar/WindowsDynamicBar.csproj -c Release
 
-# Run automated test suite (150+ passing tests across Buddy, Audio, System, and Telemetry)
+# Run the automated test suite (190 tests pass as of this commit)
 dotnet run --project tests/WindowsDynamicBar.Tests/WindowsDynamicBar.Tests.csproj -c Release --no-build
 ```
 
 ### 3. Generate Release Packages
 Run the automated packaging script to build self-contained executables, compile the Inno Setup installer, and output SHA-256 checksums:
 ```powershell
-.uild-release.ps1
+.\build-release.ps1
 ```
 Resulting distributable artifacts will be generated in the `release/` directory:
 - `release/WindowsDynamicBar-Setup.exe` (per-user installer)
