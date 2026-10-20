@@ -7,6 +7,7 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using WindowsDynamicBar.Core.Logging;
 using WindowsDynamicBar.Core.Search;
+using WindowsDynamicBar.Interop;
 
 namespace WindowsDynamicBar.Services.Search;
 
@@ -93,22 +94,22 @@ public sealed class WindowSwitcherService
         var names = new Dictionary<uint, (string Name, string? Path)>();
         var title = new StringBuilder(512);
         int order = 0;
-        EnumWindows((hwnd, _) =>
+        NativeMethods.EnumWindows((hwnd, _) =>
         {
             if (token.IsCancellationRequested) return false;
-            if (!IsWindowVisible(hwnd)) return true;
-            int len = GetWindowTextLength(hwnd);
+            if (!NativeMethods.IsWindowVisible(hwnd)) return true;
+            int len = NativeMethods.GetWindowTextLength(hwnd);
             if (len == 0) return true;
-            long ex = GetWindowLongPtr(hwnd, GWL_EXSTYLE).ToInt64();
-            if ((ex & WS_EX_TOOLWINDOW) != 0) return true;
-            if (GetWindow(hwnd, GW_OWNER) != IntPtr.Zero && (ex & WS_EX_APPWINDOW) == 0) return true;
-            if (DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, out int cloaked, sizeof(int)) == 0 && cloaked != 0) return true;
-            GetWindowThreadProcessId(hwnd, out uint pid);
+            long ex = NativeMethods.GetWindowLongPtr(hwnd, NativeMethods.GWL_EXSTYLE).ToInt64();
+            if ((ex & NativeMethods.WS_EX_TOOLWINDOW) != 0) return true;
+            if (NativeMethods.GetWindow(hwnd, NativeMethods.GW_OWNER) != IntPtr.Zero && (ex & NativeMethods.WS_EX_APPWINDOW) == 0) return true;
+            if (NativeMethods.DwmGetWindowAttribute(hwnd, NativeMethods.DWMWA_CLOAKED, out int cloaked, sizeof(int)) == 0 && cloaked != 0) return true;
+            NativeMethods.GetWindowThreadProcessId(hwnd, out uint pid);
             if (pid == ownPid) return true;
 
             title.Clear();
             title.EnsureCapacity(len + 1);
-            GetWindowText(hwnd, title, title.Capacity);
+            NativeMethods.GetWindowText(hwnd, title, title.Capacity);
             string text = title.ToString();
             if (text.Length == 0 || text is "Program Manager") return true;
 
@@ -125,23 +126,23 @@ public sealed class WindowSwitcherService
 
     private static (string Name, string? Path) ProcessInfo(uint pid)
     {
-        IntPtr h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+        IntPtr h = NativeMethods.OpenProcess(NativeMethods.PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
         if (h == IntPtr.Zero) return ("", null);
         try
         {
             var sb = new StringBuilder(1024);
             int size = sb.Capacity;
-            if (!QueryFullProcessImageName(h, 0, sb, ref size)) return ("", null);
+            if (!NativeMethods.QueryFullProcessImageName(h, 0, sb, ref size)) return ("", null);
             string path = sb.ToString();
             return (Path.GetFileNameWithoutExtension(path), path);
         }
-        finally { CloseHandle(h); }
+        finally { NativeMethods.CloseHandle(h); }
     }
 
     private static ImageSource? LoadIcon(string exePath)
     {
-        var info = new SHFILEINFO();
-        IntPtr ok = SHGetFileInfo(exePath, 0, ref info, (uint)Marshal.SizeOf<SHFILEINFO>(), SHGFI_ICON | SHGFI_LARGEICON);
+        var info = new NativeMethods.SHFILEINFO();
+        IntPtr ok = NativeMethods.SHGetFileInfo(exePath, 0, ref info, (uint)Marshal.SizeOf<NativeMethods.SHFILEINFO>(), NativeMethods.SHGFI_ICON | NativeMethods.SHGFI_LARGEICON);
         if (ok == IntPtr.Zero || info.hIcon == IntPtr.Zero) return null;
         try
         {
@@ -155,45 +156,6 @@ public sealed class WindowSwitcherService
             Log.Debug("Window icon conversion failed", ("error", ex.GetType().Name));
             return null;
         }
-        finally { DestroyIcon(info.hIcon); }   // the managed copy is independent of the HICON
+        finally { NativeMethods.DestroyIcon(info.hIcon); }   // the managed copy is independent of the HICON
     }
-
-    // ------------------------------------------------------------------ Win32
-
-    private delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
-
-    private const int GWL_EXSTYLE = -20;
-    private const long WS_EX_TOOLWINDOW = 0x00000080;
-    private const long WS_EX_APPWINDOW = 0x00040000;
-    private const uint GW_OWNER = 4;
-    private const int DWMWA_CLOAKED = 14;
-    private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
-    private const uint SHGFI_ICON = 0x100;
-    private const uint SHGFI_LARGEICON = 0x0;
-
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    private struct SHFILEINFO
-    {
-        public IntPtr hIcon;
-        public int iIcon;
-        public uint dwAttributes;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string szDisplayName;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 80)] public string szTypeName;
-    }
-
-    [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc cb, IntPtr lParam);
-    [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hWnd);
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowTextLength(IntPtr hWnd);
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr hWnd, StringBuilder s, int n);
-    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")] private static extern IntPtr GetWindowLongPtr(IntPtr hWnd, int index);
-    [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr hWnd, uint cmd);
-    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
-    [DllImport("dwmapi.dll")] private static extern int DwmGetWindowAttribute(IntPtr hwnd, int attr, out int value, int size);
-    [DllImport("kernel32.dll")] private static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
-    [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr h);
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
-    private static extern bool QueryFullProcessImageName(IntPtr h, int flags, StringBuilder name, ref int size);
-    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
-    private static extern IntPtr SHGetFileInfo(string path, uint attrs, ref SHFILEINFO info, uint size, uint flags);
-    [DllImport("user32.dll")] private static extern bool DestroyIcon(IntPtr hIcon);
 }

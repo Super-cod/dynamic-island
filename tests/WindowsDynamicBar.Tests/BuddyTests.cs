@@ -173,15 +173,23 @@ internal static partial class Program
         bool pet1 = behavior.Pet(now);
         Assert(pet1, "First pet succeeded");
 
-        // Rapid pet within 1 second
-        Assert(!behavior.CanPet(now.AddSeconds(1.0)), "Rapid pet blocked by cooldown");
-        bool pet2 = behavior.Pet(now.AddSeconds(1.0));
+        // Rapid pet within 1 second cooldown
+        Assert(!behavior.CanPet(now.AddSeconds(0.5)), "Rapid pet blocked by cooldown");
+        bool pet2 = behavior.Pet(now.AddSeconds(0.5));
         Assert(!pet2, "Rapid pet rejected");
+
+        // Pet after 1 second cooldown
+        Assert(behavior.CanPet(now.AddSeconds(1.0)), "Pet allowed after 1 second");
+        bool pet3 = behavior.Pet(now.AddSeconds(1.0));
+        Assert(pet3, "Pet after cooldown succeeded");
+
+        // Subsequent rapid pet within 1 second
+        Assert(!behavior.CanPet(now.AddSeconds(1.5)), "Second rapid pet blocked");
 
         // Pet after 3 seconds
         Assert(behavior.CanPet(now.AddSeconds(3.0)), "Pet allowed after 3 seconds");
-        bool pet3 = behavior.Pet(now.AddSeconds(3.0));
-        Assert(pet3, "Pet after cooldown succeeded");
+        bool pet4 = behavior.Pet(now.AddSeconds(3.0));
+        Assert(pet4, "Pet after 3 seconds succeeded");
     }
 
     private static void TestBuddyPersonalities()

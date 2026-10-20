@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using System.Threading;
 using System.Windows.Media;
 using Windows.Media.Control;
 using Windows.Storage.Streams;
@@ -47,20 +48,86 @@ public sealed class MediaService : IDisposable
     private MediaInfo? _lastEmitted;
     private string? _userSelectedAppId;
     private bool _started;
+    private bool _disposed;
+    private long _startGeneration;
+    private bool _managerSubscribed;
+    private readonly object _lifecycleLock = new();
+    private Task? _startTask;
+    private CancellationTokenSource? _startCts;
+
+    /// <summary>Test seam: override SMTC manager request to test lifecycle transitions deterministically.</summary>
+    internal static Func<CancellationToken, Task<GlobalSystemMediaTransportControlsSessionManager?>>? ManagerRequesterForTesting { get; set; }
+
+    /// <summary>Test seam: invoked right before acquiring the lifecycle lock after manager acquisition to simulate races.</summary>
+    internal static Action? BeforeStartupLockAcquiredForTesting { get; set; }
+
+    /// <summary>Test seam: invoked when manager event handlers are subscribed.</summary>
+    internal static Action? OnManagerSubscribedForTesting { get; set; }
+
+    /// <summary>Test seam: invoked when manager event handlers are unsubscribed.</summary>
+    internal static Action? OnManagerUnsubscribedForTesting { get; set; }
+
+    /// <summary>Test seam: override DataReader.LoadAsync to test pending read operations and deferred cleanup deterministically.</summary>
+    internal static Func<DataReader, IRandomAccessStreamWithContentType, uint, Windows.Foundation.IAsyncOperation<uint>>? LoadOperationProviderForTesting { get; set; }
+
+    internal void SetStartedForTesting(bool started)
+    {
+        lock (_lifecycleLock)
+        {
+            _started = started;
+        }
+    }
+
+    internal bool IsDisposedForTesting
+    {
+        get
+        {
+            lock (_lifecycleLock) return _disposed;
+        }
+    }
+
+    internal bool HasManagerForTesting
+    {
+        get
+        {
+            lock (_lifecycleLock) return _manager is not null;
+        }
+    }
+
+    internal bool HasManagerSubscriptionsForTesting
+    {
+        get
+        {
+            lock (_lifecycleLock) return _managerSubscribed;
+        }
+    }
 
     public event Action<MediaInfo>? MediaChanged;
 
-    public MediaInfo? Current => _lastEmitted;
+    public MediaInfo? Current
+    {
+        get
+        {
+            lock (_lifecycleLock)
+            {
+                return _disposed ? null : _lastEmitted;
+            }
+        }
+    }
 
     public bool IsPlaying
     {
         get
         {
-            if (!_started) return false;
+            lock (_lifecycleLock)
+            {
+                if (!_started || _disposed) return false;
+            }
             if (_lastEmitted is { IsPlaying: true }) return true;
             try
             {
-                if (_current?.GetPlaybackInfo()?.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
+                var cur = _current;
+                if (cur?.GetPlaybackInfo()?.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
                     return true;
                 var sessions = GetSessions();
                 foreach (var s in sessions)
@@ -80,45 +147,162 @@ public sealed class MediaService : IDisposable
 
     public string? CurrentAppId => _current?.SourceAppUserModelId;
 
-    public bool IsRunning => _started;
+    public bool IsRunning
+    {
+        get
+        {
+            lock (_lifecycleLock)
+            {
+                return _started && !_disposed;
+            }
+        }
+    }
 
     /// <summary>Music feature switched off: drop the session hooks and the poll.</summary>
     public void Stop()
     {
-        if (!_started) return;
-        _started = false;
-        if (_manager is not null)
+        CancellationTokenSource? ctsToCancel;
+        GlobalSystemMediaTransportControlsSessionManager? mgr;
+        lock (_lifecycleLock)
         {
-            _manager.SessionsChanged -= OnSessionsChanged;
-            _manager.CurrentSessionChanged -= OnCurrentSessionChanged;
+            if (_disposed) return;
+
+            // Invalidate in-flight startup generation so any returning StartCoreAsync aborts immediately
+            _startGeneration++;
+
+            ctsToCancel = _startCts;
+            _startCts = null;
+            _startTask = null;
+            mgr = _manager;
+            _manager = null;
+            bool wasStarted = _started;
+            _started = false;
+
+            if (mgr is not null)
+            {
+                try
+                {
+                    mgr.SessionsChanged -= OnSessionsChanged;
+                    mgr.CurrentSessionChanged -= OnCurrentSessionChanged;
+                    _managerSubscribed = false;
+                    OnManagerUnsubscribedForTesting?.Invoke();
+                }
+                catch (Exception ex)
+                {
+                    Log.Debug("Error unhooking SMTC manager", ("error", ex.Message));
+                }
+            }
+
+            HookSession(null, immediate: true, suppressEvent: false);
         }
-        HookSession(null, immediate: true);   // unhooks the session, stops the poll, emits "no media"
-        _manager = null;
+
+        ctsToCancel?.Cancel();
+        ctsToCancel?.Dispose();
     }
 
     public MediaService(EventBus bus) => _bus = bus;
 
-    public async Task StartAsync()
+    public Task StartAsync()
     {
-        if (_started) return;
+        lock (_lifecycleLock)
+        {
+            if (_disposed || _started) return Task.CompletedTask;
+            if (_startTask is not null) return _startTask;
+
+            long generation = ++_startGeneration;
+            _startCts = new CancellationTokenSource();
+            var task = StartCoreAsync(generation, _startCts);
+            if (generation == _startGeneration && !task.IsCompleted)
+            {
+                _startTask = task;
+            }
+            return task;
+        }
+    }
+
+    private async Task StartCoreAsync(long generation, CancellationTokenSource cts)
+    {
+        var token = cts.Token;
         try
         {
-            _manager = await GlobalSystemMediaTransportControlsSessionManager.RequestAsync();
-            _manager.SessionsChanged += OnSessionsChanged;
-            _manager.CurrentSessionChanged += OnCurrentSessionChanged;
-            HookSession(PickBestSession());
-            _started = true;
-            Log.Info("Media service started");
+            GlobalSystemMediaTransportControlsSessionManager? manager = null;
+            try
+            {
+                if (ManagerRequesterForTesting is not null)
+                {
+                    manager = await ManagerRequesterForTesting(token);
+                }
+                else
+                {
+                    manager = await GlobalSystemMediaTransportControlsSessionManager.RequestAsync().AsTask(token);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                Log.Warning("SMTC unavailable", ("error", ex.Message));
+                return;
+            }
+
+            BeforeStartupLockAcquiredForTesting?.Invoke();
+
+            lock (_lifecycleLock)
+            {
+                if (_disposed || generation != _startGeneration || token.IsCancellationRequested)
+                {
+                    return;
+                }
+
+                if (manager is null)
+                {
+                    Log.Warning("SMTC unavailable (null manager)");
+                    return;
+                }
+
+                _manager = manager;
+                try
+                {
+                    _manager.SessionsChanged += OnSessionsChanged;
+                    _manager.CurrentSessionChanged += OnCurrentSessionChanged;
+                    _managerSubscribed = true;
+                    OnManagerSubscribedForTesting?.Invoke();
+                }
+                catch (Exception ex)
+                {
+                    Log.Warning("Failed to subscribe to SMTC manager events", ("error", ex.Message));
+                }
+
+                HookSession(PickBestSession());
+                _started = true;
+                Log.Info("Media service started");
+            }
         }
-        catch (Exception ex)
+        finally
         {
-            Log.Warning("SMTC unavailable", ("error", ex.Message));
+            CancellationTokenSource? ctsToDispose = null;
+            lock (_lifecycleLock)
+            {
+                if (generation == _startGeneration)
+                {
+                    _startTask = null;
+                    ctsToDispose = _startCts;
+                    _startCts = null;
+                }
+            }
+            ctsToDispose?.Dispose();
         }
     }
 
     private void OnCurrentSessionChanged(GlobalSystemMediaTransportControlsSessionManager sender,
         CurrentSessionChangedEventArgs args)
     {
+        lock (_lifecycleLock)
+        {
+            if (!_started || _disposed) return;
+        }
         HookSession(PickBestSession());
     }
 
@@ -180,29 +364,41 @@ public sealed class MediaService : IDisposable
     private void OnSessionsChanged(GlobalSystemMediaTransportControlsSessionManager sender,
         SessionsChangedEventArgs args)
     {
+        lock (_lifecycleLock)
+        {
+            if (!_started || _disposed) return;
+        }
         HookSession(PickBestSession());
     }
 
-    private void HookSession(GlobalSystemMediaTransportControlsSession? session, bool immediate = false)
+    private void HookSession(GlobalSystemMediaTransportControlsSession? session, bool immediate = false, bool suppressEvent = false)
     {
         if (_current is not null)
         {
-            _current.MediaPropertiesChanged -= OnMediaProperties;
-            _current.PlaybackInfoChanged -= OnPlaybackInfo;
-            _current.TimelinePropertiesChanged -= OnTimeline;
+            try
+            {
+                _current.MediaPropertiesChanged -= OnMediaProperties;
+                _current.PlaybackInfoChanged -= OnPlaybackInfo;
+                _current.TimelinePropertiesChanged -= OnTimeline;
+            }
+            catch (Exception ex)
+            {
+                Log.Debug("Error unhooking session", ("error", ex.Message));
+            }
         }
         _current = session;
         int token = Interlocked.Increment(ref _noMediaToken);   // a new session cancels a pending "no media"
         if (_current is null)
         {
             _timelineTimer?.Stop();
+            if (suppressEvent) return;
             if (immediate || _lastEmitted is null || string.IsNullOrEmpty(_lastEmitted.AppId)) { ClearToNoMedia(); return; }
             // Chrome drops and recreates its media session between YouTube videos. Keep the current
             // track (and the previous-artwork memory) through that gap; only a lasting gap is "no media".
             MediaTrace("session gone, waiting");
             _ = Task.Delay(SessionGapGrace).ContinueWith(_ =>
             {
-                if (token == Volatile.Read(ref _noMediaToken) && _current is null) ClearToNoMedia();
+                if (token == Volatile.Read(ref _noMediaToken) && _current is null && !_disposed) ClearToNoMedia();
             }, TaskScheduler.Default);
             return;
         }
@@ -224,23 +420,34 @@ public sealed class MediaService : IDisposable
     }
 
     private async void OnMediaProperties(GlobalSystemMediaTransportControlsSession s, MediaPropertiesChangedEventArgs e)
-        => await RefreshAsync(showEvent: true);
+    {
+        if (_disposed || !_started) return;
+        await RefreshAsync(showEvent: true);
+    }
 
     private async void OnPlaybackInfo(GlobalSystemMediaTransportControlsSession s, PlaybackInfoChangedEventArgs e)
-        => await RefreshAsync(showEvent: false);
+    {
+        if (_disposed || !_started) return;
+        await RefreshAsync(showEvent: false);
+    }
 
     private async void OnTimeline(GlobalSystemMediaTransportControlsSession s, TimelinePropertiesChangedEventArgs e)
-        => await RefreshAsync(showEvent: false);
+    {
+        if (_disposed || !_started) return;
+        await RefreshAsync(showEvent: false);
+    }
 
     private void StartTimelineTimer()
     {
         // Safety-net poll for apps that do not raise timeline/playback events (e.g. browsers).
         // The UI extrapolates the position itself, so only real changes are forwarded.
+        if (_disposed) return;
         _timelineTimer ??= new DispatcherTimerRef();
         _timelineTimer.Start(TimeSpan.FromSeconds(1), async () =>
         {
             try
             {
+                if (_disposed || !_started) return;
                 if (_manager is not null)
                 {
                     var best = PickBestSession();
@@ -257,9 +464,9 @@ public sealed class MediaService : IDisposable
                         catch { }
                     }
                 }
-                if (_current is null) return;
+                if (_current is null || _disposed || !_started) return;
                 var info = await BuildInfoAsync();
-                if (info is null || !IsMeaningfulChange(_lastEmitted, info)) return;
+                if (info is null || _disposed || !IsMeaningfulChange(_lastEmitted, info)) return;
                 Emit(info);
             }
             catch (Exception ex)
@@ -271,16 +478,17 @@ public sealed class MediaService : IDisposable
 
     public async Task RefreshAsync(bool showEvent, bool force = false)
     {
+        if (_disposed) return;
         try
         {
             var info = await BuildInfoAsync();
-            if (info is null) return;
+            if (info is null || _disposed) return;
             Emit(info);
 
             string key = $"{info.Title}|{info.Artist}|{info.AppId}";
             bool trackChanged = key != _lastKey;
             _lastKey = key;
-            if (showEvent && (trackChanged || force) && info.IsPlaying)
+            if (showEvent && (trackChanged || force) && info.IsPlaying && !_disposed)
             {
                 _bus.Raise(BarEvent.Create(BarEventKind.Media, info.Title,
                     info.Artist, payload: info,
@@ -395,6 +603,7 @@ public sealed class MediaService : IDisposable
     private void Emit(MediaInfo info)
     {
         _lastEmitted = info;
+        if (_disposed) return;
         MediaChanged?.Invoke(info);
     }
 
@@ -420,44 +629,286 @@ public sealed class MediaService : IDisposable
     private static void MediaTrace(string evt, params (string Key, object? Value)[] props) =>
         Log.Info("[media-trace] " + evt, props);
 
+    internal static readonly TimeSpan ArtworkTimeout = TimeSpan.FromSeconds(2.5);
+
     private static async Task<byte[]?> TryGetArtworkAsync(GlobalSystemMediaTransportControlsSessionMediaProperties props)
     {
+        return await TryGetArtworkAsync(props.Thumbnail, ArtworkTimeout);
+    }
+
+    /// <summary>
+    /// Tracks actual WinRT <see cref="Windows.Foundation.IAsyncOperation{TResult}"/> lifecycle and completion,
+    /// decoupling timeout and cancellation from resource disposal.
+    /// In WinRT, calling <see cref="Windows.Foundation.IAsyncInfo.Cancel"/> is an advisory request;
+    /// the underlying operation continues executing until its <see cref="Windows.Foundation.IAsyncOperation{TResult}.Completed"/>
+    /// handler is invoked. Resources (such as streams and readers) must never be disposed while
+    /// an operation is still in-flight.
+    /// </summary>
+    private sealed class WinRtAsyncTracker<TResult>
+    {
+        private const int StatePending = 0;
+        private const int StatePrompt = 1;
+        private const int StateTimedOut = 2;
+
+        private int _state = StatePending;
+        private readonly TaskCompletionSource<TResult> _tcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task<TResult> Task => _tcs.Task;
+
+        public WinRtAsyncTracker(
+            Windows.Foundation.IAsyncOperation<TResult> op,
+            Action<TResult>? onLateSuccess,
+            Action? onTerminalCleanup)
+        {
+            try
+            {
+                op.Completed = (info, status) =>
+                {
+                    try
+                    {
+                        if (status == Windows.Foundation.AsyncStatus.Completed)
+                        {
+                            TResult? result = default;
+                            try { result = info.GetResults(); }
+                            catch (Exception ex)
+                            {
+                                if (Interlocked.CompareExchange(ref _state, StatePrompt, StatePending) == StatePending)
+                                {
+                                    _tcs.TrySetException(ex);
+                                }
+                                onTerminalCleanup?.Invoke();
+                                return;
+                            }
+
+                            if (Interlocked.CompareExchange(ref _state, StatePrompt, StatePending) == StatePending)
+                            {
+                                _tcs.TrySetResult(result!);
+                            }
+                            else
+                            {
+                                // Operation finished after timeout expired.
+                                // The caller has already returned; safely dispose/clean up late resources now that
+                                // the native operation has actually completed.
+                                if (result is not null && onLateSuccess is not null)
+                                {
+                                    try { onLateSuccess(result); } catch { }
+                                }
+                                onTerminalCleanup?.Invoke();
+                            }
+                        }
+                        else if (status == Windows.Foundation.AsyncStatus.Canceled)
+                        {
+                            if (Interlocked.CompareExchange(ref _state, StatePrompt, StatePending) == StatePending)
+                            {
+                                _tcs.TrySetCanceled();
+                            }
+                            else
+                            {
+                                onTerminalCleanup?.Invoke();
+                            }
+                        }
+                        else // AsyncStatus.Error
+                        {
+                            Exception? ex = null;
+                            try { ex = info.ErrorCode; } catch { }
+                            ex ??= new Exception("WinRT async operation failed");
+
+                            if (Interlocked.CompareExchange(ref _state, StatePrompt, StatePending) == StatePending)
+                            {
+                                _tcs.TrySetException(ex);
+                            }
+                            else
+                            {
+                                onTerminalCleanup?.Invoke();
+                            }
+                        }
+                    }
+                    catch
+                    {
+                        onTerminalCleanup?.Invoke();
+                    }
+                };
+            }
+            catch (Exception ex)
+            {
+                _tcs.TrySetException(ex);
+            }
+        }
+
+        public bool MarkTimedOut() => Interlocked.CompareExchange(ref _state, StateTimedOut, StatePending) == StatePending;
+    }
+
+    internal static async Task<byte[]?> TryGetArtworkAsync(IRandomAccessStreamReference? thumb, TimeSpan timeout)
+    {
+        if (thumb is null || timeout <= TimeSpan.Zero) return null;
+
+        var sw = Stopwatch.StartNew();
+
+        Windows.Foundation.IAsyncOperation<IRandomAccessStreamWithContentType> openOp;
         try
         {
-            var thumb = props.Thumbnail;
-            if (thumb is null) return null;
-            using var stream = await thumb.OpenReadAsync();
-            using var reader = new DataReader(stream);
-            uint len = await reader.LoadAsync(16u * 1024 * 1024);
+            openOp = thumb.OpenReadAsync();
+        }
+        catch (Exception ex)
+        {
+            Log.Debug("Failed to initiate thumbnail open", ("error", ex.Message));
+            return null;
+        }
+
+        var openTracker = new WinRtAsyncTracker<IRandomAccessStreamWithContentType>(
+            openOp,
+            onLateSuccess: lateStream =>
+            {
+                try { lateStream.Dispose(); } catch { }
+            },
+            onTerminalCleanup: null);
+
+        var completedOpen = await Task.WhenAny(openTracker.Task, Task.Delay(timeout));
+        if (completedOpen != openTracker.Task)
+        {
+            if (openTracker.MarkTimedOut())
+            {
+                // OpenReadAsync remained pending beyond the deadline.
+                // Request cancellation on the WinRT operation, but do NOT dispose any late stream
+                // until openOp actually reaches a terminal state (handled in openTracker.onLateSuccess).
+                try { openOp.Cancel(); } catch { }
+                Log.Debug("Artwork open timed out");
+                return null;
+            }
+        }
+
+        IRandomAccessStreamWithContentType? stream;
+        try
+        {
+            stream = await openTracker.Task;
+        }
+        catch (OperationCanceledException)
+        {
+            return null;
+        }
+        catch (Exception ex)
+        {
+            Log.Debug("Artwork open failed", ("error", ex.Message));
+            return null;
+        }
+
+        if (stream is null) return null;
+
+        TimeSpan remaining = timeout - sw.Elapsed;
+        if (remaining <= TimeSpan.Zero)
+        {
+            try { stream.Dispose(); } catch { }
+            return null;
+        }
+
+        DataReader? reader = null;
+        try
+        {
+            reader = new DataReader(stream);
+            Windows.Foundation.IAsyncOperation<uint> loadOp;
+            if (LoadOperationProviderForTesting is not null)
+            {
+                loadOp = LoadOperationProviderForTesting(reader, stream, 16u * 1024 * 1024);
+            }
+            else
+            {
+                loadOp = reader.LoadAsync(16u * 1024 * 1024);
+            }
+
+            var loadTracker = new WinRtAsyncTracker<uint>(
+                loadOp,
+                onLateSuccess: null,
+                onTerminalCleanup: () =>
+                {
+                    try { reader.Dispose(); } catch { }
+                    try { stream.Dispose(); } catch { }
+                });
+
+            var completedLoad = await Task.WhenAny(loadTracker.Task, Task.Delay(remaining));
+            if (completedLoad != loadTracker.Task)
+            {
+                if (loadTracker.MarkTimedOut())
+                {
+                    // LoadAsync remained pending beyond the deadline.
+                    // Request cancellation on the WinRT operation, but DO NOT dispose reader or stream here.
+                    // Disposal will occur deferred via loadTracker's onTerminalCleanup once the underlying
+                    // WinRT operation actually reaches a terminal state.
+                    // Note: If the underlying native driver hangs permanently and never signals completion,
+                    // reader and stream intentionally remain alive to avoid use-after-free memory corruption
+                    // crashes in the native COM apartment.
+                    try { loadOp.Cancel(); } catch { }
+                    Log.Debug("Artwork load timed out");
+                    return null;
+                }
+            }
+
+            uint len;
+            try
+            {
+                len = await loadTracker.Task;
+            }
+            catch (OperationCanceledException)
+            {
+                reader.Dispose();
+                stream.Dispose();
+                return null;
+            }
+            catch (Exception ex)
+            {
+                Log.Debug("Artwork load failed", ("error", ex.Message));
+                reader.Dispose();
+                stream.Dispose();
+                return null;
+            }
+
+            if (len == 0)
+            {
+                reader.Dispose();
+                stream.Dispose();
+                return null;
+            }
+
             var bytes = new byte[len];
             reader.ReadBytes(bytes);
+            reader.Dispose();
+            stream.Dispose();
             return bytes.Length > 0 ? bytes : null;
         }
-        catch { return null; }
+        catch (Exception ex)
+        {
+            Log.Debug("Artwork load setup failed", ("error", ex.Message));
+            reader?.Dispose();
+            stream.Dispose();
+            return null;
+        }
     }
 
     // ---- transport controls ----
 
     public async Task PlayPauseAsync()
     {
+        if (_disposed) return;
         try { if (_current is not null) await _current.TryTogglePlayPauseAsync(); }
         catch (Exception ex) { Log.Debug("PlayPause", ("error", ex.Message)); }
     }
 
     public async Task NextAsync()
     {
+        if (_disposed) return;
         try { if (_current is not null) await _current.TrySkipNextAsync(); }
         catch (Exception ex) { Log.Debug("Next", ("error", ex.Message)); }
     }
 
     public async Task PreviousAsync()
     {
+        if (_disposed) return;
         try { if (_current is not null) await _current.TrySkipPreviousAsync(); }
         catch (Exception ex) { Log.Debug("Prev", ("error", ex.Message)); }
     }
 
     public async Task SeekAsync(double fraction)
     {
+        if (_disposed) return;
         try
         {
             if (_current is null) return;
@@ -472,6 +923,7 @@ public sealed class MediaService : IDisposable
 
     public async Task SeekToTimeAsync(TimeSpan position)
     {
+        if (_disposed) return;
         try
         {
             if (_current is null) return;
@@ -484,8 +936,43 @@ public sealed class MediaService : IDisposable
 
     public void Dispose()
     {
-        Stop();
+        CancellationTokenSource? ctsToCancel;
+        GlobalSystemMediaTransportControlsSessionManager? mgr;
+        lock (_lifecycleLock)
+        {
+            if (_disposed) return;
+            _disposed = true;
+            _started = false;
+            _startGeneration++;
+            ctsToCancel = _startCts;
+            _startCts = null;
+            _startTask = null;
+            mgr = _manager;
+            _manager = null;
+
+            if (mgr is not null)
+            {
+                try
+                {
+                    mgr.SessionsChanged -= OnSessionsChanged;
+                    mgr.CurrentSessionChanged -= OnCurrentSessionChanged;
+                    _managerSubscribed = false;
+                    OnManagerUnsubscribedForTesting?.Invoke();
+                }
+                catch (Exception ex)
+                {
+                    Log.Debug("Error unhooking SMTC manager", ("error", ex.Message));
+                }
+            }
+
+            HookSession(null, immediate: true, suppressEvent: true);
+        }
+
+        ctsToCancel?.Cancel();
+        ctsToCancel?.Dispose();
+
         _timelineTimer?.Dispose();
+        _timelineTimer = null;
     }
 }
 
@@ -506,7 +993,7 @@ internal sealed class DispatcherTimerRef : IDisposable
                 System.Windows.Threading.DispatcherPriority.Background,
                 async (s, e) =>
                 {
-                    if (_callback is null) return;
+                    if (_disposed || _callback is null) return;
                     try { await _callback(); } catch { }
                 },
                 System.Windows.Application.Current?.Dispatcher ?? System.Windows.Threading.Dispatcher.CurrentDispatcher);

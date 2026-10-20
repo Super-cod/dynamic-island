@@ -14,7 +14,7 @@ public static class SharedHttp
     })
     {
         Timeout = Timeout.InfiniteTimeSpan,
-        DefaultRequestHeaders = { { "User-Agent", "WindowsDynamicBar" } },
+        DefaultRequestHeaders = { { "User-Agent", "WindowsDynamicBar/1.1 (https://github.com/dynamic-bar)" } },
     };
 
     /// <summary>A token that cancels after <paramref name="timeout"/> or when <paramref name="outer"/> does.</summary>

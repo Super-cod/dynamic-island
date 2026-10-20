@@ -102,7 +102,7 @@ public sealed class BuddyEventReactionRouter : IDisposable
             if (!_stormDizzyPlayed)
             {
                 _stormDizzyPlayed = true;
-                _stormQuietUntil = now.AddSeconds(1.0);
+                _stormQuietUntil = now.AddSeconds(15.0);
                 _controller.Behavior.TriggerEvent(
                     3,
                     BuddyAnimationState.Dizzy,

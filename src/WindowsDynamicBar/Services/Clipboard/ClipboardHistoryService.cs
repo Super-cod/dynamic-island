@@ -8,6 +8,7 @@ using WindowsDynamicBar.Core.Clipboard;
 using WindowsDynamicBar.Core.Logging;
 using WindowsDynamicBar.Core.Settings;
 using WindowsDynamicBar.Interop;
+using WindowsDynamicBar.Services.Settings;
 
 namespace WindowsDynamicBar.Services.Clipboard;
 
@@ -29,10 +30,10 @@ public sealed class ClipboardHistoryService : IDisposable
     private const uint CF_DIBV5 = 17;
     private const int ThumbSize = 96;
 
-    private static readonly uint FmtExclude = RegisterClipboardFormat("ExcludeClipboardContentFromMonitorProcessing");
-    private static readonly uint FmtCanInclude = RegisterClipboardFormat("CanIncludeInClipboardHistory");
-    private static readonly uint FmtViewerIgnore = RegisterClipboardFormat("Clipboard Viewer Ignore");
-    private static readonly uint FmtPng = RegisterClipboardFormat("PNG");
+    private static readonly uint FmtExclude = NativeMethods.RegisterClipboardFormat("ExcludeClipboardContentFromMonitorProcessing");
+    private static readonly uint FmtCanInclude = NativeMethods.RegisterClipboardFormat("CanIncludeInClipboardHistory");
+    private static readonly uint FmtViewerIgnore = NativeMethods.RegisterClipboardFormat("Clipboard Viewer Ignore");
+    private static readonly uint FmtPng = NativeMethods.RegisterClipboardFormat("PNG");
 
     private readonly SettingsService _settings;
     private readonly ClipboardHistory _history = new();
@@ -117,7 +118,7 @@ public sealed class ClipboardHistoryService : IDisposable
 
     private void Capture()
     {
-        if (!OpenClipboard(_hwnd))
+        if (!NativeMethods.OpenClipboard(_hwnd))
         {
             // Another app still holds the clipboard: try again once the dispatcher is idle (no sleeps).
             if (++_retries <= 3) _dispatcher.BeginInvoke(DispatcherPriority.Background, Capture);
@@ -132,7 +133,7 @@ public sealed class ClipboardHistoryService : IDisposable
             if (owner is not null && IsIgnoredApp(owner)) return;
             raw = ReadRaw();
         }
-        finally { CloseClipboard(); }
+        finally { NativeMethods.CloseClipboard(); }
 
         if (raw is null) return;
         var token = _cts.Token;
@@ -141,16 +142,16 @@ public sealed class ClipboardHistoryService : IDisposable
 
     private static bool IsSensitive()
     {
-        if (FmtExclude != 0 && IsClipboardFormatAvailable(FmtExclude)) return true;
-        if (FmtViewerIgnore != 0 && IsClipboardFormatAvailable(FmtViewerIgnore)) return true;
-        if (FmtCanInclude != 0 && IsClipboardFormatAvailable(FmtCanInclude))
+        if (FmtExclude != 0 && NativeMethods.IsClipboardFormatAvailable(FmtExclude)) return true;
+        if (FmtViewerIgnore != 0 && NativeMethods.IsClipboardFormatAvailable(FmtViewerIgnore)) return true;
+        if (FmtCanInclude != 0 && NativeMethods.IsClipboardFormatAvailable(FmtCanInclude))
         {
-            IntPtr h = GetClipboardData(FmtCanInclude);
+            IntPtr h = NativeMethods.GetClipboardData(FmtCanInclude);
             if (h != IntPtr.Zero)
             {
-                IntPtr p = GlobalLock(h);
-                try { if (p != IntPtr.Zero && GlobalSize(h) >= 4 && Marshal.ReadInt32(p) == 0) return true; }
-                finally { if (p != IntPtr.Zero) GlobalUnlock(h); }
+                IntPtr p = NativeMethods.GlobalLock(h);
+                try { if (p != IntPtr.Zero && (long)NativeMethods.GlobalSize(h) >= 4 && Marshal.ReadInt32(p) == 0) return true; }
+                finally { if (p != IntPtr.Zero) NativeMethods.GlobalUnlock(h); }
             }
         }
         return false;
@@ -158,9 +159,9 @@ public sealed class ClipboardHistoryService : IDisposable
 
     private static string? OwnerProcessName()
     {
-        IntPtr owner = GetClipboardOwner();
+        IntPtr owner = NativeMethods.GetClipboardOwner();
         if (owner == IntPtr.Zero) return null;
-        GetWindowThreadProcessId(owner, out uint pid);
+        NativeMethods.GetWindowThreadProcessId(owner, out uint pid);
         if (pid == 0) return null;
         try
         {
@@ -187,41 +188,41 @@ public sealed class ClipboardHistoryService : IDisposable
     /// <summary>Files first, then text, then image (Office text copies also carry pictures).</summary>
     private static RawClip? ReadRaw()
     {
-        if (IsClipboardFormatAvailable(CF_HDROP))
+        if (NativeMethods.IsClipboardFormatAvailable(CF_HDROP))
         {
-            IntPtr h = GetClipboardData(CF_HDROP);
+            IntPtr h = NativeMethods.GetClipboardData(CF_HDROP);
             if (h != IntPtr.Zero)
             {
-                uint n = DragQueryFile(h, 0xFFFFFFFF, null, 0);
+                uint n = NativeMethods.DragQueryFile(h, 0xFFFFFFFF, null, 0);
                 var files = new List<string>();
                 for (uint i = 0; i < n && i < 500; i++)
                 {
-                    uint len = DragQueryFile(h, i, null, 0);
+                    uint len = NativeMethods.DragQueryFile(h, i, null, 0);
                     var sb = new StringBuilder((int)len + 1);
-                    DragQueryFile(h, i, sb, (uint)sb.Capacity);
+                    NativeMethods.DragQueryFile(h, i, sb, (uint)sb.Capacity);
                     files.Add(sb.ToString());
                 }
                 if (files.Count > 0) return new RawClip(ClipKind.Files, null, files.ToArray(), null, null);
             }
         }
-        if (IsClipboardFormatAvailable(CF_UNICODETEXT))
+        if (NativeMethods.IsClipboardFormatAvailable(CF_UNICODETEXT))
         {
-            string? text = ReadGlobalString(GetClipboardData(CF_UNICODETEXT));
+            string? text = ReadGlobalString(NativeMethods.GetClipboardData(CF_UNICODETEXT));
             if (!string.IsNullOrWhiteSpace(text))
             {
                 if (Encoding.UTF8.GetByteCount(text) > ClipboardHistory.MaxTextBytes) return null;   // too large: not kept
                 return new RawClip(ClipboardHistory.IsLink(text) ? ClipKind.Link : ClipKind.Text, text, null, null, null);
             }
         }
-        if (FmtPng != 0 && IsClipboardFormatAvailable(FmtPng))
+        if (FmtPng != 0 && NativeMethods.IsClipboardFormatAvailable(FmtPng))
         {
-            byte[]? png = ReadGlobalBytes(GetClipboardData(FmtPng));
+            byte[]? png = ReadGlobalBytes(NativeMethods.GetClipboardData(FmtPng));
             if (png is { Length: > 0 }) return new RawClip(ClipKind.Image, null, null, png, null);
         }
-        uint dibFmt = IsClipboardFormatAvailable(CF_DIBV5) ? CF_DIBV5 : IsClipboardFormatAvailable(CF_DIB) ? CF_DIB : 0;
+        uint dibFmt = NativeMethods.IsClipboardFormatAvailable(CF_DIBV5) ? CF_DIBV5 : NativeMethods.IsClipboardFormatAvailable(CF_DIB) ? CF_DIB : 0;
         if (dibFmt != 0)
         {
-            byte[]? dib = ReadGlobalBytes(GetClipboardData(dibFmt));
+            byte[]? dib = ReadGlobalBytes(NativeMethods.GetClipboardData(dibFmt));
             if (dib is { Length: > 40 }) return new RawClip(ClipKind.Image, null, null, null, dib);
         }
         return null;
@@ -493,24 +494,24 @@ public sealed class ClipboardHistoryService : IDisposable
     private static string? ReadGlobalString(IntPtr h)
     {
         if (h == IntPtr.Zero) return null;
-        IntPtr p = GlobalLock(h);
+        IntPtr p = NativeMethods.GlobalLock(h);
         if (p == IntPtr.Zero) return null;
         try
         {
-            int maxChars = (int)Math.Min(int.MaxValue / 2, (long)GlobalSize(h) / 2);
+            int maxChars = (int)Math.Min(int.MaxValue / 2, (long)NativeMethods.GlobalSize(h) / 2);
             string s = Marshal.PtrToStringUni(p, Math.Max(0, maxChars));
             int nul = s.IndexOf('\0');
             return nul >= 0 ? s[..nul] : s;
         }
-        finally { GlobalUnlock(h); }
+        finally { NativeMethods.GlobalUnlock(h); }
     }
 
     private static byte[]? ReadGlobalBytes(IntPtr h)
     {
         if (h == IntPtr.Zero) return null;
-        long size = (long)GlobalSize(h);
+        long size = (long)NativeMethods.GlobalSize(h);
         if (size <= 0 || size > 256L * 1024 * 1024) return null;
-        IntPtr p = GlobalLock(h);
+        IntPtr p = NativeMethods.GlobalLock(h);
         if (p == IntPtr.Zero) return null;
         try
         {
@@ -518,21 +519,8 @@ public sealed class ClipboardHistoryService : IDisposable
             Marshal.Copy(p, bytes, 0, (int)size);
             return bytes;
         }
-        finally { GlobalUnlock(h); }
+        finally { NativeMethods.GlobalUnlock(h); }
     }
-
-    [DllImport("user32.dll", SetLastError = true)] private static extern bool OpenClipboard(IntPtr hWndNewOwner);
-    [DllImport("user32.dll")] private static extern bool CloseClipboard();
-    [DllImport("user32.dll")] private static extern bool IsClipboardFormatAvailable(uint format);
-    [DllImport("user32.dll")] private static extern IntPtr GetClipboardData(uint format);
-    [DllImport("user32.dll")] private static extern IntPtr GetClipboardOwner();
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern uint RegisterClipboardFormat(string name);
-    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
-    [DllImport("kernel32.dll")] private static extern IntPtr GlobalLock(IntPtr h);
-    [DllImport("kernel32.dll")] private static extern bool GlobalUnlock(IntPtr h);
-    [DllImport("kernel32.dll")] private static extern UIntPtr GlobalSize(IntPtr h);
-    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
-    private static extern uint DragQueryFile(IntPtr hDrop, uint iFile, StringBuilder? lpszFile, uint cch);
 }
 
 /// <summary>Raised when DPAPI cannot protect/unprotect (e.g. a file from another user).</summary>
@@ -551,9 +539,9 @@ internal static class Dpapi
 
     private static byte[] Transform(byte[] input, bool protect)
     {
-        var inBlob = new DATA_BLOB();
-        var entropy = new DATA_BLOB();
-        var outBlob = new DATA_BLOB();
+        var inBlob = new NativeMethods.DATA_BLOB();
+        var entropy = new NativeMethods.DATA_BLOB();
+        var outBlob = new NativeMethods.DATA_BLOB();
         var hIn = GCHandle.Alloc(input, GCHandleType.Pinned);
         var hEnt = GCHandle.Alloc(Entropy, GCHandleType.Pinned);
         try
@@ -562,8 +550,8 @@ internal static class Dpapi
             entropy.cbData = Entropy.Length; entropy.pbData = hEnt.AddrOfPinnedObject();
             const int CRYPTPROTECT_UI_FORBIDDEN = 0x1;
             bool ok = protect
-                ? CryptProtectData(ref inBlob, null, ref entropy, IntPtr.Zero, IntPtr.Zero, CRYPTPROTECT_UI_FORBIDDEN, ref outBlob)
-                : CryptUnprotectData(ref inBlob, IntPtr.Zero, ref entropy, IntPtr.Zero, IntPtr.Zero, CRYPTPROTECT_UI_FORBIDDEN, ref outBlob);
+                ? NativeMethods.CryptProtectData(ref inBlob, null, ref entropy, IntPtr.Zero, IntPtr.Zero, CRYPTPROTECT_UI_FORBIDDEN, ref outBlob)
+                : NativeMethods.CryptUnprotectData(ref inBlob, IntPtr.Zero, ref entropy, IntPtr.Zero, IntPtr.Zero, CRYPTPROTECT_UI_FORBIDDEN, ref outBlob);
             if (!ok) throw new CryptographicFailure($"DPAPI error {Marshal.GetLastWin32Error()}");
             var result = new byte[outBlob.cbData];
             Marshal.Copy(outBlob.pbData, result, 0, outBlob.cbData);
@@ -573,20 +561,7 @@ internal static class Dpapi
         {
             hIn.Free();
             hEnt.Free();
-            if (outBlob.pbData != IntPtr.Zero) LocalFree(outBlob.pbData);
+            if (outBlob.pbData != IntPtr.Zero) NativeMethods.LocalFree(outBlob.pbData);
         }
     }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct DATA_BLOB { public int cbData; public IntPtr pbData; }
-
-    [DllImport("crypt32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern bool CryptProtectData(ref DATA_BLOB pDataIn, string? szDataDescr, ref DATA_BLOB pOptionalEntropy,
-        IntPtr pvReserved, IntPtr pPromptStruct, int dwFlags, ref DATA_BLOB pDataOut);
-
-    [DllImport("crypt32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern bool CryptUnprotectData(ref DATA_BLOB pDataIn, IntPtr ppszDataDescr, ref DATA_BLOB pOptionalEntropy,
-        IntPtr pvReserved, IntPtr pPromptStruct, int dwFlags, ref DATA_BLOB pDataOut);
-
-    [DllImport("kernel32.dll")] private static extern IntPtr LocalFree(IntPtr hMem);
 }

@@ -9,6 +9,7 @@ using WindowsDynamicBar.Services.Clipboard;
 using WindowsDynamicBar.Services.Media;
 using WindowsDynamicBar.Services.Notifications;
 using WindowsDynamicBar.Services.Privacy;
+using WindowsDynamicBar.Services.Settings;
 using WindowsDynamicBar.Services.SystemInfo;
 using WindowsDynamicBar.Services.SystemMonitor;
 using WindowsDynamicBar.Services.Timers;

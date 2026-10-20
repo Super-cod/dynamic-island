@@ -9,6 +9,7 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using Microsoft.Win32;
 using WindowsDynamicBar.Core.Logging;
+using WindowsDynamicBar.Interop;
 
 namespace WindowsDynamicBar.Core.Media;
 
@@ -161,7 +162,7 @@ public static class AppIconHelper
         {
             string parsingName = @"shell:AppsFolder\" + aumid;
             var guid = typeof(IShellItemImageFactory).GUID;
-            int hr = SHCreateItemFromParsingName(parsingName, IntPtr.Zero, guid, out object factoryObj);
+            int hr = NativeMethods.SHCreateItemFromParsingName(parsingName, IntPtr.Zero, guid, out object factoryObj);
             if (hr != 0 || factoryObj is not IShellItemImageFactory factory) return null;
 
             try
@@ -181,7 +182,7 @@ public static class AppIconHelper
                 }
                 finally
                 {
-                    DeleteObject(hBitmap);
+                    NativeMethods.DeleteObject(hBitmap);
                 }
             }
             finally
@@ -398,20 +399,9 @@ public static class AppIconHelper
         }
         finally
         {
-            DeleteObject(hBmp);
+            NativeMethods.DeleteObject(hBmp);
         }
     }
-
-    [DllImport("gdi32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool DeleteObject(IntPtr hObject);
-
-    [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
-    private static extern int SHCreateItemFromParsingName(
-        [MarshalAs(UnmanagedType.LPWStr)] string pszPath,
-        IntPtr pbc,
-        [MarshalAs(UnmanagedType.LPStruct)] Guid riid,
-        [MarshalAs(UnmanagedType.Interface)] out object ppv);
 
     private const int SIIGBF_RESIZETOFIT = 0x00000000;
     private const int SIIGBF_ICONONLY = 0x00000004;

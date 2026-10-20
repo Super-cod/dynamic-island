@@ -2,6 +2,7 @@
 using System.Linq;
 using WindowsDynamicBar.Core.Logging;
 using WindowsDynamicBar.Core.Telemetry;
+using WindowsDynamicBar.Services.SystemInfo;
 
 namespace WindowsDynamicBar.UI;
 
@@ -47,7 +48,7 @@ public partial class BarWindow
                     _battSim = a.ElementAtOrDefault(1) is { } v && v != "off"
                         ? (double.Parse(v, System.Globalization.CultureInfo.InvariantCulture), a.ElementAtOrDefault(2) == "ac")
                         : null;
-                    OnBatteryChanged();
+                    ApplyBatteryInfo(App.Battery?.Current ?? new BatteryInfo(0, false, false, null, false));
                     break;
                 case "focus": OnIdleFocusClick(this, new System.Windows.RoutedEventArgs()); break;
                 case "search-enter":

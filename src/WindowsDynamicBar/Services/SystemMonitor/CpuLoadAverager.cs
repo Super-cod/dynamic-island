@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using WindowsDynamicBar.Core.Telemetry;
+using WindowsDynamicBar.Interop;
 
 namespace WindowsDynamicBar.Services.SystemMonitor;
 
@@ -30,7 +31,7 @@ internal sealed class CpuLoadAverager : IDisposable
 
     private void Sample()
     {
-        if (!GetSystemTimes(out long idle, out long kernel, out long user)) return;
+        if (!NativeMethods.GetSystemTimes(out long idle, out long kernel, out long user)) return;
         ulong total = (ulong)kernel + (ulong)user;   // kernel time includes idle time
         lock (_sync)
         {
@@ -54,7 +55,4 @@ internal sealed class CpuLoadAverager : IDisposable
             _timer = null;
         }
     }
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool GetSystemTimes(out long idleTime, out long kernelTime, out long userTime);
 }

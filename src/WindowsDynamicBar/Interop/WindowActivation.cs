@@ -15,36 +15,36 @@ internal static class WindowActivation
 
     public static bool BringToFront(IntPtr hwnd)
     {
-        if (hwnd == IntPtr.Zero || !IsWindow(hwnd)) return false;
-        if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
-        else ShowWindow(hwnd, SW_SHOW);
+        if (hwnd == IntPtr.Zero || !NativeMethods.IsWindow(hwnd)) return false;
+        if (NativeMethods.IsIconic(hwnd)) NativeMethods.ShowWindow(hwnd, SW_RESTORE);
+        else NativeMethods.ShowWindow(hwnd, SW_SHOW);
 
-        IntPtr fg = GetForegroundWindow();
+        IntPtr fg = NativeMethods.GetForegroundWindow();
         if (fg == hwnd) return true;
 
-        uint self = GetCurrentThreadId();
-        uint fgThread = GetWindowThreadProcessId(fg, out _);
-        uint target = GetWindowThreadProcessId(hwnd, out _);
-        bool attachedFg = fgThread != 0 && fgThread != self && AttachThreadInput(self, fgThread, true);
-        bool attachedTarget = target != 0 && target != self && target != fgThread && AttachThreadInput(self, target, true);
+        uint self = NativeMethods.GetCurrentThreadId();
+        uint fgThread = NativeMethods.GetWindowThreadProcessId(fg, out _);
+        uint target = NativeMethods.GetWindowThreadProcessId(hwnd, out _);
+        bool attachedFg = fgThread != 0 && fgThread != self && NativeMethods.AttachThreadInput(self, fgThread, true);
+        bool attachedTarget = target != 0 && target != self && target != fgThread && NativeMethods.AttachThreadInput(self, target, true);
         try
         {
-            BringWindowToTop(hwnd);
-            SetForegroundWindow(hwnd);
+            NativeMethods.BringWindowToTop(hwnd);
+            NativeMethods.SetForegroundWindow(hwnd);
         }
         finally
         {
-            if (attachedTarget) AttachThreadInput(self, target, false);
-            if (attachedFg) AttachThreadInput(self, fgThread, false);
+            if (attachedTarget) NativeMethods.AttachThreadInput(self, target, false);
+            if (attachedFg) NativeMethods.AttachThreadInput(self, fgThread, false);
         }
 
-        if (GetForegroundWindow() != hwnd)
+        if (NativeMethods.GetForegroundWindow() != hwnd)
         {
             // Alt down/up counts as user input and lifts the foreground lock for this process.
             SendKeys(new[] { (VK_MENU, false), (VK_MENU, true) });
-            SetForegroundWindow(hwnd);
+            NativeMethods.SetForegroundWindow(hwnd);
         }
-        return GetForegroundWindow() == hwnd;
+        return NativeMethods.GetForegroundWindow() == hwnd;
     }
 
     /// <summary>Ctrl+V into whatever window has the keyboard focus.</summary>
@@ -56,40 +56,13 @@ internal static class WindowActivation
 
     private static void SendKeys((ushort Vk, bool Up)[] keys)
     {
-        var inputs = new INPUT[keys.Length];
+        var inputs = new NativeMethods.INPUT[keys.Length];
         for (int i = 0; i < keys.Length; i++)
         {
             inputs[i].type = 1; // INPUT_KEYBOARD
             inputs[i].U.ki.wVk = keys[i].Vk;
             inputs[i].U.ki.dwFlags = keys[i].Up ? 0x0002u : 0u; // KEYEVENTF_KEYUP
         }
-        SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<INPUT>());
+        NativeMethods.SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<NativeMethods.INPUT>());
     }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct INPUT { public uint type; public InputUnion U; }
-
-    [StructLayout(LayoutKind.Explicit)]
-    private struct InputUnion
-    {
-        [FieldOffset(0)] public MOUSEINPUT mi;
-        [FieldOffset(0)] public KEYBDINPUT ki;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct KEYBDINPUT { public ushort wVk; public ushort wScan; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct MOUSEINPUT { public int dx; public int dy; public uint mouseData; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }
-
-    [DllImport("user32.dll")] private static extern uint SendInput(uint n, INPUT[] inputs, int size);
-    [DllImport("user32.dll")] private static extern bool IsWindow(IntPtr hWnd);
-    [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr hWnd);
-    [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr hWnd, int cmd);
-    [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
-    [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr hWnd);
-    [DllImport("user32.dll")] private static extern bool BringWindowToTop(IntPtr hWnd);
-    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
-    [DllImport("user32.dll")] private static extern bool AttachThreadInput(uint attach, uint to, bool fAttach);
-    [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
 }

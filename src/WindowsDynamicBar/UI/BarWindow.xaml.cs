@@ -371,6 +371,7 @@ public partial class BarWindow : Window, IDisposable
             {
                 Dispatcher.InvokeAsync(() =>
                 {
+                    if (_disposed) return;
                     HoverEq.SetSpectrum(bands);
                     _buddyController?.SetAudioSpectrum(bands);
                 });
@@ -409,6 +410,7 @@ public partial class BarWindow : Window, IDisposable
                 App.Bus.EventRaised += OnBusEvent;
                 App.Bus.Idle += OnBusIdle;
             }
+            if (App.Battery is not null) App.Battery.BatteryChanged += OnBatteryChanged;
             if (App.Media is not null)
             {
                 App.Media.MediaChanged += OnMediaChanged;
@@ -434,6 +436,7 @@ public partial class BarWindow : Window, IDisposable
                 App.Bus.EventRaised -= OnBusEvent;
                 App.Bus.Idle -= OnBusIdle;
             }
+            if (App.Battery is not null) App.Battery.BatteryChanged -= OnBatteryChanged;
             if (App.Media is not null) App.Media.MediaChanged -= OnMediaChanged;
             if (App.Timer is not null) App.Timer.TimerChanged -= OnTimerChanged;
             if (App.Stopwatch is not null) App.Stopwatch.StopwatchChanged -= OnStopwatchChanged;
@@ -465,7 +468,7 @@ public partial class BarWindow : Window, IDisposable
 
         RegisterHotkeys();
         try { App.Clipboard?.Attach(_hwnd); } catch { }
-        StartBatteryNotifications();
+        InitializeBatteryState();
 
         Reposition();
         RefreshBlur();
@@ -492,6 +495,7 @@ public partial class BarWindow : Window, IDisposable
         IconRow.MetricUnhovered -= OnIconMetricUnhovered;
         IconRow.MetricClicked -= OnIconMetricClicked;
         IconRow.PageChanged -= OnIconPageChanged;
+        DetailPanelComponent.GpuCycleRequested -= OnGpuCycleRequested;
         TogglesPanelComponent.ToggleRequested -= OnToggleRequested;
         if (_hookedToggles is not null) _hookedToggles.Changed -= OnTogglesChanged;
         App.ServiceToggled -= OnServiceToggled;
@@ -501,6 +505,12 @@ public partial class BarWindow : Window, IDisposable
         TimerPanelComponent.StopRequested -= OnTimerStopRequested;
         TimerPanelComponent.PauseRequested -= OnTimerPauseRequested;
         TimerPanelComponent.ResumeRequested -= OnTimerResumeRequested;
+        NetPanelComponent.TestToggleRequested -= OnNetTestToggle;
+        try { NetPanelComponent.Stop(); } catch { }
+        MirrorPanelComponent.CameraStateChanged -= OnMirrorCameraStateChanged;
+        VolumeHudBar.Scrub -= OnVolumeHudScrub;
+        TeardownSearch();
+        try { _displayChangeDebounceTimer?.Stop(); } catch { }
         try { _collapseDelay.Stop(); } catch { }
         try { _hoverCheckTimer.Stop(); } catch { }
         try { _clockTimer.Stop(); } catch { }
@@ -525,7 +535,6 @@ public partial class BarWindow : Window, IDisposable
             for (int id = 1; id <= 5; id++) NativeMethods.UnregisterHotKey(_hwnd, id);
         }
         catch { }
-        StopBatteryNotifications();
         try { _src?.RemoveHook(WndProc); } catch { }
         try { BlurHelper.Detach(); } catch { }
     }
@@ -605,10 +614,6 @@ public partial class BarWindow : Window, IDisposable
                     OnSecondTick();
                     Reposition();
                 });
-                break;
-
-            case NativeMethods.WM_POWERBROADCAST when IsBatteryBroadcast(wParam):
-                Dispatcher.BeginInvoke(OnBatteryChanged);
                 break;
 
             case NativeMethods.WM_DISPLAYCHANGE:
@@ -1017,6 +1022,7 @@ public partial class BarWindow : Window, IDisposable
 
     private void ApplyTelemetry(TelemetrySnapshot snap)
     {
+        if (_disposed) return;
         _telemetry = snap;
         if (_islandState == IslandVisualState.Detail)
         {
@@ -1663,7 +1669,7 @@ public partial class BarWindow : Window, IDisposable
 
     private void UpdateVolumeControls()
     {
-        if (App.Volume is null) return;
+        if (_disposed || App.Volume is null) return;
         _syncingHoverVol = true;
         try
         {
@@ -2135,6 +2141,7 @@ public partial class BarWindow : Window, IDisposable
         {
             Dispatcher.BeginInvoke(() =>
             {
+                if (_disposed) return;
                 if (IslandExpandedHost.Visibility != Visibility.Visible) return;
                 UpdateClipRing();
                 if (_islandState == IslandVisualState.Detail && _activeMetric == IslandMetric.Clipboard) RenderClipboard();
@@ -2240,6 +2247,7 @@ public partial class BarWindow : Window, IDisposable
         {
             Dispatcher.BeginInvoke(() =>
             {
+                if (_disposed) return;
                 if (IslandExpandedHost.Visibility != Visibility.Visible) return;
                 UpdateTogglesRing();
                 if (_islandState == IslandVisualState.Detail && _activeMetric == IslandMetric.Toggles) RenderToggles();
@@ -2328,7 +2336,10 @@ public partial class BarWindow : Window, IDisposable
         {
             Dispatcher.BeginInvoke(() =>
             {
-                var testState = _netMonitor?.TestState;
+                if (_disposed) return;
+                var net = _netMonitor;
+                if (net is null) return;
+                var testState = net.TestState;
                 if (testState is not null)
                 {
                     if (testState.Phase == NetTestPhase.Done && _lastNetTestPhase != NetTestPhase.Done)
@@ -2339,8 +2350,8 @@ public partial class BarWindow : Window, IDisposable
                 }
                 if (IslandExpandedHost.Visibility != Visibility.Visible) return;
                 UpdateNetIcon();
-                if (_islandState == IslandVisualState.Detail && _activeMetric == IslandMetric.Net && _netMonitor is not null)
-                    NetPanelComponent.Render(_netMonitor);
+                if (_islandState == IslandVisualState.Detail && _activeMetric == IslandMetric.Net)
+                    NetPanelComponent.Render(net);
             });
         }
         catch { }
@@ -2377,10 +2388,14 @@ public partial class BarWindow : Window, IDisposable
         {
             Dispatcher.BeginInvoke(() =>
             {
-                OnBuddyWeatherUpdated(_weather?.Snapshot);
+                if (_disposed) return;
+                var weather = _weather;
+                if (weather is null) return;
+                var snapshot = weather.Snapshot;
+                OnBuddyWeatherUpdated(snapshot);
                 if (IslandExpandedHost.Visibility == Visibility.Visible) UpdateWeatherIcon();
-                if (_islandState == IslandVisualState.Detail && _activeMetric == IslandMetric.Weather && _weather is not null)
-                    WeatherPanelComponent.Render(_weather.Snapshot);
+                if (_islandState == IslandVisualState.Detail && _activeMetric == IslandMetric.Weather)
+                    WeatherPanelComponent.Render(snapshot);
             });
         }
         catch { }
@@ -2685,6 +2700,7 @@ public partial class BarWindow : Window, IDisposable
 
     private void OnBusEvent(BarEvent evt)
     {
+        if (_disposed) return;
         try
         {
             if (evt.Kind == BarEventKind.Screenshot)
@@ -2797,6 +2813,7 @@ public partial class BarWindow : Window, IDisposable
 
     private void OnBusIdle()
     {
+        if (_disposed) return;
         _shown = null;
         VolumeHudGlow.Visibility = Visibility.Collapsed;
         VolumeHudGlowStop.Color = Colors.Transparent;
@@ -2808,10 +2825,11 @@ public partial class BarWindow : Window, IDisposable
     {
         if (!Dispatcher.CheckAccess())
         {
-            Dispatcher.BeginInvoke(() => OnMediaChanged(info));
+            try { Dispatcher.BeginInvoke(() => OnMediaChanged(info)); } catch (TaskCanceledException) { }
             return;
         }
 
+        if (_disposed) return;
         _lastMedia = info;
         OnBuddyMediaUpdated(info);
         ApplyLayoutMode();
@@ -2835,6 +2853,14 @@ public partial class BarWindow : Window, IDisposable
 
     private void OnTimerChanged(TimerInfo info)
     {
+        if (!Dispatcher.CheckAccess())
+        {
+            try { Dispatcher.BeginInvoke(() => OnTimerChanged(info)); }
+            catch (TaskCanceledException) { /* dispatcher shutting down */ }
+            return;
+        }
+
+        if (_disposed) return;
         var prev = _lastTimer;
         _lastTimer = info;
         long second = (long)Math.Ceiling(info.Remaining.TotalSeconds);
@@ -2842,8 +2868,7 @@ public partial class BarWindow : Window, IDisposable
         if (second != _timerUiSecond || info.State != prev?.State)
         {
             _timerUiSecond = info.State == TimerState.Running ? second : -1;
-            try { Dispatcher.BeginInvoke(() => OnTimerUi(info, finishedNow)); }
-            catch (TaskCanceledException) { /* dispatcher shutting down */ }
+            OnTimerUi(info, finishedNow);
         }
         RerenderCurrent(BarEventKind.Timer, () => BarEvent.Create(BarEventKind.Timer,
             info.Label, TimerService.Format(info.Remaining), value: info.Progress,
@@ -2853,8 +2878,16 @@ public partial class BarWindow : Window, IDisposable
 
     private void OnStopwatchChanged(StopwatchInfo info)
     {
+        if (!Dispatcher.CheckAccess())
+        {
+            try { Dispatcher.BeginInvoke(() => OnStopwatchChanged(info)); }
+            catch (TaskCanceledException) { }
+            return;
+        }
+
+        if (_disposed) return;
         _lastStopwatch = info;
-        try { Dispatcher.BeginInvoke(() => { if (_islandState == IslandVisualState.Collapsed || !_expanded) UpdateCollapsed(); }); } catch { }
+        if (_islandState == IslandVisualState.Collapsed || !_expanded) UpdateCollapsed();
         RerenderCurrent(BarEventKind.Stopwatch, () => BarEvent.Create(
             BarEventKind.Stopwatch, "Stopwatch", StopwatchService.FormatMs(info.Elapsed),
             valueText: StopwatchService.FormatMs(info.Elapsed), payload: info, priority: 60,
@@ -2863,8 +2896,16 @@ public partial class BarWindow : Window, IDisposable
 
     private void OnFocusChanged(FocusInfo info)
     {
+        if (!Dispatcher.CheckAccess())
+        {
+            try { Dispatcher.BeginInvoke(() => OnFocusChanged(info)); }
+            catch (TaskCanceledException) { }
+            return;
+        }
+
+        if (_disposed) return;
         _lastFocus = info;
-        try { Dispatcher.BeginInvoke(() => OnFocusUi(info)); } catch { }
+        OnFocusUi(info);
         RerenderCurrent(BarEventKind.Focus, () => BarEvent.Create(BarEventKind.Focus,
             "Focus", info.Phase, valueText: TimerService.Format(info.Remaining),
             payload: info, priority: 70, displayDuration: TimeSpan.FromSeconds(4)));
@@ -2873,13 +2914,9 @@ public partial class BarWindow : Window, IDisposable
     /// <summary>Re-render the visible widget from a fresh local state (never expands).</summary>
     private void RerenderCurrent(BarEventKind kind, Func<BarEvent> make)
     {
-        if (!_expanded || _shown?.Kind != kind) return;
-        Dispatcher.BeginInvoke(() =>
-        {
-            if (!_expanded || _shown?.Kind != kind) return;
-            _shown = make();
-            RenderEvent(_shown);
-        });
+        if (_disposed || !_expanded || _shown?.Kind != kind) return;
+        _shown = make();
+        RenderEvent(_shown);
     }
 
     private void OnStatsChanged(SystemStats s)
@@ -3576,7 +3613,12 @@ public partial class BarWindow : Window, IDisposable
     {
         bool charging = false;
         string? remaining = null;
-        if (evt.Payload is BatteryInfo b) { charging = b.Charging; remaining = b.TimeRemaining; }
+        if (evt.Payload is BatteryInfo b)
+        {
+            charging = b.Charging;
+            remaining = b.TimeRemaining;
+            ApplyBatteryInfo(b);
+        }
         HeaderGlyph.Text = charging ? IcBatteryCharging : IcBattery;
         HeaderText.Text = string.IsNullOrEmpty(evt.Title) ? "Battery" : evt.Title;
         HeaderSub.Text = evt.Subtitle ?? (charging ? "Charging" : "On battery");

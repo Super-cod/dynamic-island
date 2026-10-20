@@ -8,6 +8,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using WindowsDynamicBar.Core.Logging;
+using WindowsDynamicBar.Core.Net;
 
 namespace WindowsDynamicBar.Services.Media;
 
@@ -15,16 +16,6 @@ public sealed record LrcLine(TimeSpan Timestamp, string Text);
 
 public sealed class LrcLibClient : IDisposable
 {
-    private static readonly HttpClient _http = new()
-    {
-        Timeout = TimeSpan.FromSeconds(5)
-    };
-
-    static LrcLibClient()
-    {
-        _http.DefaultRequestHeaders.Add("User-Agent", "WindowsDynamicBar/1.1 (https://github.com/dynamic-bar)");
-    }
-
     private readonly ConcurrentDictionary<string, List<LrcLine>> _memoryCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly string _cacheFilePath;
     private readonly object _diskLock = new();
@@ -52,10 +43,11 @@ public sealed class LrcLibClient : IDisposable
             int durSec = (int)Math.Round(duration.TotalSeconds);
             string url = $"https://lrclib.net/api/get?artist_name={Uri.EscapeDataString(artist)}&track_name={Uri.EscapeDataString(title)}&duration={durSec}";
 
-            using var resp = await _http.GetAsync(url, ct).ConfigureAwait(false);
+            using var timeoutCts = SharedHttp.Deadline(TimeSpan.FromSeconds(5), ct);
+            using var resp = await SharedHttp.Client.GetAsync(url, timeoutCts.Token).ConfigureAwait(false);
             if (!resp.IsSuccessStatusCode) return null;
 
-            string json = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+            string json = await resp.Content.ReadAsStringAsync(timeoutCts.Token).ConfigureAwait(false);
             using var doc = JsonDocument.Parse(json);
             if (!doc.RootElement.TryGetProperty("syncedLyrics", out var syncedElem)) return null;
 

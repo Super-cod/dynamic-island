@@ -787,6 +787,7 @@ public partial class BarWindow
         {
             Dispatcher.BeginInvoke(() =>
             {
+                if (_disposed) return;
                 SearchTrace("window list refreshed", ("text", SearchInput.Text));
                 if (_islandState == IslandVisualState.Search && _activeTag is null && !string.IsNullOrWhiteSpace(SearchInput.Text))
                     UpdateSearchResults(SearchInput.Text);
@@ -802,6 +803,7 @@ public partial class BarWindow
         {
             Dispatcher.BeginInvoke(() =>
             {
+                if (_disposed) return;
                 SearchTrace("app index loaded", ("apps", AppDiscoveryService.Instance.GetApps().Count));
                 if (_islandState == IslandVisualState.Search && _activeTag is null && !string.IsNullOrWhiteSpace(SearchInput.Text))
                     UpdateSearchResults(SearchInput.Text);
@@ -1146,5 +1148,13 @@ public partial class BarWindow
     {
         _actionSuccessTimer?.Stop();
         UpdateCollapsed();
+    }
+
+    private void TeardownSearch()
+    {
+        AppDiscoveryService.Instance.Loaded -= OnAppsLoaded;
+        _searchMorph.Completed -= OnSearchMorphCompleted;
+        _searchMorph.Dispose();
+        _actionSuccessTimer?.Stop();
     }
 }
